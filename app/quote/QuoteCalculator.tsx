@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { calculateQuoteAction } from "@/app/actions/quote";
-import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
+import type { PackageQuote, StayRequest, PropertyCode} from "@/lib/pricing/types";
 import QuoteCopyView from "./QuoteCopyView";
 
 // 預設今日與明日日期
@@ -16,8 +16,7 @@ const getTomorrowStr = () => {
 
 export default function QuoteCalculator() {
   // 表單狀態
-  const [propertyCode, setPropertyCode] = useState("zhici");
-  const [checkIn, setCheckIn] = useState(getTodayStr());
+  const [propertyCode, setPropertyCode] = useState<PropertyCode>("zhici");  const [checkIn, setCheckIn] = useState(getTodayStr());
   const [checkOut, setCheckOut] = useState(getTomorrowStr());
   const [adults, setAdults] = useState(10);
   const [children, setChildren] = useState(0);
@@ -82,12 +81,12 @@ export default function QuoteCalculator() {
           </label>
           <select
             value={propertyCode}
-            onChange={(e) => setPropertyCode(e.target.value)}
+            onChange={(e) => setPropertyCode(e.target.value as PropertyCode)}
             style={inputStyle}
           >
-            <option value="zhici">只此清綠 (zhici)</option>
-            <option value="moyin">墨隱私廚 Villa (moyin)</option>
-            <option value="waterviewputi">水見菩提 (waterviewputi)</option>
+            <option value="zhici">只此清綠 (Turquoise)</option>
+            <option value="moyin">陌隱 (Hermit)</option>
+            <option value="waterviewputi">水景璞堤防 (Waterscape)</option>
           </select>
         </div>
 
