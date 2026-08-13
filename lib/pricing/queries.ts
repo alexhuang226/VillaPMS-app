@@ -9,6 +9,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import type {
+  DayType,
   FlatServicePrices,
   NightlyRateTable,
   PropertyCode,
@@ -18,7 +19,7 @@ import type { HolidayCategory, HolidayMap } from "./day-type";
 
 /** 依 property code 取得 property_id（可自行加上快取層） */
 export async function getPropertyId(propertyCode: PropertyCode): Promise<string> {
-  const supabase = createClient();
+  const supabase = await createClient();
   const { data, error } = await supabase
     .from("properties")
     .select("id")
@@ -42,7 +43,7 @@ export async function getNightlyRateTable(
   propertyId: string,
   priceCategory: "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve"
 ): Promise<NightlyRateTable> {
-  const supabase = createClient();
+  const supabase = await createClient();
   const dbDayType = priceCategory === "regular" ? "weekday" : priceCategory;
 
   const { data, error } = await supabase
@@ -94,7 +95,7 @@ export async function getNightlyRateTable(
 
 /** 取得某民宿的固定加購服務價格（加床／加房／寵物清潔／烤肉／餐車／提前入住／訪客） */
 export async function getFlatServicePrices(propertyId: string): Promise<FlatServicePrices> {
-  const supabase = createClient();
+  const supabase = await createClient();
   const { data, error } = await supabase
     .from("services")
     .select("code, default_price")
@@ -128,7 +129,7 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
  * 但仍一併回傳方便前端顯示或做人數上限校驗。
  */
 export async function getPropertyRoomCounts(propertyId: string): Promise<PropertyRoomCounts> {
-  const supabase = createClient();
+  const supabase = await createClient();
 
   const [{ data: roomRows, error: roomError }, { data: propRow, error: propError }] =
     await Promise.all([
@@ -166,11 +167,46 @@ export async function getPropertyRoomCounts(propertyId: string): Promise<Propert
 }
 
 /**
+ * 取得該民宿各 day_type 的「包棟基本人數」（rate_rules.base_guests）。
+ * 對應原始 Excel 的「平日/旺日/節假日包棟基本人數」欄位——假日/節日/
+ * 春節/跨年 4 個分類在匯入時共用同一個「節假日基本人數」值。
+ * 用於報價前檢查：入住人數不足基本人數時不允許產生報價。
+ */
+export async function getBaseGuestsByDayType(
+  propertyId: string
+): Promise<Record<DayType, number>> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("rate_rules")
+    .select("day_type, base_guests, rate_plans!inner(property_id)")
+    .eq("rate_plans.property_id", propertyId);
+
+  if (error) {
+    throw new Error(`查詢包棟基本人數失敗：${error.message}`);
+  }
+
+  const result: Record<DayType, number> = {
+    weekday: 0,
+    peak: 0,
+    holiday: 0,
+    festival: 0,
+    lunar_new_year: 0,
+    new_year_eve: 0,
+  };
+
+  for (const row of data ?? []) {
+    result[row.day_type as DayType] = Number(row.base_guests);
+  }
+
+  return result;
+}
+
+/**
  * 取得節日清單對照表（holidays 表），組織自訂清單優先於全平台共用清單。
  * @param organizationId 若為 null，只取全平台共用清單（organization_id is null）
  */
 export async function getHolidayMap(organizationId: string | null): Promise<HolidayMap> {
-  const supabase = createClient();
+  const supabase = await createClient();
   let query = supabase.from("holidays").select("holiday_date, day_type");
 
   query = organizationId

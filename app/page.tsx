@@ -1,35 +1,37 @@
-import { createClient } from '@/lib/supabase/server'
-import { allocateMonthlyRevenue } from '@/lib/pricing/monthly-revenue'
+import { calculateQuoteAction } from '@/app/actions/quote'
 
-export default async function HomePage() {
-  const supabase = await createClient()
+export default async function QuotePage() {
+  let quoteData = null
+  let errorMessage = ''
 
-  // 1. 從 Supabase 撈取您的資料表 (請將 'quotes' 替換為您 Supabase 的真實資料表名稱)
-  const { data: quotes, error } = await supabase.from('quotes').select('*')
+  try {
+    // ✅ 修正點：將結果直接賦值給外層宣告的 quoteData，而不是 const quote
+    quoteData = await calculateQuoteAction({
+      propertyCode: "zhici", // 知池
+      checkIn: "2026-08-14",
+      checkOut: "2026-08-16",
+      adults: 12,
+      children: 2,
+      pets: 1,
+      extraBedFixedQty: 1,
+      addOns: { bbq: true },
+    });
+  } catch (error: any) {
+    errorMessage = error?.message || '讀取報價時發生錯誤'
+  }
 
-   if (error) {
-     return (
-       <div style={{ padding: '20px', color: 'red' }}>
-         資料讀取失敗：{error.message}
-       </div>
-     )
-   }
+  return (
+    <main style={{ padding: '40px', fontFamily: 'sans-serif' }}>
+      <h1>PMS 報價系統 (Quote)</h1>
 
-  // 2. 將 Supabase 的資料帶入算價邏輯
-  const revenueData = quotes ? allocateMonthlyRevenue(quotes as any) : null
-
-return (
-  <main style={{ padding: '40px', fontFamily: 'sans-serif' }}>
-    <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px' }}>
-      Villa PMS 營收報表（即時連線 Supabase）
-    </h1>
-
-    <div style={{ marginTop: '20px', padding: '15px', background: '#f5f5f5', borderRadius: '8px' }}>
-      <h2 style={{ fontSize: '18px', fontWeight: 'bold' }}>計算結果輸出：</h2>
-      <pre style={{ background: '#222', color: '#00ff00', padding: '15px', borderRadius: '5px', overflowX: 'auto', marginTop: '10px' }}>
-        {JSON.stringify(revenueData, null, 2)}
-      </pre>
-    </div>
-  </main>
-)
+      {errorMessage ? (
+        <div style={{ color: 'red', marginTop: '20px' }}>{errorMessage}</div>
+      ) : (
+        <pre style={{ background: '#222', color: '#00ff00', padding: '15px', borderRadius: '8px', marginTop: '20px' }}>
+          {/* 這裡才能順利讀到上方存入的 quoteData */}
+          {JSON.stringify(quoteData, null, 2)}
+        </pre>
+      )}
+    </main>
+  )
 }

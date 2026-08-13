@@ -115,5 +115,11 @@ export interface PackageQuote {
   packageTotal: number; // 包棟總費用
   deposit: number; // 訂金
   balanceDue: number; // 尾款（包棟總費用 - 訂金）
-  capacityWarning: string | null; // 床位數不夠時的警告訊息
+  capacityWarning: string | null; // 床位數不夠時的警告訊息（人數超過房間容納上限）
+  /**
+   * 入住人數低於包棟基本人數時的警告訊息（人數不足下限）。
+   * 只要不是 null，就代表「不允許產生報價」，packageTotal/deposit
+   * 會被強制歸零，呼叫端應該阻擋報價/訂房建立流程並顯示這則訊息。
+   */
+  minimumGuestsWarning: string | null;
 }

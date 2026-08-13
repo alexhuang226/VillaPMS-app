@@ -7,15 +7,19 @@
  *              + [額外服務費用] + [訪客費用] - [優惠折扣]
  * [訂金]        = FLOOR([包棟總費用] * 0.3 / 1000) * 1000
  *
+ * 另外加入業主補充的規則：入住人數低於「包棟基本人數」時不允許產生
+ * 報價（minimumGuestsWarning）。
+ *
  * 這裡刻意寫成「不碰資料庫」的純函式：所有價格資料（NightlyRateTable /
- * FlatServicePrices / PropertyRoomCounts / HolidayMap）都由呼叫端先用
- * queries.ts 撈好再傳進來，方便單元測試與未來替換資料來源。
+ * FlatServicePrices / PropertyRoomCounts / HolidayMap / 基本人數）都由
+ * 呼叫端先用 queries.ts 撈好再傳進來，方便單元測試與未來替換資料來源。
  */
 
 import { allocateDoublePlainRoom, allocateFourPersonRooms } from "./property-room-allocation";
-import { listStayDates, resolveDayType, toPriceCategory } from "./day-type";
-import type { HolidayMap } from "./day-type";
+import { buildEffectiveDayTypeMap, listStayDates, resolveDayType, toPriceCategory } from "./day-type";
+import type { EffectiveDayTypeMap, HolidayMap } from "./day-type";
 import type {
+  DayType,
   FlatServicePrices,
   NightlyBreakdownItem,
   NightlyRateTable,
@@ -84,9 +88,9 @@ export function calculateVisitorFee(visitorQty: number, prices: FlatServicePrice
 }
 
 /**
- * 床位數檢查：
+ * 床位數檢查（上限）：
  * (大人+小孩) > 4*四人套房數量 + 2*(獨立雙人套房+獨立雙人雅房+四人套房降規數量+加固定床+加臨時床)
- * 成立時代表床位不足。
+ * 成立時代表床位不足，人數超過可容納上限。
  */
 export function checkCapacity(params: {
   totalGuests: number;
@@ -120,6 +124,42 @@ export function checkCapacity(params: {
 }
 
 /**
+ * 包棟基本人數檢查（下限）：
+ * 逐晚比對該晚 day_type 對應的基本人數，只要有任何一晚人數不足，
+ * 就視為不符合包棟基本人數，不允許產生報價。
+ */
+export function checkMinimumGuests(params: {
+  totalGuests: number;
+  nightlyDayTypes: DayType[];
+  baseGuestsByDayType: Record<DayType, number>;
+}): string | null {
+  const { totalGuests, nightlyDayTypes, baseGuestsByDayType } = params;
+
+  const dayTypeLabel: Record<DayType, string> = {
+    weekday: "平日",
+    peak: "旺日",
+    holiday: "假日",
+    festival: "節日",
+    lunar_new_year: "春節",
+    new_year_eve: "跨年",
+  };
+
+  // 同一種 day_type 只需要提醒一次，取這次入住期間出現過的所有 day_type
+  const distinctDayTypes = Array.from(new Set(nightlyDayTypes));
+  const shortfalls = distinctDayTypes
+    .map((dayType) => ({ dayType, required: baseGuestsByDayType[dayType] ?? 0 }))
+    .filter(({ required }) => required > 0 && totalGuests < required);
+
+  if (shortfalls.length === 0) return null;
+
+  const detail = shortfalls
+    .map(({ dayType, required }) => `${dayTypeLabel[dayType]}需滿 ${required} 人`)
+    .join("、");
+
+  return `包棟基本人數不足：目前 ${totalGuests} 人，${detail}`;
+}
+
+/**
  * 計算每日住宿費用明細。
  * 房型分配（四人套房全開／降規／雙人套房／雙人雅房數量）在整個訂房期間
  * 是固定的（只依總人數決定一次），每晚只有「價格類別」不同，
@@ -131,7 +171,7 @@ export function calculateNightlyBreakdown(params: {
   checkOut: string;
   totalGuests: number;
   doubleSuiteFixedCount: number; // 該民宿獨立雙人套房實際房間數（陌隱/水景璞堤用）
-  holidayMap: HolidayMap;
+  effectiveDayTypeMap: EffectiveDayTypeMap;
   rateTableByCategory: Record<PriceCategory, NightlyRateTable>;
 }): NightlyBreakdownItem[] {
   const {
@@ -140,7 +180,7 @@ export function calculateNightlyBreakdown(params: {
     checkOut,
     totalGuests,
     doubleSuiteFixedCount,
-    holidayMap,
+    effectiveDayTypeMap,
     rateTableByCategory,
   } = params;
 
@@ -152,7 +192,7 @@ export function calculateNightlyBreakdown(params: {
   const doubleSuiteCount = doubleSuiteFixedCount;
 
   return listStayDates(checkIn, checkOut).map((date) => {
-    const dayType = resolveDayType(date, holidayMap);
+    const dayType = resolveDayType(date, effectiveDayTypeMap);
     const priceCategory = toPriceCategory(dayType);
     const rates = rateTableByCategory[priceCategory];
 
@@ -179,17 +219,29 @@ export function calculateNightlyBreakdown(params: {
  * 組出完整的包棟總費用報價（含加購項目與訂金）。
  * 這是給 server action 呼叫的主入口：所有資料庫查詢結果都在呼叫端
  * 準備好之後傳進來，本函式本身不做任何 I/O。
+ *
+ * 若 capacityWarning 或 minimumGuestsWarning 任一不為 null，
+ * packageTotal / deposit / balanceDue 會被強制歸零，代表「不允許產生
+ * 報價」，呼叫端（server action）應該擋下後續的建立報價/訂房流程。
  */
 export function calculatePackageQuote(params: {
   request: StayRequest;
   roomCounts: PropertyRoomCounts;
   servicePrices: FlatServicePrices;
   holidayMap: HolidayMap;
+  baseGuestsByDayType: Record<DayType, number>;
   rateTableByCategory: Record<PriceCategory, NightlyRateTable>;
   depositOptions?: { rate?: number; roundingUnit?: number };
 }): PackageQuote {
-  const { request, roomCounts, servicePrices, holidayMap, rateTableByCategory, depositOptions } =
-    params;
+  const {
+    request,
+    roomCounts,
+    servicePrices,
+    holidayMap,
+    baseGuestsByDayType,
+    rateTableByCategory,
+    depositOptions,
+  } = params;
 
   const totalGuests = request.adults + request.children;
   const extraBedFixedQty = request.extraBedFixedQty ?? 0;
@@ -215,17 +267,27 @@ export function calculatePackageQuote(params: {
     extraBedTempQty,
   });
 
+  const effectiveDayTypeMap = buildEffectiveDayTypeMap(holidayMap);
+
   const nightlyBreakdown = calculateNightlyBreakdown({
     propertyCode: request.propertyCode,
     checkIn: request.checkIn,
     checkOut: request.checkOut,
     totalGuests,
     doubleSuiteFixedCount: roomCounts.doubleSuiteCount,
-    holidayMap,
+    effectiveDayTypeMap,
     rateTableByCategory,
   });
 
-  const accommodationTotal = capacityWarning
+  const minimumGuestsWarning = checkMinimumGuests({
+    totalGuests,
+    nightlyDayTypes: nightlyBreakdown.map((n) => n.dayType),
+    baseGuestsByDayType,
+  });
+
+  const blocked = Boolean(capacityWarning || minimumGuestsWarning);
+
+  const accommodationTotal = blocked
     ? 0
     : nightlyBreakdown.reduce((sum, night) => sum + night.amount, 0);
 
@@ -235,16 +297,17 @@ export function calculatePackageQuote(params: {
   const addOnFee = calculateAddOnFee(request.addOns, servicePrices);
   const visitorFee = calculateVisitorFee(visitorQty, servicePrices);
 
-  const packageTotal =
-    accommodationTotal +
-    extraBedFee +
-    extraRoomFee +
-    petCleaningFee +
-    addOnFee +
-    visitorFee -
-    discountAmount;
+  const packageTotal = blocked
+    ? 0
+    : accommodationTotal +
+      extraBedFee +
+      extraRoomFee +
+      petCleaningFee +
+      addOnFee +
+      visitorFee -
+      discountAmount;
 
-  const deposit = calculateDeposit(packageTotal, depositOptions);
+  const deposit = blocked ? 0 : calculateDeposit(packageTotal, depositOptions);
 
   return {
     request,
@@ -261,5 +324,6 @@ export function calculatePackageQuote(params: {
     deposit,
     balanceDue: packageTotal - deposit,
     capacityWarning,
+    minimumGuestsWarning,
   };
 }

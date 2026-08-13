@@ -22,6 +22,7 @@
 
 import { calculatePackageQuote } from "@/lib/pricing/calculate-package-total";
 import {
+  getBaseGuestsByDayType,
   getFlatServicePrices,
   getHolidayMap,
   getNightlyRateTable,
@@ -36,12 +37,14 @@ const PRICE_CATEGORIES = ["regular", "holiday", "festival", "lunar_new_year", "n
 export async function calculateQuoteAction(request: StayRequest): Promise<PackageQuote> {
   const propertyId = await getPropertyId(request.propertyCode);
 
-  const [roomCounts, servicePrices, holidayMap, ...rateTables] = await Promise.all([
-    getPropertyRoomCounts(propertyId),
-    getFlatServicePrices(propertyId),
-    getHolidayMap(null), // 若節日清單改成組織自訂，這裡傳 organization_id
-    ...PRICE_CATEGORIES.map((category) => getNightlyRateTable(propertyId, category)),
-  ]);
+  const [roomCounts, servicePrices, holidayMap, baseGuestsByDayType, ...rateTables] =
+    await Promise.all([
+      getPropertyRoomCounts(propertyId),
+      getFlatServicePrices(propertyId),
+      getHolidayMap(null), // 若節日清單改成組織自訂，這裡傳 organization_id
+      getBaseGuestsByDayType(propertyId),
+      ...PRICE_CATEGORIES.map((category) => getNightlyRateTable(propertyId, category)),
+    ]);
 
   const rateTableByCategory = Object.fromEntries(
     PRICE_CATEGORIES.map((category, i) => [category, rateTables[i]])
@@ -52,6 +55,7 @@ export async function calculateQuoteAction(request: StayRequest): Promise<Packag
     roomCounts,
     servicePrices,
     holidayMap,
+    baseGuestsByDayType,
     rateTableByCategory,
   });
 }
@@ -69,8 +73,11 @@ export async function saveQuoteAction(
   if (quote.capacityWarning) {
     throw new Error(quote.capacityWarning);
   }
+  if (quote.minimumGuestsWarning) {
+    throw new Error(quote.minimumGuestsWarning);
+  }
 
-  const supabase = createClient();
+  const supabase = await createClient();
   const propertyId = await getPropertyId(request.propertyCode);
 
   const { data: quoteRow, error: quoteError } = await supabase
@@ -183,7 +190,7 @@ export async function createDepositPaymentAction(params: {
   const { calculateDeposit } = await import("@/lib/pricing/calculate-package-total");
   const deposit = calculateDeposit(params.packageTotal);
 
-  const supabase = createClient();
+  const supabase = await createClient();
   const { error } = await supabase.from("payments").insert({
     reservation_id: params.reservationId,
     payment_kind: "deposit",
