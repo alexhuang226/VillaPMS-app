@@ -37,7 +37,7 @@ export default function QuoteCalculator() {
 
     try {
       const request: StayRequest = {
-        propertyCode,
+        propertyCode: propertyCode as PropertyCode,
         checkIn,
         checkOut,
         adults: Number(adults),
