@@ -86,7 +86,7 @@ export default function QuoteCalculator() {
           >
             <option value="zhici">只此清綠 (Turquoise)</option>
             <option value="moyin">陌隱 (Hermit)</option>
-            <option value="waterviewputi">水景璞堤防 (Waterscape)</option>
+            <option value="waterviewputi">水景璞堤 (Waterscape)</option>
           </select>
         </div>
 
