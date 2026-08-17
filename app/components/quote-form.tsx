@@ -1,28 +1,7 @@
 "use client";
 
-/**
- * 報價表單元件 — 意式極簡風格
- *
- * v3 修正紀錄（接續 v2 之後，寬度撐滿畫面／文字太淡的問題仍然存在）：
- *
- * 關鍵改變：顏色與「最大寬度／置中」這兩件事，全部改用 inline style
- * 直接寫在元素上，不再依賴 Tailwind 的 `bg-[#...]` / `text-[#...]` /
- * `max-w-sm` 這類 class。原因是：inline style 的 CSS 優先權
- * （specificity）比任何一般的 class 選擇器都高，不管專案的 Tailwind
- * content 掃描路徑有沒有含到這個檔案、或全域 globals.css 有沒有設定
- * 衝突的 body 文字顏色／寬度，inline style 都保證會蓋過去、正確顯示。
- * 版面用的 flex/grid/間距還是用 Tailwind class（這些沒被回報有問題，
- * 而且都是標準 utility，出問題機率低很多）。
- *
- * focus 狀態（輸入框聚焦時邊框變深綠）inline style 沒辦法直接寫
- * `:focus` 偽類，所以用一個小小的 <style> 標籤搭配專屬 class name
- * (.qf-input) 處理，一樣不依賴 Tailwind。
- *
- * 新增：報價結果算出來之後，多一個「複製報價內容」按鈕，把整段報價
- * 明細組成純文字複製到剪貼簿，方便貼到 LINE／簡訊給客人。
- */
-
-import { useState } from "react";
+import { useState, useRef } from "react";
+import { toPng } from "html-to-image";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { calculateQuoteAction } from "@/app/actions/quote";
 import type { PackageQuote, PropertyCode, RoomAllocationOverride, StayRequest } from "@/lib/pricing/types";
@@ -81,11 +60,32 @@ interface FormState {
   overrideDoublePlainCount: number;
 }
 
+/** 使用 UTC 計算，避免 toISOString 時區偏差 */
+function addOneDay(dateStr: string): string {
+  if (!dateStr) return "";
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day + 1));
+  return d.toISOString().slice(0, 10);
+}
+
+function getInitialDates() {
+  const today = new Date();
+  today.setMonth(today.getMonth() + 1);
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, "0");
+  const dd = String(today.getDate()).padStart(2, "0");
+  const checkIn = `${yyyy}-${mm}-${dd}`;
+  const checkOut = addOneDay(checkIn);
+  return { checkIn, checkOut };
+}
+
+const initialDates = getInitialDates();
+
 const initialState: FormState = {
   propertyCode: "zhici",
-  checkIn: "",
-  checkOut: "",
-  adults: 0,
+  checkIn: initialDates.checkIn,
+  checkOut: initialDates.checkOut,
+  adults: 10,
   children: 0,
   infants: 0,
   pets: 0,
@@ -107,11 +107,164 @@ const initialState: FormState = {
   overrideDoublePlainCount: 0,
 };
 
-/** 'YYYY-MM-DD' 字串加一天，回傳新的 'YYYY-MM-DD' 字串 */
-function addOneDay(dateStr: string): string {
-  const d = new Date(`${dateStr}T00:00:00`);
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().slice(0, 10);
+function getChineseWeekday(dateStr: string): string {
+  if (!dateStr) return "";
+  const days = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
+  const date = new Date(`${dateStr}T00:00:00`);
+  return days[date.getDay()] || "";
+}
+
+function formatDateWithWeekday(dateStr: string): string {
+  if (!dateStr) return "";
+  const [y, m, d] = dateStr.split("-");
+  const weekday = getChineseWeekday(dateStr);
+  return `${y}/${m}/${d} (${weekday})`;
+}
+
+function calculateNightsAndDays(checkIn: string, checkOut: string) {
+  if (!checkIn || !checkOut) return "2天1夜";
+  const d1 = new Date(`${checkIn}T00:00:00`);
+  const d2 = new Date(`${checkOut}T00:00:00`);
+  const diffTime = d2.getTime() - d1.getTime();
+  const nights = Math.max(1, Math.round(diffTime / (1000 * 3600 * 24)));
+  const days = nights + 1;
+  return `${days}天${nights}夜`;
+}
+
+function formatGuests(form: FormState): string {
+  const parts = [];
+  if (form.adults > 0) parts.push(`${form.adults}大`);
+  if (form.children > 0) parts.push(`${form.children}小`);
+  if (form.infants > 0) parts.push(`${form.infants}幼`);
+  if (form.pets > 0) parts.push(`${form.pets}寵`);
+  return parts.join(" ") || "0人";
+}
+
+/** 1. 抓取計算後的房型配置數值 */
+function formatRoomAllocation(quote: PackageQuote, form: FormState): string {
+  const alloc = (quote as any).roomAllocation || (quote as any).rooms || (quote as any).allocatedRooms;
+
+  let fourSuite = 0;
+  let fourDowngrade = 0;
+  let doubleSuite = 0;
+  let doublePlain = 0;
+
+  if (alloc) {
+    fourSuite = alloc.fourPersonSuiteCount ?? alloc.fourSuite ?? 0;
+    fourDowngrade = alloc.fourPersonDowngradeCount ?? alloc.fourDowngrade ?? 0;
+    doubleSuite = alloc.doubleSuiteCount ?? alloc.doubleSuite ?? 0;
+    doublePlain = alloc.doublePlainCount ?? alloc.doublePlain ?? 0;
+  } else if (form.useRoomOverride) {
+    fourSuite = form.overrideFourPersonSuiteCount;
+    fourDowngrade = form.overrideFourPersonDowngradeCount;
+    doubleSuite = form.overrideDoubleSuiteCount;
+    doublePlain = form.overrideDoublePlainCount;
+  } else {
+    // 預設或備用計算推算
+    fourSuite = (quote as any).fourPersonSuiteCount ?? 1;
+    fourDowngrade = (quote as any).fourPersonDowngradeCount ?? 4;
+  }
+
+  const lines: string[] = [];
+  if (fourSuite > 0) lines.push(`  └ ${fourSuite} 間四人套房`);
+  if (fourDowngrade > 0) lines.push(`  └ ${fourDowngrade} 間四人套房(提供1床，以雙人套房計費)`);
+  if (doubleSuite > 0) lines.push(`  └ ${doubleSuite} 間雙人套房`);
+  if (doublePlain > 0) lines.push(`  └ ${doublePlain} 間雙人雅房`);
+
+  return lines.length > 0 ? `• 房型配置：\n${lines.join("\n")}` : "• 房型配置：依現場安排";
+}
+
+/** 2. 根據入住日期自動判斷平日、旺日或假日資料 */
+function getDayTypeRules(checkInStr: string, quote?: PackageQuote) {
+  if (quote && (quote as any).dayTypeRule) {
+    return (quote as any).dayTypeRule;
+  }
+
+  if (!checkInStr) {
+    return {
+      label: "旺日(週五/日/假日前)",
+      minGuests: 16,
+      doublePrice: "3,000",
+      quadPrice: "5,200",
+    };
+  }
+
+  const day = new Date(`${checkInStr}T00:00:00`).getDay(); // 0: 週日, 5: 週五, 6: 週六
+
+  if (day === 6) {
+    // 週六 (假日)
+    return {
+      label: "假日(週六/國定假日)",
+      minGuests: (quote as any)?.minGuests ?? 22,
+      doublePrice: "3,800",
+      quadPrice: "6,600",
+    };
+  } else if (day === 5 || day === 0) {
+    // 週五、週日 (旺日)
+    return {
+      label: "旺日(週五/日/假日前)",
+      minGuests: (quote as any)?.minGuests ?? 16,
+      doublePrice: "3,000",
+      quadPrice: "5,200",
+    };
+  } else {
+    // 週一至週四 (平日)
+    return {
+      label: "平日(週一至週四)",
+      minGuests: (quote as any)?.minGuests ?? 10,
+      doublePrice: "3,000",
+      quadPrice: "5,200",
+    };
+  }
+}
+
+/** 產出動態格式化報價單 */
+function buildFormattedQuoteText(quote: PackageQuote, form: FormState): string {
+  const propertyName = PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label || "只此清綠";
+  const checkInFormatted = formatDateWithWeekday(form.checkIn);
+  const checkOutFormatted = formatDateWithWeekday(form.checkOut);
+  const durationStr = calculateNightsAndDays(form.checkIn, form.checkOut);
+  const guestsStr = formatGuests(form);
+  const roomAllocationStr = formatRoomAllocation(quote, form);
+  const rules = getDayTypeRules(form.checkIn, quote);
+
+  return `以下是根據您的需求，為您整理的 ${propertyName} 專屬包棟方案：
+
+🏨 【${propertyName}包棟報價單】
+━━━━━━━━━━━━━━
+📅 預訂資訊
+• 入住日期：${checkInFormatted}
+• 退房日期：${checkOutFormatted}
+• 預訂天數：${durationStr}
+• 入住人數：${guestsStr}
+${roomAllocationStr}
+━━━━━━━━━━━━━━
+💰 費用明細
+┌────────────┐
+ 💰 住宿總金額：$${quote.packageTotal.toLocaleString()} 元
+ 🔹 訂金(3成)：$${quote.deposit.toLocaleString()} 元
+ 🔥 剩餘尾款：$${quote.balanceDue.toLocaleString()} 元
+ ⏰ 請於入住前7天匯尾款。
+└────────────┘
+━━━━━━━━━━━━━━
+🏦 匯款帳號
+• 銀行：586 羅東農會
+• 分行：本會
+• 帳號：5860-11170-15325
+• 戶名：黃祥峰
+⚠️ 匯款後請告知，以便核對並保留房期！
+━━━━━━━━━━━━━━
+📝 預訂須知
+👥 包棟基本人數(未達以低消計)：
+ • ${rules.label}：${rules.minGuests} 人
+ (*3歲以下幼童不算佔床)
+🏷️ 房型訂價：
+    ▸ ${rules.label}：
+      • 雙人套房 $${rules.doublePrice} 元
+      • 四人套房 $${rules.quadPrice} 元
+🛏️ 房型調整：如需增開床位或變更房型，請再告知以方便重新報價。
+🔄 人數結算：入住前 1 週根據最終人數結算尾款。
+📌 退改政策：如需延期或取消，請於入住前 30 天通知。住宿當天因宜蘭颱風、地震等天災因素宜蘭縣政府宣佈停班時，全數退還住宿費用。`;
 }
 
 function buildStayRequest(form: FormState): StayRequest {
@@ -147,32 +300,6 @@ function buildStayRequest(form: FormState): StayRequest {
   };
 }
 
-/** 把報價結果組成一段純文字，給複製到剪貼簿使用 */
-function buildCopyText(quote: PackageQuote, propertyLabel: string): string {
-  const { request } = quote;
-  const lines: string[] = [];
-
-  lines.push(`${propertyLabel}　${request.checkIn} ～ ${request.checkOut}（${quote.nights} 晚）`);
-  lines.push(
-    `大人 ${request.adults}・小孩 ${request.children}・嬰幼兒 ${request.infants ?? 0}・寵物 ${request.pets ?? 0}`
-  );
-  lines.push("");
-  lines.push(`住宿費用　NT$ ${quote.accommodationTotal.toLocaleString()}`);
-  if (quote.extraBedFee > 0) lines.push(`加床費用　NT$ ${quote.extraBedFee.toLocaleString()}`);
-  if (quote.extraRoomFee > 0) lines.push(`加開房間　NT$ ${quote.extraRoomFee.toLocaleString()}`);
-  if (quote.petCleaningFee > 0) lines.push(`寵物清潔費　NT$ ${quote.petCleaningFee.toLocaleString()}`);
-  if (quote.addOnFee > 0) lines.push(`額外服務　NT$ ${quote.addOnFee.toLocaleString()}`);
-  if (quote.visitorFee > 0) lines.push(`訪客費用　NT$ ${quote.visitorFee.toLocaleString()}`);
-  if (quote.discountAmount > 0) lines.push(`優惠折扣　－NT$ ${quote.discountAmount.toLocaleString()}`);
-  lines.push("");
-  lines.push(`包棟總費用　NT$ ${quote.packageTotal.toLocaleString()}`);
-  lines.push(`訂金　NT$ ${quote.deposit.toLocaleString()}`);
-  lines.push(`尾款　NT$ ${quote.balanceDue.toLocaleString()}`);
-
-  return lines.join("\n");
-}
-
-/** 緊湊型數字輸入：底線樣式，label 在上方，數字置中 */
 function NumberField({
   label,
   value,
@@ -191,8 +318,13 @@ function NumberField({
         type="number"
         min={0}
         inputMode="numeric"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        value={value === 0 ? "" : value}
+        placeholder="0"
+        onFocus={(e) => e.target.select()}
+        onChange={(e) => {
+          const val = e.target.value;
+          onChange(val === "" ? 0 : Number(val));
+        }}
         className="qf-input w-full border-b bg-transparent py-1 text-center text-sm outline-none"
         style={{ borderColor: colors.line, color: colors.ink }}
       />
@@ -200,7 +332,6 @@ function NumberField({
   );
 }
 
-/** 藥丸型切換按鈕，用於單選（民宿）與複選（額外服務） */
 function PillToggle({
   label,
   active,
@@ -226,7 +357,6 @@ function PillToggle({
   );
 }
 
-/** 小型羅馬數字段落標題，做為版面的節奏標記 */
 function SectionMark({ index, title }: { index: string; title: string }) {
   return (
     <div className="mb-3 flex items-baseline gap-2">
@@ -247,20 +377,38 @@ export function QuoteForm() {
   const [warning, setWarning] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedImage, setCopiedImage] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);  
+  const quoteCardRef = useRef<HTMLDivElement>(null);
+
+/** 將 DOM 轉為 PNG Blob 物件 */
+  async function generateImageBlob(): Promise<{ blob: Blob; fileName: string } | null> {
+    if (!quoteCardRef.current) return null;
+    
+    const dataUrl = await toPng(quoteCardRef.current, {
+      cacheBust: true,
+      backgroundColor: "#FAF8F4",
+      pixelRatio: 2,
+    });
+
+    const res = await fetch(dataUrl);
+    const blob = await res.blob();
+    const propertyName = PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label || "報價單";
+    const fileName = `${propertyName}_包棟報價單_${form.checkIn}.png`;
+
+    return { blob, fileName };
+  }
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
   function handleCheckInChange(newCheckIn: string) {
-    setForm((prev) => {
-      const shouldAutoAdvance = !prev.checkOut || prev.checkOut <= newCheckIn;
-      return {
-        ...prev,
-        checkIn: newCheckIn,
-        checkOut: newCheckIn && shouldAutoAdvance ? addOneDay(newCheckIn) : prev.checkOut,
-      };
-    });
+    setForm((prev) => ({
+      ...prev,
+      checkIn: newCheckIn,
+      checkOut: newCheckIn ? addOneDay(newCheckIn) : prev.checkOut,
+    }));
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -295,9 +443,7 @@ export function QuoteForm() {
 
   async function handleCopy() {
     if (!quote) return;
-    const propertyLabel =
-      PROPERTY_OPTIONS.find((opt) => opt.value === quote.request.propertyCode)?.label ?? "";
-    const text = buildCopyText(quote, propertyLabel);
+    const text = buildFormattedQuoteText(quote, form);
 
     try {
       await navigator.clipboard.writeText(text);
@@ -308,13 +454,62 @@ export function QuoteForm() {
     }
   }
 
+  /** 方法一：複製圖片到剪貼簿（可在 LINE 貼上） */
+  async function handleCopyImage() {
+    setIsExporting(true);
+    try {
+      const imageData = await generateImageBlob();
+      if (!imageData) return;
+
+      // 使用 Web Clipboard API 寫入圖片
+      const item = new ClipboardItem({ "image/png": imageData.blob });
+      await navigator.clipboard.write([item]);
+
+      setCopiedImage(true);
+      setTimeout(() => setCopiedImage(false), 2000);
+    } catch (err) {
+      console.error("複製圖片失敗:", err);
+      setWarning("您的瀏覽器不支援直接複製圖片，請改用「分享圖片」或「複製文字」");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  /** 方法二：手機原生分享（直接傳給 LINE 好友，不存相簿） */
+  async function handleShareImage() {
+    setIsExporting(true);
+    try {
+      const imageData = await generateImageBlob();
+      if (!imageData) return;
+
+      const file = new File([imageData.blob], imageData.fileName, { type: "image/png" });
+
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: "包棟報價單",
+        });
+      } else {
+        // 不支援 Web Share 時退回到複製圖片
+        await handleCopyImage();
+      }
+    } catch (err) {
+      // 使用者取消分享不跳錯誤 Warning
+      if ((err as Error).name !== "AbortError") {
+        setWarning("分享失敗，請重試");
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  const formattedQuoteText = quote ? buildFormattedQuoteText(quote, form) : "";
+
   return (
     <div
       className={`${body.className} qf-root flex min-h-screen w-full justify-center px-5 py-8`}
       style={{ backgroundColor: colors.canvas }}
     >
-      {/* focus 狀態用 :focus 偽類處理，inline style 無法直接寫偽類，
-          用 !important 蓋過元素本身的 inline borderColor */}
       <style>{`
         .qf-root .qf-input:focus { border-color: ${colors.pine} !important; }
       `}</style>
@@ -417,12 +612,13 @@ export function QuoteForm() {
 
             <div className="mt-4 flex flex-col gap-6 border-t pt-4" style={{ borderColor: colors.line }}>
               <div className="grid grid-cols-3 gap-3">
-                <NumberField label="訪客人數" value={form.visitorQty} onChange={(v) => update("visitorQty", v)} />
                 <NumberField label="加固定床" value={form.extraBedFixedQty} onChange={(v) => update("extraBedFixedQty", v)} />
                 <NumberField label="加臨時床" value={form.extraBedTempQty} onChange={(v) => update("extraBedTempQty", v)} />
               </div>
-
-              <NumberField label="加開房間數量" value={form.extraRoomQty} onChange={(v) => update("extraRoomQty", v)} />
+              <div>
+                <NumberField label="加開房間數量" value={form.extraRoomQty} onChange={(v) => update("extraRoomQty", v)} />
+                <NumberField label="訪客人數" value={form.visitorQty} onChange={(v) => update("visitorQty", v)} />
+              </div>
 
               <NumberField label="優惠折扣金額" value={form.discountAmount} onChange={(v) => update("discountAmount", v)} />
 
@@ -512,7 +708,7 @@ export function QuoteForm() {
             className="w-full py-3 text-sm tracking-wide transition-opacity disabled:opacity-50"
             style={{ backgroundColor: colors.pine, color: colors.pineText }}
           >
-            {isLoading ? "計算中" : "立即計算報價"}
+            {isLoading ? "計算中..." : "立即計算報價"}
           </button>
         </form>
 
@@ -528,66 +724,68 @@ export function QuoteForm() {
 
         {quote && !warning && (
           <div className="mt-6 border-t pt-5" style={{ borderColor: colors.line }}>
-            <p style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-              包棟總費用
-            </p>
-            <p className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
-              NT$ {quote.packageTotal.toLocaleString()}
-            </p>
-
-            <dl className="mt-4 flex flex-col gap-1.5 text-xs" style={{ color: colors.muted }}>
-              <Row label="住宿費用" value={quote.accommodationTotal} />
-              {quote.extraBedFee > 0 && <Row label="加床費用" value={quote.extraBedFee} />}
-              {quote.extraRoomFee > 0 && <Row label="加開房間" value={quote.extraRoomFee} />}
-              {quote.petCleaningFee > 0 && <Row label="寵物清潔費" value={quote.petCleaningFee} />}
-              {quote.addOnFee > 0 && <Row label="額外服務" value={quote.addOnFee} />}
-              {quote.visitorFee > 0 && <Row label="訪客費用" value={quote.visitorFee} />}
-              {quote.discountAmount > 0 && <Row label="優惠折扣" value={-quote.discountAmount} />}
-            </dl>
-
-            <div className="mt-4 flex items-baseline justify-between border-t pt-3" style={{ borderColor: colors.line }}>
-              <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                訂金
+            <div className="mb-3 flex items-center justify-between">
+              <span style={{ color: colors.muted }} className="text-xs font-bold tracking-wide">
+                報價明細產出
               </span>
-              <span style={{ color: colors.ink }} className="text-sm">
-                NT$ {quote.deposit.toLocaleString()}
-              </span>
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="border px-3 py-1 text-xs transition-colors"
+                style={
+                  copied
+                    ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                    : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                }
+              >
+                {copied ? "已複製報價單 ✓" : "複製報價單內容"}
+              </button>
+
+              {/* 2. 複製圖片 (貼上用) */}
+              <button
+                type="button"
+                onClick={handleCopyImage}
+                disabled={isExporting}
+                className="border px-2.5 py-1 text-xs transition-colors disabled:opacity-50"
+                style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
+              >
+                {copiedImage ? "已複製圖片 ✓" : "複製圖片 📋"}
+              </button>
+
+              {/* 3. 手機直接分享 (不佔相簿空間) */}
+              <button
+                type="button"
+                onClick={handleShareImage}
+                disabled={isExporting}
+                className="border px-2.5 py-1 text-xs transition-colors disabled:opacity-50"
+                style={{ borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }}
+              >
+                {isExporting ? "處理中..." : "分享圖片 📤"}
+              </button>
             </div>
-            <div className="mt-1 flex items-baseline justify-between">
-              <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                尾款
-              </span>
-              <span style={{ color: colors.ink }} className="text-sm">
-                NT$ {quote.balanceDue.toLocaleString()}
-              </span>
-            </div>
 
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="mt-5 w-full border py-2.5 text-xs tracking-wide transition-colors"
-              style={
-                copied
-                  ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                  : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-              }
+          {/* 報價單卡片內容 */}
+          <div
+            ref={quoteCardRef}
+            className="rounded-lg p-4 border"
+            style={{
+              backgroundColor: "#FAF8F4",
+              borderColor: colors.line,
+            }}
+          >
+            <pre
+              className="w-full whitespace-pre-wrap text-xs leading-relaxed"
+              style={{
+                color: colors.ink,
+                fontFamily: "monospace",
+              }}
             >
-              {copied ? "已複製 ✓" : "複製報價內容"}
-            </button>
+              {formattedQuoteText}
+            </pre>
+          </div>
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-baseline justify-between">
-      <span>{label}</span>
-      <span>
-        {value < 0 ? "－" : ""}NT$ {Math.abs(value).toLocaleString()}
-      </span>
     </div>
   );
 }
