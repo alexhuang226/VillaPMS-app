@@ -1,26 +1,29 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* ---------------------------------------------------------------------
+ * 這裡刻意「不」設定 body 的 color / background，也不加深色模式
+ * (prefers-color-scheme: dark) 的 CSS 變數。
+ *
+ * create-next-app 的預設範本通常會在這裡放類似這樣的東西：
+ *
+ *   :root { --background: #ffffff; --foreground: #171717; }
+ *   @media (prefers-color-scheme: dark) {
+ *     :root { --background: #0a0a0a; --foreground: #ededed; }
+ *   }
+ *   body { color: var(--foreground); background: var(--background); }
+ *
+ * 如果瀏覽器/系統是深色模式，--foreground 會變成接近白色的
+ * #ededed，body 的文字顏色就會是很淡的白色——這極可能就是報價表單
+ * 文字看起來太淡的真正原因（QuoteForm 元件裡雖然用 inline style
+ * 蓋掉了大部分文字顏色，但只要有任何地方沒蓋到，就會被這個全域
+ * body 規則影響）。
+ *
+ * 民宿 PMS 目前只有這一個報價頁面，也不需要跟著系統深色模式切換，
+ * 所以乾脆不設定，讓每個頁面/元件自己決定顏色就好。
+ * --------------------------------------------------------------------- */
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  padding: 0;
 }

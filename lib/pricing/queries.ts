@@ -2,9 +2,9 @@
  * Supabase 資料查詢層
  *
  * 這裡假設專案已經有 lib/supabase/server.ts 匯出一個
- * `createClient(): SupabaseClient` 的 helper（Next.js App Router +
- * @supabase/ssr 的常見寫法）。如果你的專案路徑不同，請調整下面的
- * import path。
+ * `createClient(): Promise<SupabaseClient>` 的 async helper（Next.js
+ * App Router + @supabase/ssr 的常見寫法，因為要 await cookies()）。
+ * 如果你的專案路徑不同，請調整下面的 import path。
  */
 
 import { createClient } from "@/lib/supabase/server";

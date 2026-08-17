@@ -7,15 +7,20 @@
  *              + [額外服務費用] + [訪客費用] - [優惠折扣]
  * [訂金]        = FLOOR([包棟總費用] * 0.3 / 1000) * 1000
  *
- * 另外加入業主補充的規則：入住人數低於「包棟基本人數」時不允許產生
- * 報價（minimumGuestsWarning）。
+ * 另外加入業主補充的規則：
+ * - 入住人數低於「包棟基本人數」時不允許產生報價（minimumGuestsWarning）
+ * - 櫃檯人員可以手動覆寫房型組合（客人想加開房間、變更房型），
+ *   但不能超過該民宿實際的房間數量（roomConfigWarning）
+ * - 嬰幼兒人數（infants）不佔床位，不計入人數上下限與房型分配計算，
+ *   純粹只是記錄用途
  *
  * 這裡刻意寫成「不碰資料庫」的純函式：所有價格資料（NightlyRateTable /
  * FlatServicePrices / PropertyRoomCounts / HolidayMap / 基本人數）都由
  * 呼叫端先用 queries.ts 撈好再傳進來，方便單元測試與未來替換資料來源。
  */
 
-import { allocateDoublePlainRoom, allocateFourPersonRooms } from "./property-room-allocation";
+import { resolveRoomAllocation } from "./property-room-allocation";
+import type { RoomAllocationResult } from "./property-room-allocation";
 import { buildEffectiveDayTypeMap, listStayDates, resolveDayType, toPriceCategory } from "./day-type";
 import type { EffectiveDayTypeMap, HolidayMap } from "./day-type";
 import type {
@@ -24,7 +29,6 @@ import type {
   NightlyBreakdownItem,
   NightlyRateTable,
   PackageQuote,
-  PropertyCode,
   PropertyRoomCounts,
   StayRequest,
 } from "./types";
@@ -90,7 +94,7 @@ export function calculateVisitorFee(visitorQty: number, prices: FlatServicePrice
 /**
  * 床位數檢查（上限）：
  * (大人+小孩) > 4*四人套房數量 + 2*(獨立雙人套房+獨立雙人雅房+四人套房降規數量+加固定床+加臨時床)
- * 成立時代表床位不足，人數超過可容納上限。
+ * 成立時代表床位不足，人數超過可容納上限。嬰幼兒不佔床位，不計入。
  */
 export function checkCapacity(params: {
   totalGuests: number;
@@ -126,7 +130,7 @@ export function checkCapacity(params: {
 /**
  * 包棟基本人數檢查（下限）：
  * 逐晚比對該晚 day_type 對應的基本人數，只要有任何一晚人數不足，
- * 就視為不符合包棟基本人數，不允許產生報價。
+ * 就視為不符合包棟基本人數，不允許產生報價。嬰幼兒不計入人數。
  */
 export function checkMinimumGuests(params: {
   totalGuests: number;
@@ -162,34 +166,19 @@ export function checkMinimumGuests(params: {
 /**
  * 計算每日住宿費用明細。
  * 房型分配（四人套房全開／降規／雙人套房／雙人雅房數量）在整個訂房期間
- * 是固定的（只依總人數決定一次），每晚只有「價格類別」不同，
- * 對應原始 AppSheet 公式：房型數量固定，逐日套用不同價格欄位。
+ * 是固定的（由 resolveRoomAllocation() 算好、可能含手動覆寫），
+ * 每晚只有「價格類別」不同，對應原始 AppSheet 公式：房型數量固定，
+ * 逐日套用不同價格欄位。
  */
 export function calculateNightlyBreakdown(params: {
-  propertyCode: PropertyCode;
   checkIn: string;
   checkOut: string;
-  totalGuests: number;
-  doubleSuiteFixedCount: number; // 該民宿獨立雙人套房實際房間數（陌隱/水景璞堤用）
+  roomAllocation: RoomAllocationResult;
   effectiveDayTypeMap: EffectiveDayTypeMap;
   rateTableByCategory: Record<PriceCategory, NightlyRateTable>;
 }): NightlyBreakdownItem[] {
-  const {
-    propertyCode,
-    checkIn,
-    checkOut,
-    totalGuests,
-    doubleSuiteFixedCount,
-    effectiveDayTypeMap,
-    rateTableByCategory,
-  } = params;
-
-  const { fullPriceCount, downgradeCount } = allocateFourPersonRooms(propertyCode, totalGuests);
-  const doublePlainCount = allocateDoublePlainRoom(propertyCode, totalGuests);
-
-  // 只此清綠沒有獨立雙人套房房間，doubleSuiteFixedCount 應為 0，
-  // 「降規雙人套房」才是它的雙人房收入來源（由 downgradeCount 負責）。
-  const doubleSuiteCount = doubleSuiteFixedCount;
+  const { checkIn, checkOut, roomAllocation, effectiveDayTypeMap, rateTableByCategory } = params;
+  const { fullPriceCount, downgradeCount, doubleSuiteCount, doublePlainCount } = roomAllocation;
 
   return listStayDates(checkIn, checkOut).map((date) => {
     const dayType = resolveDayType(date, effectiveDayTypeMap);
@@ -216,13 +205,48 @@ export function calculateNightlyBreakdown(params: {
 }
 
 /**
+ * 建立「人數不足包棟基本人數」時的報價結果，完全不需要查詢房價／服務
+ * 費用等資料，供 server action 在檢查到 minimumGuestsWarning 時直接
+ * 回傳，跳過後續所有計價查詢與計算（見 app/actions/quote.ts）。
+ *
+ * 注意：這裡刻意不順便計算 capacityWarning／roomConfigWarning——沒有
+ * 真正的房間數量資料，硬塞假資料進去可能會生出誤導性的訊息。人數不足
+ * 基本人數本身就已經是「不允許產生報價」的理由，不需要再判斷其他項目。
+ */
+export function buildMinimumGuestsBlockedQuote(
+  request: StayRequest,
+  minimumGuestsWarning: string
+): PackageQuote {
+  const nights = listStayDates(request.checkIn, request.checkOut).length;
+  return {
+    request,
+    nights,
+    nightlyBreakdown: [],
+    accommodationTotal: 0,
+    extraBedFee: 0,
+    extraRoomFee: 0,
+    petCleaningFee: 0,
+    addOnFee: 0,
+    visitorFee: 0,
+    discountAmount: request.discountAmount ?? 0,
+    packageTotal: 0,
+    deposit: 0,
+    balanceDue: 0,
+    capacityWarning: null,
+    minimumGuestsWarning,
+    roomConfigWarning: null,
+  };
+}
+
+/**
  * 組出完整的包棟總費用報價（含加購項目與訂金）。
  * 這是給 server action 呼叫的主入口：所有資料庫查詢結果都在呼叫端
  * 準備好之後傳進來，本函式本身不做任何 I/O。
  *
- * 若 capacityWarning 或 minimumGuestsWarning 任一不為 null，
- * packageTotal / deposit / balanceDue 會被強制歸零，代表「不允許產生
- * 報價」，呼叫端（server action）應該擋下後續的建立報價/訂房流程。
+ * 若 capacityWarning、minimumGuestsWarning、roomConfigWarning 任一
+ * 不為 null，packageTotal / deposit / balanceDue 會被強制歸零，代表
+ * 「不允許產生報價」，呼叫端（server action）應該擋下後續的建立報價/
+ * 訂房流程。
  */
 export function calculatePackageQuote(params: {
   request: StayRequest;
@@ -243,6 +267,7 @@ export function calculatePackageQuote(params: {
     depositOptions,
   } = params;
 
+  // 嬰幼兒不佔床位、不計入人數上下限與房型分配計算，純記錄用途。
   const totalGuests = request.adults + request.children;
   const extraBedFixedQty = request.extraBedFixedQty ?? 0;
   const extraBedTempQty = request.extraBedTempQty ?? 0;
@@ -251,18 +276,19 @@ export function calculatePackageQuote(params: {
   const visitorQty = request.visitorQty ?? 0;
   const discountAmount = request.discountAmount ?? 0;
 
-  const { fullPriceCount, downgradeCount } = allocateFourPersonRooms(
+  const { allocation, warning: roomConfigWarning } = resolveRoomAllocation(
     request.propertyCode,
-    totalGuests
+    totalGuests,
+    roomCounts,
+    request.roomOverride
   );
-  const doublePlainCount = allocateDoublePlainRoom(request.propertyCode, totalGuests);
 
   const capacityWarning = checkCapacity({
     totalGuests,
-    fourPersonFullCount: fullPriceCount,
-    fourPersonDowngradeCount: downgradeCount,
-    doubleSuiteCount: roomCounts.doubleSuiteCount,
-    doublePlainCount,
+    fourPersonFullCount: allocation.fullPriceCount,
+    fourPersonDowngradeCount: allocation.downgradeCount,
+    doubleSuiteCount: allocation.doubleSuiteCount,
+    doublePlainCount: allocation.doublePlainCount,
     extraBedFixedQty,
     extraBedTempQty,
   });
@@ -270,11 +296,9 @@ export function calculatePackageQuote(params: {
   const effectiveDayTypeMap = buildEffectiveDayTypeMap(holidayMap);
 
   const nightlyBreakdown = calculateNightlyBreakdown({
-    propertyCode: request.propertyCode,
     checkIn: request.checkIn,
     checkOut: request.checkOut,
-    totalGuests,
-    doubleSuiteFixedCount: roomCounts.doubleSuiteCount,
+    roomAllocation: allocation,
     effectiveDayTypeMap,
     rateTableByCategory,
   });
@@ -285,7 +309,7 @@ export function calculatePackageQuote(params: {
     baseGuestsByDayType,
   });
 
-  const blocked = Boolean(capacityWarning || minimumGuestsWarning);
+  const blocked = Boolean(capacityWarning || minimumGuestsWarning || roomConfigWarning);
 
   const accommodationTotal = blocked
     ? 0
@@ -325,5 +349,6 @@ export function calculatePackageQuote(params: {
     balanceDue: packageTotal - deposit,
     capacityWarning,
     minimumGuestsWarning,
+    roomConfigWarning,
   };
 }

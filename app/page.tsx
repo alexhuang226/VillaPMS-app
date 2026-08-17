@@ -23,7 +23,9 @@ export default async function QuotePage() {
   return (
     <main style={{ padding: '40px', fontFamily: 'sans-serif' }}>
       <h1>PMS 報價系統 (Quote)</h1>
-
+<div className="p-4 bg-emerald-600 text-white font-bold rounded-xl shadow-lg">
+  Tailwind v4 正常運作中！
+</div>
       {errorMessage ? (
         <div style={{ color: 'red', marginTop: '20px' }}>{errorMessage}</div>
       ) : (

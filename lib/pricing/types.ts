@@ -1,7 +1,7 @@
 /**
  * 定價相關型別定義
  * 對應 Supabase schema：properties / room_types / rooms / rate_plans /
- * rate_rules / rate_rule_tiers / services
+ * rate_rules / rate_rule_tiers / services / quotes / reservations
  */
 
 /** 民宿代碼，對應 properties.code */
@@ -62,6 +62,39 @@ export interface PropertyRoomCounts {
   freePetAllowance: number;
 }
 
+/**
+ * 手動調整房型配置（櫃檯人員覆寫系統依人數自動算出的房型組合）。
+ * 任何一個欄位有填值，就代表要「取代」系統自動算出的對應數字；
+ * 沒填的欄位，還是照原本依人數計算的結果。
+ *
+ * 用途例如：
+ * - 客人指定要多開一間房（不是靠加開房間的固定費用，而是實際多算
+ *   一間房型的每晚房價）
+ * - 客人想把某間四人房降規成雙人房銷售，即使人數其實足夠住滿四人房
+ * - 陌隱/水景璞堤想手動指定要不要把獨立雙人套房/雙人雅房算進本次
+ *   包棟範圍
+ */
+export interface RoomAllocationOverride {
+  /** 四人套房（全額計價）數量 */
+  fourPersonSuiteCount?: number;
+  /** 四人套房降規為雙人套房計價的數量（僅只此清綠適用） */
+  fourPersonDowngradeCount?: number;
+  /** 獨立雙人套房數量（陌隱／水景璞堤） */
+  doubleSuiteCount?: number;
+  /** 獨立雙人雅房數量（僅陌隱） */
+  doublePlainCount?: number;
+}
+
+/** 發票資訊 */
+export interface InvoiceInfo {
+  /** 是否需要開立發票 */
+  required: boolean;
+  /** 發票抬頭（公司/個人名稱），開立三聯式發票時使用 */
+  title?: string;
+  /** 統一編號，開立三聯式發票時使用 */
+  taxId?: string;
+}
+
 /** 單一入住需求（一次報價／訂房） */
 export interface StayRequest {
   propertyCode: PropertyCode;
@@ -69,12 +102,14 @@ export interface StayRequest {
   checkOut: string; // 'YYYY-MM-DD'（不含退房日當晚）
   adults: number;
   children: number;
+  /** 嬰幼兒人數：不佔床位、不計入人數上下限與房型分配計算，僅供記錄 */
+  infants?: number;
   pets?: number;
   /** 加固定床數量 */
   extraBedFixedQty?: number;
   /** 加臨時床數量 */
   extraBedTempQty?: number;
-  /** 加開房間數量 */
+  /** 加開房間數量（固定費用，例如借用多功能廳等額外空間） */
   extraRoomQty?: number;
   /** 訪客人數 */
   visitorQty?: number;
@@ -86,6 +121,14 @@ export interface StayRequest {
   };
   /** 優惠折扣金額（直接扣除，非百分比） */
   discountAmount?: number;
+  /** 發票資訊 */
+  invoice?: InvoiceInfo;
+  /**
+   * 手動調整房型配置。有填的欄位會取代系統依人數自動算出的房型組合，
+   * 讓客人可以彈性加開房間、變更房型銷售方式。
+   * 詳見 RoomAllocationOverride 說明。
+   */
+  roomOverride?: RoomAllocationOverride;
 }
 
 /** 每晚的房型配置與計算出的住宿費用明細 */
@@ -122,4 +165,9 @@ export interface PackageQuote {
    * 會被強制歸零，呼叫端應該阻擋報價/訂房建立流程並顯示這則訊息。
    */
   minimumGuestsWarning: string | null;
+  /**
+   * 手動調整房型配置超過該民宿實際房間數量時的警告訊息。
+   * 不為 null 時同樣代表「不允許產生報價」，金額會被強制歸零。
+   */
+  roomConfigWarning: string | null;
 }

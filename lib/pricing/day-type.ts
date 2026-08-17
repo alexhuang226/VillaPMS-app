@@ -4,18 +4,18 @@
  * 業主提供的完整定義：
  * - 平日：除了節日／跨年／春節期間之外的星期一到四
  * - 旺日：星期五、星期日，以及「連續假期」的前一天與最後一天
+ * - 星期六：算「假日」價格類別（與國定假日共用同一組價格，
+ *   不是平旺日、也不是旺日，是價格更高的「假日」欄位）
  * - 節日／跨年／春節：完全依 holidays 表（節日清單）認定的日期為準，
  *   優先權最高（蓋過星期幾的判斷）
- *
- * ⚠️ 星期六目前業主沒有明確說明算平日還是旺日。星期五、日都是旺日，
- * 星期六夾在中間如果算平日會很奇怪，所以先預設「星期六比照星期五、日
- * 算旺日」，但這只是我的假設，麻煩實際確認後再讓我知道要不要調整
- * （見 isPeakDayOfWeek）。
  *
  * 「連續假期」的判定方式：把 holidays 表裡日期相鄰（前一天+1＝下一天）
  * 的紀錄視為同一個連續假期區間。只有「長度 >= 2 天」的區間，才會套用
  * 「前一天」「最後一天」旺日的規則；單獨一天的節日，就單純以該節日
- * 分類計價（沒有「最後一天」與「其餘天」的區別可言）。
+ * 分類計價（沒有「最後一天」與「其餘天」的區別可言）。這個規則只影響
+ * holidays 表裡的節日／跨年／春節區間，跟「星期六算假日」是兩條互不
+ * 干擾的規則：如果某個星期六剛好是連續假期的最後一天或前一天，
+ * 以 holidays 表驅動的旺日判斷優先。
  */
 
 import type { DayType } from "./types";
@@ -35,12 +35,16 @@ function addDaysToDateStr(dateStr: string, delta: number): string {
 }
 
 /**
- * 星期五、星期六、星期日視為旺日（星期六為假設，見檔案頂部說明），
- * 星期一到四視為平日。
+ * 星期幾的預設分類（holidays 表沒有特別覆蓋時才會用到）：
+ * - 星期五、星期日 → 旺日
+ * - 星期六 → 假日（與國定假日共用同一組較高的價格）
+ * - 星期一到四 → 平日
  */
-function isPeakDayOfWeek(dateStr: string): boolean {
+function resolveDayTypeByDayOfWeek(dateStr: string): DayType {
   const day = new Date(`${dateStr}T00:00:00Z`).getUTCDay(); // 0=日 1=一 ... 5=五 6=六
-  return day === 0 || day === 5 || day === 6;
+  if (day === 5 || day === 0) return "peak";
+  if (day === 6) return "holiday";
+  return "weekday";
 }
 
 /** 把日期陣列依「相鄰日期」分組成一段一段的連續區間 */
@@ -111,7 +115,7 @@ export function buildEffectiveDayTypeMap(holidayMap: HolidayMap): EffectiveDayTy
 export function resolveDayType(dateStr: string, effectiveMap: EffectiveDayTypeMap): DayType {
   const forced = effectiveMap.get(dateStr);
   if (forced) return forced;
-  return isPeakDayOfWeek(dateStr) ? "peak" : "weekday";
+  return resolveDayTypeByDayOfWeek(dateStr);
 }
 
 /**
