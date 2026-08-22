@@ -163,3 +163,68 @@ export function resolveRoomAllocation(
   const warning = problems.length > 0 ? `手動調整房型設定有誤：${problems.join("；")}` : null;
   return { allocation, warning };
 }
+
+/**
+ * 各民宿的實體房間數量常數，給表單端的下拉選單設定合理上限用
+ * （伺服器端仍然會用 PropertyRoomCounts／checkExtraBedLimits 做更精確
+ * 的即時驗證，這裡只是先在表單層擋掉明顯不可能的數字，減少來回）。
+ */
+export const FOUR_PERSON_ROOM_TOTAL: Record<PropertyCode, number> = {
+  zhici: 7,
+  moyin: 4,
+  shuijing: 3,
+};
+export const DOUBLE_SUITE_ROOM_TOTAL: Record<PropertyCode, number> = {
+  zhici: 0,
+  moyin: 1,
+  shuijing: 1,
+};
+export const DOUBLE_PLAIN_ROOM_TOTAL: Record<PropertyCode, number> = {
+  zhici: 0,
+  moyin: 1,
+  shuijing: 0,
+};
+
+/**
+ * 各民宿「加臨時床」的數量上限（對應原始民宿配置表的「可加臨時床
+ * 數量」欄位）：只此清綠 4、陌隱 1、水景璞堤 2。這是每間民宿固定的
+ * 常數，跟入住人數無關。
+ */
+export const EXTRA_BED_TEMP_MAX: Record<PropertyCode, number> = {
+  zhici: 4,
+  moyin: 1,
+  shuijing: 2,
+};
+
+/**
+ * 加床數量驗證：
+ * - 加固定床：最多只能加到「四人套房降規（只提供 1 床）」的房間數量，
+ *   因為加固定床的用途就是把降規房間補回第 2 張床，超過降規房間數
+ *   就沒有房間可以加了。
+ * - 加臨時床：每間民宿有各自的數量上限（EXTRA_BED_TEMP_MAX）。
+ *
+ * 任一項超過上限就回傳 warning 訊息，呼叫端應該視同其他房型驗證
+ * 一樣擋下報價金額計算。
+ */
+export function checkExtraBedLimits(params: {
+  propertyCode: PropertyCode;
+  extraBedFixedQty: number;
+  extraBedTempQty: number;
+  fourPersonDowngradeCount: number;
+}): string | null {
+  const { propertyCode, extraBedFixedQty, extraBedTempQty, fourPersonDowngradeCount } = params;
+  const problems: string[] = [];
+
+  if (extraBedFixedQty > fourPersonDowngradeCount) {
+    problems.push(
+      `加固定床 ${extraBedFixedQty} 床，超過目前只提供 1 床的四人套房數量（${fourPersonDowngradeCount} 間）`
+    );
+  }
+
+  const tempMax = EXTRA_BED_TEMP_MAX[propertyCode] ?? 0;
+  if (extraBedTempQty > tempMax) {
+    problems.push(`加臨時床 ${extraBedTempQty} 床，超過這間民宿最多可加 ${tempMax} 床的上限`);
+  }
+
+  return problems.length > 0 ? `加床數量超過限制：${problems.join("；")}` : null;
+}

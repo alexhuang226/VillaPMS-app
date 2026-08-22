@@ -1,14 +1,17 @@
 /**
  * Supabase 資料查詢層
  *
- * 這裡假設專案已經有 lib/supabase/server.ts 匯出一個
- * `createClient(): Promise<SupabaseClient>` 的 async helper（Next.js
- * App Router + @supabase/ssr 的常見寫法，因為要 await cookies()）。
- * 如果你的專案路徑不同，請調整下面的 import path。
+ * 這裡用的是 lib/supabase/service-role.ts 的 createServiceRoleClient()，
+ * 不是一般帶 RLS 的 client——原因跟完整說明都寫在那個檔案裡：報價引擎
+ * 讀取的房型/價格/服務/房間數量這些資料，不應該因為「現在有沒有人
+ * 用 Supabase Auth 登入」而查不到，這裡的每個函式都只會在 server
+ * action（伺服器端）被呼叫，不會暴露給瀏覽器。
  */
 
-import { createClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/service-role";
+import { roomAllocationSummaryItems } from "./quote-message";
 import type {
+  BankInfo,
   DayType,
   FlatServicePrices,
   NightlyRateTable,
@@ -19,7 +22,7 @@ import type { HolidayCategory, HolidayMap } from "./day-type";
 
 /** 依 property code 取得 property_id（可自行加上快取層） */
 export async function getPropertyId(propertyCode: PropertyCode): Promise<string> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("properties")
     .select("id")
@@ -43,7 +46,7 @@ export async function getNightlyRateTable(
   propertyId: string,
   priceCategory: "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve"
 ): Promise<NightlyRateTable> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
   const dbDayType = priceCategory === "regular" ? "weekday" : priceCategory;
 
   const { data, error } = await supabase
@@ -95,7 +98,7 @@ export async function getNightlyRateTable(
 
 /** 取得某民宿的固定加購服務價格（加床／加房／寵物清潔／烤肉／餐車／提前入住／訪客） */
 export async function getFlatServicePrices(propertyId: string): Promise<FlatServicePrices> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("services")
     .select("code, default_price")
@@ -105,12 +108,21 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
     throw new Error(`查詢加購服務價格失敗：${error.message}`);
   }
 
+  // 暫時的除錯 log：直接印出 Supabase 實際回傳的原始內容，跟查到的
+  // propertyId，方便對照「SQL Editor 直接查到的資料」跟「app 透過
+  // service role client 查到的資料」是不是真的一致。問題排除後可以
+  // 把這行刪掉。本地執行 `next dev` 會直接印在終端機；部署在 Vercel
+  // 的話要去 Vercel Dashboard → 專案 → Deployments → 對應的部署 →
+  // Runtime Logs 看。
+  console.log("[getFlatServicePrices] propertyId =", propertyId);
+  console.log("[getFlatServicePrices] raw data =", JSON.stringify(data));
+
   const priceByCode = new Map<string, number>();
   for (const row of data ?? []) {
     priceByCode.set(row.code as string, Number(row.default_price));
   }
 
-  return {
+  const result: FlatServicePrices = {
     extraBedFixed: priceByCode.get("extra_bed_fixed") ?? 0,
     extraBedTemp: priceByCode.get("extra_bed_temp") ?? 0,
     extraRoom: priceByCode.get("extra_room") ?? 0,
@@ -120,6 +132,10 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
     earlyCheckin: priceByCode.get("early_checkin") ?? 0,
     visitor: priceByCode.get("visitor") ?? 0,
   };
+
+  console.log("[getFlatServicePrices] result =", JSON.stringify(result));
+
+  return result;
 }
 
 /**
@@ -129,7 +145,7 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
  * 但仍一併回傳方便前端顯示或做人數上限校驗。
  */
 export async function getPropertyRoomCounts(propertyId: string): Promise<PropertyRoomCounts> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
 
   const [{ data: roomRows, error: roomError }, { data: propRow, error: propError }] =
     await Promise.all([
@@ -175,7 +191,7 @@ export async function getPropertyRoomCounts(propertyId: string): Promise<Propert
 export async function getBaseGuestsByDayType(
   propertyId: string
 ): Promise<Record<DayType, number>> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("rate_rules")
     .select("day_type, base_guests, rate_plans!inner(property_id)")
@@ -206,7 +222,7 @@ export async function getBaseGuestsByDayType(
  * @param organizationId 若為 null，只取全平台共用清單（organization_id is null）
  */
 export async function getHolidayMap(organizationId: string | null): Promise<HolidayMap> {
-  const supabase = await createClient();
+  const supabase = createServiceRoleClient();
   let query = supabase.from("holidays").select("holiday_date, day_type");
 
   query = organizationId
@@ -224,4 +240,667 @@ export async function getHolidayMap(organizationId: string | null): Promise<Holi
     }
   }
   return map;
+}
+
+/**
+ * 取得民宿顯示名稱與匯款帳戶資訊，只用於組成客人版報價訊息
+ * （見 quote-message.ts 的 buildQuoteMessage），不影響金額計算。
+ *
+ * 帳號欄位優先讀 bank_account_full（完整帳號，見
+ * db/006_add_bank_account_full.sql）；如果還沒補這個欄位，退回讀
+ * bank_account_masked（遮罩版本）並在畫面上加註提醒，避免直接
+ * 把不完整的帳號拿去給客人匯款。
+ */
+export async function getPropertyDisplayInfo(
+  propertyId: string
+): Promise<{ name: string; bank: BankInfo | null }> {
+  const supabase = createServiceRoleClient();
+
+  const [{ data: propRow, error: propError }, { data: settingsRow, error: settingsError }] =
+    await Promise.all([
+      supabase.from("properties").select("name").eq("id", propertyId).single(),
+      supabase
+        .from("property_settings")
+        .select("bank_name, bank_branch, bank_account_full, bank_account_masked, account_name")
+        .eq("property_id", propertyId)
+        .maybeSingle(),
+    ]);
+
+  if (propError || !propRow) {
+    throw new Error(`查詢民宿名稱失敗：${propError?.message ?? "no data"}`);
+  }
+  if (settingsError) {
+    throw new Error(`查詢民宿匯款資訊失敗：${settingsError.message}`);
+  }
+
+  const accountNumber = settingsRow?.bank_account_full ?? settingsRow?.bank_account_masked ?? "";
+  const bank: BankInfo | null = settingsRow
+    ? {
+        name: settingsRow.bank_name ?? "",
+        branch: settingsRow.bank_branch ?? "",
+        accountNumber:
+          settingsRow.bank_account_full != null
+            ? accountNumber
+            : `${accountNumber}（⚠️ 尚未設定完整帳號，這是遮罩版本，請先執行 006_add_bank_account_full.sql 並補上真實帳號）`,
+        accountName: settingsRow.account_name ?? "",
+      }
+    : null;
+
+  return { name: propRow.name as string, bank };
+}
+
+/**
+ * 這個系統目前只有單一組織，直接抓第一筆 organizations 記錄當作
+ * 「唯一組織」使用。如果之後變成多組織架構，這裡要改成明確傳入或
+ * 從登入者身份推導 organization_id，不能再假設只有一筆。
+ */
+export async function getSingleOrganizationId(): Promise<string> {
+  const supabase = createServiceRoleClient();
+  const { data: org, error } = await supabase.from("organizations").select("id").limit(1).maybeSingle();
+  if (error || !org) {
+    throw new Error(`查詢組織資料失敗：${error?.message ?? "找不到組織"}`);
+  }
+  return org.id as string;
+}
+
+/**
+ * 依電話號碼找客人，找不到就建立一筆新的。用電話當作辨識依據（同一位
+ * 客人下次來訂房，電話一樣就會歸到同一筆 guests 記錄，報價紀錄查詢
+ * 時才能正確歸戶）。目前系統只有單一組織，直接抓第一筆 organizations
+ * 記錄；如果之後變成多組織架構，這裡要改成明確傳入 organization_id。
+ *
+ * 電話是選填的（確認訂房畫面不強制填）：如果沒填電話，就不做「依
+ * 電話查找」這一步，直接建立一筆新客人——避免好幾位沒留電話的不同
+ * 客人，因為都符合 `phone = ''` 這個查詢條件而被誤判成同一個人。
+ */
+export async function findOrCreateGuest(params: { name: string; phone: string }): Promise<string> {
+  const supabase = createServiceRoleClient();
+  const phone = params.phone.trim();
+
+  if (phone) {
+    const { data: existing, error: findError } = await supabase
+      .from("guests")
+      .select("id")
+      .eq("phone", phone)
+      .maybeSingle();
+
+    if (findError) {
+      throw new Error(`查詢客人資料失敗：${findError.message}`);
+    }
+    if (existing) {
+      return existing.id as string;
+    }
+  }
+
+  const organizationId = await getSingleOrganizationId();
+
+  const { data: created, error: createError } = await supabase
+    .from("guests")
+    .insert({ organization_id: organizationId, name: params.name, phone: phone || null })
+    .select("id")
+    .single();
+
+  if (createError || !created) {
+    throw new Error(`建立客人資料失敗：${createError?.message}`);
+  }
+  return created.id as string;
+}
+
+/** 報價紀錄列表用的精簡摘要 */
+export interface QuoteSummary {
+  id: string;
+  quoteNo: string;
+  guestName: string;
+  guestPhone: string | null;
+  propertyName: string;
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  /** 房型配置摘要文字，例如「1 間四人套房、4 間降規四人套房」，從 quote_snapshot 算出來的 */
+  roomSummary: string;
+  totalAmount: number;
+  status: string;
+  createdAt: string;
+}
+
+/**
+ * 查詢最近的報價紀錄。
+ * - checkInDate：有給的話直接在資料庫層篩「入住日期＝這天」，這是
+ *   最常用的查法（櫃檯通常記得客人問的是哪天，不會記得一長串報價
+ *   單編號）
+ * - search：客人姓名／電話／報價單編號的文字比對，用在還想用姓名/
+ *   編號進一步縮小範圍的時候；沒有 checkInDate 時，就在最近 100 筆
+ *   裡面用 JS 過濾——現階段三間民宿的量不大，這樣做最簡單，量大到
+ *   需要伺服器端搜尋分頁時再改寫。
+ */
+export async function listRecentQuotes(params?: { search?: string; checkInDate?: string }): Promise<QuoteSummary[]> {
+  const supabase = createServiceRoleClient();
+
+  let query = supabase
+    .from("quotes")
+    .select(
+      "id, quote_no, check_in, check_out, adults, children, total_amount, status, created_at, quote_snapshot, guests(name, phone), properties(name)"
+    )
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (params?.checkInDate) {
+    query = query.eq("check_in", params.checkInDate);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw new Error(`查詢報價紀錄失敗：${error.message}`);
+  }
+
+  const rows: QuoteSummary[] = (data ?? []).map((row: any) => {
+    const allocation = row.quote_snapshot?.roomAllocation as
+      | { fourPersonSuiteCount: number; fourPersonDowngradeCount: number; doubleSuiteCount: number; doublePlainCount: number }
+      | null
+      | undefined;
+    const roomSummary = allocation
+      ? roomAllocationSummaryItems(allocation)
+          .map((item) => item.text)
+          .join("、")
+      : "";
+
+    return {
+      id: row.id as string,
+      quoteNo: row.quote_no as string,
+      guestName: (row.guests?.name as string) ?? "",
+      guestPhone: (row.guests?.phone as string) ?? null,
+      propertyName: (row.properties?.name as string) ?? "",
+      checkIn: row.check_in as string,
+      checkOut: row.check_out as string,
+      adults: Number(row.adults ?? 0),
+      children: Number(row.children ?? 0),
+      roomSummary,
+      totalAmount: Number(row.total_amount),
+      status: row.status as string,
+      createdAt: row.created_at as string,
+    };
+  });
+
+  const search = params?.search;
+  if (!search || !search.trim()) return rows;
+
+  const term = search.trim().toLowerCase();
+  return rows.filter(
+    (r) =>
+      r.guestName.toLowerCase().includes(term) ||
+      (r.guestPhone ?? "").includes(term) ||
+      r.quoteNo.toLowerCase().includes(term)
+  );
+}
+
+/** 讀回單一報價單的完整快照，供檢視或轉為訂房確認用 */
+export async function getQuoteSnapshot(quoteId: string): Promise<{
+  quote: Record<string, unknown>;
+  request: Record<string, unknown>;
+  status: string;
+  propertyId: string;
+  guestId: string;
+} | null> {
+  const supabase = createServiceRoleClient();
+
+  const { data, error } = await supabase
+    .from("quotes")
+    .select("quote_snapshot, request_snapshot, status, property_id, guest_id")
+    .eq("id", quoteId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`查詢報價單失敗：${error.message}`);
+  }
+  if (!data || !data.quote_snapshot || !data.request_snapshot) return null;
+
+  return {
+    quote: data.quote_snapshot as Record<string, unknown>,
+    request: data.request_snapshot as Record<string, unknown>,
+    status: data.status as string,
+    propertyId: data.property_id as string,
+    guestId: data.guest_id as string,
+  };
+}
+
+/** 房號選項，給「加臨時床要放哪間房」的選單用 */
+export interface ExtraBedRoomOption {
+  id: string;
+  code: string;
+}
+
+/**
+ * 查某民宿裡「可以加床」的房間列表（rooms.allows_extra_bed = true）。
+ * 訂房確認時要具體指定加臨時床放在哪個房號，方便房務人員知道要準備
+ * 哪間房。
+ */
+export async function getExtraBedEligibleRooms(propertyId: string): Promise<ExtraBedRoomOption[]> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("rooms")
+    .select("id, code")
+    .eq("property_id", propertyId)
+    .eq("allows_extra_bed", true)
+    .order("code");
+
+  if (error) {
+    throw new Error(`查詢可加床房間失敗：${error.message}`);
+  }
+  return (data ?? []).map((row) => ({ id: row.id as string, code: row.code as string }));
+}
+
+/** 查一張已確認訂房的報價單，實際轉出來的訂房編號是什麼 */
+export async function getReservationNoByQuoteId(quoteId: string): Promise<string | null> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("reservation_no")
+    .eq("source_quote_id", quoteId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`查詢訂房記錄失敗：${error.message}`);
+  }
+  return (data?.reservation_no as string) ?? null;
+}
+
+/** 查詢訂單列表用的精簡摘要 */
+export interface ReservationSummary {
+  id: string;
+  reservationNo: string;
+  guestName: string;
+  guestPhone: string | null;
+  propertyName: string;
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  finalTotal: number;
+  status: string;
+  bookingSource: string;
+  createdAt: string;
+}
+
+/**
+ * 查詢訂單（reservations），依入住日期（資料庫層精準比對，最常用）
+ * 或姓名／電話／訂房單編號（文字比對）搜尋，都留空回傳最近 100 筆。
+ */
+export async function listReservations(params?: {
+  search?: string;
+  checkInDate?: string;
+}): Promise<ReservationSummary[]> {
+  const supabase = createServiceRoleClient();
+
+  let query = supabase
+    .from("reservations")
+    .select(
+      "id, reservation_no, check_in, check_out, adults, children, final_total, status, booking_source, created_at, guests(name, phone), properties(name)"
+    )
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (params?.checkInDate) {
+    query = query.eq("check_in", params.checkInDate);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`查詢訂單失敗：${error.message}`);
+  }
+
+  const rows: ReservationSummary[] = (data ?? []).map((row: any) => ({
+    id: row.id as string,
+    reservationNo: row.reservation_no as string,
+    guestName: (row.guests?.name as string) ?? "",
+    guestPhone: (row.guests?.phone as string) ?? null,
+    propertyName: (row.properties?.name as string) ?? "",
+    checkIn: row.check_in as string,
+    checkOut: row.check_out as string,
+    adults: Number(row.adults ?? 0),
+    children: Number(row.children ?? 0),
+    finalTotal: Number(row.final_total),
+    status: row.status as string,
+    bookingSource: row.booking_source as string,
+    createdAt: row.created_at as string,
+  }));
+
+  const search = params?.search;
+  if (!search || !search.trim()) return rows;
+
+  const term = search.trim().toLowerCase();
+  return rows.filter(
+    (r) =>
+      r.guestName.toLowerCase().includes(term) ||
+      (r.guestPhone ?? "").includes(term) ||
+      r.reservationNo.toLowerCase().includes(term)
+  );
+}
+
+/** 訂單詳細內容：房型明細、加購項目、付款狀態都一起撈出來 */
+export interface ReservationDetail {
+  id: string;
+  reservationNo: string;
+  guestName: string;
+  guestPhone: string | null;
+  propertyName: string;
+  propertyAddress: string | null;
+  parkingInfo: string | null;
+  mapUrl: string | null;
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  infants: number;
+  pets: number;
+  visitors: number;
+  finalTotal: number;
+  status: string;
+  bookingSource: string;
+  needsInvoice: boolean;
+  invoiceTitle: string | null;
+  invoiceTaxId: string | null;
+  /** 結構化的房型數量，訂房確認單的「房型配置」（見
+   * lib/pricing/reservation-message.ts 的 confirmationRoomAllocationLines）
+   * 跟報價單各自有一套格式化邏輯，故意不共用同一個函式——兩邊的
+   * 房型順序/文字格式本來就不一樣，見那個檔案開頭的說明 */
+  roomAllocation: {
+    fourPersonSuiteCount: number;
+    fourPersonDowngradeCount: number;
+    doubleSuiteCount: number;
+    doublePlainCount: number;
+  };
+  roomLines: { quantity: number; notes: string | null }[];
+  items: { description: string; amount: number; notes: string | null }[];
+  payments: { paymentKind: string; amount: number; status: string; dueDate: string | null; paidAt: string | null }[];
+}
+
+export async function getReservationDetail(reservationId: string): Promise<ReservationDetail | null> {
+  const supabase = createServiceRoleClient();
+
+  const { data: row, error } = await supabase
+    .from("reservations")
+    .select(
+      "id, reservation_no, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(name, property_settings(address, parking_info, map_url))"
+    )
+    .eq("id", reservationId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`查詢訂單詳細內容失敗：${error.message}`);
+  }
+  if (!row) return null;
+
+  const [{ data: roomLinesData }, { data: itemsData }, { data: paymentsData }] = await Promise.all([
+    supabase.from("reservation_room_lines").select("quantity, notes").eq("reservation_id", reservationId),
+    supabase.from("reservation_items").select("description, amount, notes").eq("reservation_id", reservationId),
+    supabase
+      .from("payments")
+      .select("payment_kind, amount, status, due_date, paid_at")
+      .eq("reservation_id", reservationId)
+      .order("due_date"),
+  ]);
+
+  const propertySettings = (row as any).properties?.property_settings;
+  // Supabase 對一對一關聯有時候會回陣列有時候回物件，視實際外鍵設定而定，兩種都處理
+  const settingsRow = Array.isArray(propertySettings) ? propertySettings[0] : propertySettings;
+
+  return {
+    id: row.id as string,
+    reservationNo: row.reservation_no as string,
+    guestName: ((row as any).guests?.name as string) ?? "",
+    guestPhone: ((row as any).guests?.phone as string) ?? null,
+    propertyName: ((row as any).properties?.name as string) ?? "",
+    propertyAddress: (settingsRow?.address as string) ?? null,
+    parkingInfo: (settingsRow?.parking_info as string) ?? null,
+    mapUrl: (settingsRow?.map_url as string) ?? null,
+    checkIn: row.check_in as string,
+    checkOut: row.check_out as string,
+    adults: Number(row.adults ?? 0),
+    children: Number(row.children ?? 0),
+    infants: Number(row.infants ?? 0),
+    pets: Number(row.pets ?? 0),
+    visitors: Number(row.visitors ?? 0),
+    finalTotal: Number(row.final_total),
+    status: row.status as string,
+    bookingSource: row.booking_source as string,
+    needsInvoice: Boolean(row.needs_invoice),
+    invoiceTitle: (row.invoice_title as string) ?? null,
+    invoiceTaxId: (row.invoice_tax_id as string) ?? null,
+    roomAllocation: {
+      fourPersonSuiteCount: Number(row.four_person_suite_count ?? 0),
+      fourPersonDowngradeCount: Number(row.four_person_downgrade_count ?? 0),
+      doubleSuiteCount: Number(row.double_suite_count ?? 0),
+      doublePlainCount: Number(row.double_plain_count ?? 0),
+    },
+    roomLines: (roomLinesData ?? []).map((r: any) => ({ quantity: Number(r.quantity), notes: r.notes ?? null })),
+    items: (itemsData ?? []).map((r: any) => ({
+      description: r.description as string,
+      amount: Number(r.amount),
+      notes: r.notes ?? null,
+    })),
+    payments: (paymentsData ?? []).map((r: any) => ({
+      paymentKind: r.payment_kind as string,
+      amount: Number(r.amount),
+      status: r.status as string,
+      dueDate: r.due_date ?? null,
+      paidAt: r.paid_at ?? null,
+    })),
+  };
+}
+
+/** 應收款列表用的精簡摘要（未收的訂金/尾款） */
+export interface ReceivableSummary {
+  paymentId: string;
+  reservationId: string;
+  reservationNo: string;
+  guestName: string;
+  guestPhone: string | null;
+  propertyName: string;
+  checkIn: string;
+  paymentKind: string;
+  amount: number;
+  dueDate: string | null;
+}
+
+/**
+ * 查詢還沒收到的款項（payments.status = 'pending'，方向是應收）。
+ * 依到期日由近到遠排序，最急迫的排最前面。
+ */
+/**
+ * 查詢還沒收到的款項（payments.status = 'pending'，方向是應收），
+ * 只列出「到期日在未來 10 天內」的（含已經逾期的——逾期的更急迫，
+ * 不該被這個篩選條件擋掉，只有還很久以後才到期、目前不急的才濾
+ * 掉）。依到期日由近到遠排序，最急迫的排最前面。
+ */
+export async function listReceivables(): Promise<ReceivableSummary[]> {
+  const supabase = createServiceRoleClient();
+
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() + 10);
+  const cutoffDateStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(
+    cutoff.getDate()
+  ).padStart(2, "0")}`;
+
+  const { data, error } = await supabase
+    .from("payments")
+    .select(
+      "id, amount, due_date, payment_kind, reservation_id, reservations(reservation_no, check_in, guests(name, phone), properties(name))"
+    )
+    .eq("status", "pending")
+    .eq("direction", "receivable")
+    .lte("due_date", cutoffDateStr)
+    .order("due_date", { ascending: true, nullsFirst: false });
+
+  if (error) {
+    throw new Error(`查詢應收款失敗：${error.message}`);
+  }
+
+  return (data ?? []).map((row: any) => ({
+    paymentId: row.id as string,
+    reservationId: row.reservation_id as string,
+    reservationNo: (row.reservations?.reservation_no as string) ?? "",
+    guestName: (row.reservations?.guests?.name as string) ?? "",
+    guestPhone: (row.reservations?.guests?.phone as string) ?? null,
+    propertyName: (row.reservations?.properties?.name as string) ?? "",
+    checkIn: (row.reservations?.check_in as string) ?? "",
+    paymentKind: row.payment_kind as string,
+    amount: Number(row.amount),
+    dueDate: row.due_date ?? null,
+  }));
+}
+
+/** 把一筆應收款標記為已收款 */
+export async function markPaymentPaid(paymentId: string): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const { error } = await supabase
+    .from("payments")
+    .update({ status: "paid", paid_at: new Date().toISOString() })
+    .eq("id", paymentId);
+
+  if (error) {
+    throw new Error(`標記已收款失敗：${error.message}`);
+  }
+}
+
+/** 日曆檢視用的訂單摘要 */
+export interface CalendarReservation {
+  id: string;
+  reservationNo: string;
+  propertyCode: string;
+  propertyName: string;
+  guestName: string;
+  checkIn: string;
+  checkOut: string;
+  status: string;
+  /** 尾款(balance)是不是還沒收到（payments 表 payment_kind='balance' 且 status='pending'） */
+  balanceUnpaid: boolean;
+  /** 有沒有加購烤肉（reservation_items 表 item_type='bbq'），日曆色塊上顯示烤肉圖案用 */
+  hasBbq: boolean;
+}
+
+/**
+ * 查某個月份內、三間民宿「有重疊到這個月」的訂單（用於日曆檢視），
+ * 條件是 check_in < 這個月的下個月第一天 且 check_out > 這個月第一天
+ * ——這樣跨月的訂房（例如月底入住、下個月才退房）也會正確顯示在
+ * 兩個月份的日曆裡。已取消的訂單不顯示。
+ */
+export async function getReservationsForMonthCalendar(
+  monthStartInclusive: string,
+  nextMonthStartExclusive: string
+): Promise<CalendarReservation[]> {
+  const supabase = createServiceRoleClient();
+
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id, reservation_no, check_in, check_out, status, guests(name), properties(code, name)")
+    .lt("check_in", nextMonthStartExclusive)
+    .gt("check_out", monthStartInclusive)
+    .neq("status", "cancelled");
+
+  if (error) {
+    throw new Error(`查詢日曆訂單失敗：${error.message}`);
+  }
+
+  const rows = data ?? [];
+  const reservationIds = rows.map((row: any) => row.id as string);
+
+  let unpaidBalanceIds = new Set<string>();
+  let bbqIds = new Set<string>();
+  if (reservationIds.length > 0) {
+    const [{ data: balancePayments, error: paymentsError }, { data: bbqItems, error: bbqError }] = await Promise.all([
+      supabase
+        .from("payments")
+        .select("reservation_id")
+        .in("reservation_id", reservationIds)
+        .eq("payment_kind", "balance")
+        .eq("status", "pending"),
+      supabase.from("reservation_items").select("reservation_id").in("reservation_id", reservationIds).eq("item_type", "bbq"),
+    ]);
+
+    if (paymentsError) {
+      throw new Error(`查詢尾款狀態失敗：${paymentsError.message}`);
+    }
+    if (bbqError) {
+      throw new Error(`查詢烤肉加購項目失敗：${bbqError.message}`);
+    }
+    unpaidBalanceIds = new Set((balancePayments ?? []).map((p: any) => p.reservation_id as string));
+    bbqIds = new Set((bbqItems ?? []).map((r: any) => r.reservation_id as string));
+  }
+
+  return rows.map((row: any) => ({
+    id: row.id as string,
+    reservationNo: row.reservation_no as string,
+    propertyCode: (row.properties?.code as string) ?? "",
+    propertyName: (row.properties?.name as string) ?? "",
+    guestName: (row.guests?.name as string) ?? "",
+    checkIn: row.check_in as string,
+    checkOut: row.check_out as string,
+    status: row.status as string,
+    balanceUnpaid: unpaidBalanceIds.has(row.id as string),
+    hasBbq: bbqIds.has(row.id as string),
+  }));
+}
+
+/**
+ * 可編輯的訂單欄位。
+ *
+ * ⚠️ checkIn/checkOut/房型配置這幾個欄位改了，金額不會自動重算——
+ * 系統目前只有存「最後結果」（final_total 這個總額數字），沒有存
+ * 一份完整的原始 StayRequest（人數/加購/折扣/發票稅率等全部條件），
+ * 沒辦法像 /quote 那邊一樣重新呼叫計價引擎算出正確金額。改了這些
+ * 欄位之後，畫面上會提醒要自己確認總金額對不對，需要的話可以另外
+ * 開 /quote 用同樣的條件重新試算一次，再把算出來的金額填回這裡的
+ * 「總金額」欄位。
+ */
+export interface ReservationUpdateFields {
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  infants: number;
+  pets: number;
+  visitors: number;
+  bookingSource: string;
+  status: string;
+  finalTotal: number;
+  needsInvoice: boolean;
+  invoiceTitle: string | null;
+  invoiceTaxId: string | null;
+  fourPersonSuiteCount: number;
+  fourPersonDowngradeCount: number;
+  doubleSuiteCount: number;
+  doublePlainCount: number;
+}
+
+export async function updateReservation(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const { error } = await supabase
+    .from("reservations")
+    .update({
+      check_in: fields.checkIn,
+      check_out: fields.checkOut,
+      adults: fields.adults,
+      children: fields.children,
+      infants: fields.infants,
+      pets: fields.pets,
+      visitors: fields.visitors,
+      booking_source: fields.bookingSource,
+      status: fields.status,
+      final_total: fields.finalTotal,
+      needs_invoice: fields.needsInvoice,
+      invoice_title: fields.needsInvoice ? fields.invoiceTitle : null,
+      invoice_tax_id: fields.needsInvoice ? fields.invoiceTaxId : null,
+      four_person_suite_count: fields.fourPersonSuiteCount,
+      four_person_downgrade_count: fields.fourPersonDowngradeCount,
+      double_suite_count: fields.doubleSuiteCount,
+      double_plain_count: fields.doublePlainCount,
+    })
+    .eq("id", reservationId);
+
+  if (error) {
+    throw new Error(`更新訂單失敗：${error.message}`);
+  }
 }

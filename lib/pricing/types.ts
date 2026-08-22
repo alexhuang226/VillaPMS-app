@@ -30,6 +30,9 @@ export type DayType =
  */
 export type RoomConfigLabel = "四人套房" | "降規雙人套房" | "雙人套房" | "雙人雅房";
 
+/** 每晚實際套用的價格分類，weekday/peak 收斂成 regular（見 day-type.ts） */
+export type PriceCategory = "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
+
 /** 每晚各房型配置的價格（新台幣） */
 export interface NightlyRateTable {
   fourPersonSuite: number; // 四人套房（全開）
@@ -95,6 +98,37 @@ export interface InvoiceInfo {
   taxId?: string;
 }
 
+/** 民宿匯款帳戶資訊，用於報價訊息中的「匯款帳號」區塊 */
+export interface BankInfo {
+  name: string; // 銀行名稱
+  branch: string; // 分行
+  accountNumber: string; // 完整帳號（給客人匯款用，不是遮罩版本）
+  accountName: string; // 戶名
+}
+
+/**
+ * 組成客人版報價訊息文字（buildQuoteMessage）需要的額外參考資料。
+ * 這些資料跟金額計算無關，純粹是「顯示用」的參考內容：民宿名稱、
+ * 匯款帳戶、各價格分類的房型定價表（用來列出「房型訂價」參考區塊）、
+ * 各 day_type 的包棟基本人數（用來列出「包棟基本人數」提醒）。
+ */
+export interface QuoteMessageContext {
+  propertyName: string;
+  bank: BankInfo | null;
+  rateTableByCategory: Record<PriceCategory, NightlyRateTable>;
+  baseGuestsByDayType: Record<DayType, number>;
+  /**
+   * 加購服務單價（加床/加房/寵物清潔/烤肉/餐車/提前入住/訪客），
+   * 用來在報價訊息的「費用明細」列出每個加購項目各自的金額，
+   * 不是只顯示一個籠統的加總數字。
+   */
+  servicePrices: FlatServicePrices;
+  /** 訂金比例，用「成」表示，例如 0.3 → 3 */
+  depositRatePercent: number;
+  /** 尾款須於入住前幾天匯款，用於「請於入住前 N 天匯尾款」文字 */
+  balanceDueDaysBeforeCheckIn: number;
+}
+
 /** 單一入住需求（一次報價／訂房） */
 export interface StayRequest {
   propertyCode: PropertyCode;
@@ -135,12 +169,20 @@ export interface StayRequest {
 export interface NightlyBreakdownItem {
   date: string; // 'YYYY-MM-DD'
   dayType: DayType;
-  priceCategory: "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
+  priceCategory: PriceCategory;
   fourPersonSuiteCount: number; // 當晚以全額計價的四人套房數量
   fourPersonDowngradeCount: number; // 當晚降規為雙人套房計價的四人套房數量（僅只此清綠適用）
   doubleSuiteCount: number; // 當晚獨立雙人套房數量（陌隱／水景璞堤）
   doublePlainCount: number; // 當晚獨立雙人雅房數量（僅陌隱可能 >0）
   amount: number; // 當晚住宿費用小計
+}
+
+/** 整個訂房期間固定的房型數量組合（自動分配或手動覆寫後的最終結果） */
+export interface QuoteRoomAllocation {
+  fourPersonSuiteCount: number;
+  fourPersonDowngradeCount: number;
+  doubleSuiteCount: number;
+  doublePlainCount: number;
 }
 
 /** 完整的包棟總費用計算結果 */
@@ -155,6 +197,8 @@ export interface PackageQuote {
   addOnFee: number; // 額外服務費用（烤肉／餐車／提前入住）
   visitorFee: number; // 訪客費用
   discountAmount: number; // 優惠折扣
+  /** 發票稅金：需要開立發票時，以「折扣後小計」的 8% 計算，未勾選發票則是 0 */
+  invoiceTaxAmount: number;
   packageTotal: number; // 包棟總費用
   deposit: number; // 訂金
   balanceDue: number; // 尾款（包棟總費用 - 訂金）
@@ -170,4 +214,13 @@ export interface PackageQuote {
    * 不為 null 時同樣代表「不允許產生報價」，金額會被強制歸零。
    */
   roomConfigWarning: string | null;
+  /** 這次訂房實際使用的房型數量組合；被 minimumGuestsWarning 擋下時為 null */
+  roomAllocation: QuoteRoomAllocation | null;
+  /**
+   * 組成客人版報價訊息（buildQuoteMessage）所需的參考資料。
+   * 只有在完全沒有任何警告、報價成功算出來時才會有值；
+   * 三個警告任一存在時都是 null，呼叫端應該先確認沒有警告，
+   * 再檢查 messageContext 是否存在，才呼叫 buildQuoteMessage()。
+   */
+  messageContext: QuoteMessageContext | null;
 }

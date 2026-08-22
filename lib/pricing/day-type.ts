@@ -18,7 +18,7 @@
  * 以 holidays 表驅動的旺日判斷優先。
  */
 
-import type { DayType } from "./types";
+import type { DayType, PriceCategory } from "./types";
 
 export type HolidayCategory = "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
 
@@ -122,9 +122,7 @@ export function resolveDayType(dateStr: string, effectiveMap: EffectiveDayTypeMa
  * 把 6 種 day_type 收斂成「每日住宿費用明細」實際會用到的 5 種價格分類
  * （weekday 與 peak 共用「平旺日」價格）。
  */
-export function toPriceCategory(
-  dayType: DayType
-): "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve" {
+export function toPriceCategory(dayType: DayType): PriceCategory {
   if (dayType === "weekday" || dayType === "peak") return "regular";
   return dayType;
 }

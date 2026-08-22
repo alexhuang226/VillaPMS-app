@@ -19,21 +19,24 @@
  * 呼叫端先用 queries.ts 撈好再傳進來，方便單元測試與未來替換資料來源。
  */
 
-import { resolveRoomAllocation } from "./property-room-allocation";
+import { checkExtraBedLimits, resolveRoomAllocation } from "./property-room-allocation";
 import type { RoomAllocationResult } from "./property-room-allocation";
 import { buildEffectiveDayTypeMap, listStayDates, resolveDayType, toPriceCategory } from "./day-type";
 import type { EffectiveDayTypeMap, HolidayMap } from "./day-type";
 import type {
+  BankInfo,
   DayType,
   FlatServicePrices,
   NightlyBreakdownItem,
   NightlyRateTable,
   PackageQuote,
+  PriceCategory,
   PropertyRoomCounts,
   StayRequest,
 } from "./types";
 
-type PriceCategory = "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
+/** 開發票時的稅金比例（折扣後小計的 8%） */
+const INVOICE_TAX_RATE = 0.08;
 
 /** 依訂金比例與捨入單位計算訂金；預設對應原公式 FLOOR(total*0.3/1000)*1000 */
 export function calculateDeposit(
@@ -185,9 +188,18 @@ export function calculateNightlyBreakdown(params: {
     const priceCategory = toPriceCategory(dayType);
     const rates = rateTableByCategory[priceCategory];
 
+    // 四人套房降規的房間該用哪個價格：只此清綠沒有獨立雙人套房房型，
+    // 降規價格記在 downgradeDoubleSuite；陌隱／水景璞堤則是把「降規」
+    // 跟「獨立雙人套房」視為同一組價格（它們的 rate_rule_tiers 只有
+    // config_label='雙人套房'，沒有另外存一組'降規雙人套房'），所以
+    // 要 fallback 到 doubleSuite。少了這個 fallback，陌隱/水景璞堤的
+    // 降規房間會被當成 $0 計價，導致算出來的住宿費用只有獨立雙人套房
+    // 那一間的錢，四人套房降規的房間全部漏算。
+    const downgradePrice = rates.doubleSuite > 0 ? rates.doubleSuite : rates.downgradeDoubleSuite;
+
     const amount =
       fullPriceCount * rates.fourPersonSuite +
-      downgradeCount * rates.downgradeDoubleSuite +
+      downgradeCount * downgradePrice +
       doubleSuiteCount * rates.doubleSuite +
       doublePlainCount * rates.doublePlain;
 
@@ -229,12 +241,15 @@ export function buildMinimumGuestsBlockedQuote(
     addOnFee: 0,
     visitorFee: 0,
     discountAmount: request.discountAmount ?? 0,
+    invoiceTaxAmount: 0,
     packageTotal: 0,
     deposit: 0,
     balanceDue: 0,
     capacityWarning: null,
     minimumGuestsWarning,
     roomConfigWarning: null,
+    roomAllocation: null,
+    messageContext: null,
   };
 }
 
@@ -246,7 +261,8 @@ export function buildMinimumGuestsBlockedQuote(
  * 若 capacityWarning、minimumGuestsWarning、roomConfigWarning 任一
  * 不為 null，packageTotal / deposit / balanceDue 會被強制歸零，代表
  * 「不允許產生報價」，呼叫端（server action）應該擋下後續的建立報價/
- * 訂房流程。
+ * 訂房流程；此時 messageContext 也會是 null（不提供產生客人版報價
+ * 訊息所需的參考資料，避免呼叫端誤用被擋下的報價產生訊息）。
  */
 export function calculatePackageQuote(params: {
   request: StayRequest;
@@ -255,7 +271,18 @@ export function calculatePackageQuote(params: {
   holidayMap: HolidayMap;
   baseGuestsByDayType: Record<DayType, number>;
   rateTableByCategory: Record<PriceCategory, NightlyRateTable>;
+  /**
+   * 民宿顯示名稱與匯款帳戶，只用於組成 messageContext（客人版報價
+   * 訊息），不影響金額計算。設計成 optional／可能是 undefined：
+   * 就算查詢這筆資料失敗或呼叫端忘記傳，也不應該讓整個報價計算
+   * (價格才是核心功能) 因此掛掉——沒有這筆資料時，退化成
+   * messageContext: null，其餘金額照常算，只是無法顯示「複製報價
+   * 內容」而已。
+   */
+  propertyDisplay?: { name: string; bank: BankInfo | null };
   depositOptions?: { rate?: number; roundingUnit?: number };
+  /** 尾款須於入住前幾天匯款，預設 7 天，只用於 messageContext 顯示文字 */
+  balanceDueDaysBeforeCheckIn?: number;
 }): PackageQuote {
   const {
     request,
@@ -264,7 +291,9 @@ export function calculatePackageQuote(params: {
     holidayMap,
     baseGuestsByDayType,
     rateTableByCategory,
+    propertyDisplay,
     depositOptions,
+    balanceDueDaysBeforeCheckIn = 7,
   } = params;
 
   // 嬰幼兒不佔床位、不計入人數上下限與房型分配計算，純記錄用途。
@@ -276,12 +305,24 @@ export function calculatePackageQuote(params: {
   const visitorQty = request.visitorQty ?? 0;
   const discountAmount = request.discountAmount ?? 0;
 
-  const { allocation, warning: roomConfigWarning } = resolveRoomAllocation(
+  const { allocation, warning: roomOverrideWarning } = resolveRoomAllocation(
     request.propertyCode,
     totalGuests,
     roomCounts,
     request.roomOverride
   );
+
+  // 加床數量驗證（加固定床不能超過降規房間數；加臨時床有各民宿固定
+  // 上限），跟房型覆寫驗證合併成同一個 roomConfigWarning——兩者本質
+  // 上都是「這次的房型/加床設定有沒有超過實際可用的資源」。
+  const extraBedWarning = checkExtraBedLimits({
+    propertyCode: request.propertyCode,
+    extraBedFixedQty,
+    extraBedTempQty,
+    fourPersonDowngradeCount: allocation.downgradeCount,
+  });
+  const roomConfigWarning =
+    [roomOverrideWarning, extraBedWarning].filter((w): w is string => Boolean(w)).join("；") || null;
 
   const capacityWarning = checkCapacity({
     totalGuests,
@@ -321,7 +362,7 @@ export function calculatePackageQuote(params: {
   const addOnFee = calculateAddOnFee(request.addOns, servicePrices);
   const visitorFee = calculateVisitorFee(visitorQty, servicePrices);
 
-  const packageTotal = blocked
+  const subtotalAfterDiscount = blocked
     ? 0
     : accommodationTotal +
       extraBedFee +
@@ -331,7 +372,23 @@ export function calculatePackageQuote(params: {
       visitorFee -
       discountAmount;
 
+  // 開發票時，稅金以折扣後小計的 8% 計算，加進包棟總費用裡
+  const invoiceTaxAmount = blocked || !request.invoice?.required
+    ? 0
+    : Math.round(subtotalAfterDiscount * INVOICE_TAX_RATE);
+
+  const packageTotal = blocked ? 0 : subtotalAfterDiscount + invoiceTaxAmount;
+
   const deposit = blocked ? 0 : calculateDeposit(packageTotal, depositOptions);
+
+  const roomAllocation = {
+    fourPersonSuiteCount: allocation.fullPriceCount,
+    fourPersonDowngradeCount: allocation.downgradeCount,
+    doubleSuiteCount: allocation.doubleSuiteCount,
+    doublePlainCount: allocation.doublePlainCount,
+  };
+
+  const depositRate = depositOptions?.rate ?? 0.3;
 
   return {
     request,
@@ -344,11 +401,25 @@ export function calculatePackageQuote(params: {
     addOnFee,
     visitorFee,
     discountAmount,
+    invoiceTaxAmount,
     packageTotal,
     deposit,
     balanceDue: packageTotal - deposit,
     capacityWarning,
     minimumGuestsWarning,
     roomConfigWarning,
+    roomAllocation,
+    messageContext:
+      blocked || !propertyDisplay
+        ? null
+        : {
+            propertyName: propertyDisplay.name,
+            bank: propertyDisplay.bank,
+            rateTableByCategory,
+            baseGuestsByDayType,
+            servicePrices,
+            depositRatePercent: Math.round(depositRate * 10),
+            balanceDueDaysBeforeCheckIn,
+          },
   };
 }
