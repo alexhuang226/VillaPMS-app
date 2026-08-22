@@ -256,7 +256,7 @@ export async function getPropertyDisplayInfo(
 ): Promise<{ name: string; bank: BankInfo | null }> {
   const supabase = createServiceRoleClient();
 
-  const [{ data: propRow, error: propError }, { data: settingsRow, error: settingsError }] =
+  const [{ data: propRowData, error: propError }, { data: settingsRowData, error: settingsError }] =
     await Promise.all([
       supabase.from("properties").select("name").eq("id", propertyId).single(),
       supabase
@@ -266,12 +266,16 @@ export async function getPropertyDisplayInfo(
         .maybeSingle(),
     ]);
 
-  if (propError || !propRow) {
+  if (propError || !propRowData) {
     throw new Error(`查詢民宿名稱失敗：${propError?.message ?? "no data"}`);
   }
   if (settingsError) {
     throw new Error(`查詢民宿匯款資訊失敗：${settingsError.message}`);
   }
+
+  // 型別檢查繞過：見 getReservationDetail 裡 `as any` 的說明
+  const propRow = propRowData as any;
+  const settingsRow = settingsRowData as any;
 
   const accountNumber = settingsRow?.bank_account_full ?? settingsRow?.bank_account_masked ?? "";
   const bank: BankInfo | null = settingsRow
@@ -454,14 +458,16 @@ export async function getQuoteSnapshot(quoteId: string): Promise<{
   if (error) {
     throw new Error(`查詢報價單失敗：${error.message}`);
   }
-  if (!data || !data.quote_snapshot || !data.request_snapshot) return null;
+  // 型別檢查繞過：見 getReservationDetail 裡 `as any` 的說明
+  const row = data as any;
+  if (!row || !row.quote_snapshot || !row.request_snapshot) return null;
 
   return {
-    quote: data.quote_snapshot as Record<string, unknown>,
-    request: data.request_snapshot as Record<string, unknown>,
-    status: data.status as string,
-    propertyId: data.property_id as string,
-    guestId: data.guest_id as string,
+    quote: row.quote_snapshot as Record<string, unknown>,
+    request: row.request_snapshot as Record<string, unknown>,
+    status: row.status as string,
+    propertyId: row.property_id as string,
+    guestId: row.guest_id as string,
   };
 }
 
@@ -619,7 +625,7 @@ export interface ReservationDetail {
 export async function getReservationDetail(reservationId: string): Promise<ReservationDetail | null> {
   const supabase = createServiceRoleClient();
 
-  const { data: row, error } = await supabase
+  const { data: rowData, error } = await supabase
     .from("reservations")
     .select(
       "id, reservation_no, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(name, property_settings(address, parking_info, map_url))"
@@ -630,7 +636,20 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
   if (error) {
     throw new Error(`查詢訂單詳細內容失敗：${error.message}`);
   }
-  if (!row) return null;
+  if (!rowData) return null;
+
+  // Vercel 上 `next build` 會跑完整的 tsc 型別檢查（本機 next dev 不會
+  // 這麼嚴格），這裡整段用 any——專案裡有一份產生好的 Supabase
+  // Database 型別檔案，是在 010/012 這兩次 migration（新增
+  // booking_source 以外的發票/房型數量欄位）之前產生的，還不知道這些
+  // 欄位存在，導致 select() 字串裡只要有一個型別檔案不認得的欄位，
+  // supabase-js 整個查詢結果的型別推論就會整組垮成 never。這是編譯期
+  // 的型別檢查問題，不是執行期的資料問題（資料庫欄位都在，值都對），
+  // 用 any 繞過型別檢查即可解決建置失敗；真正根治的做法是重新產生
+  // 那份型別檔案（例如執行 `npx supabase gen types typescript
+  // --project-id 你的專案ID > 型別檔案路徑`，把它更新成包含最新的
+  // schema），這裡沒辦法直接幫你執行。
+  const row = rowData as any;
 
   const [{ data: roomLinesData }, { data: itemsData }, { data: paymentsData }] = await Promise.all([
     supabase.from("reservation_room_lines").select("quantity, notes").eq("reservation_id", reservationId),
@@ -642,16 +661,16 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
       .order("due_date"),
   ]);
 
-  const propertySettings = (row as any).properties?.property_settings;
+  const propertySettings = row.properties?.property_settings;
   // Supabase 對一對一關聯有時候會回陣列有時候回物件，視實際外鍵設定而定，兩種都處理
   const settingsRow = Array.isArray(propertySettings) ? propertySettings[0] : propertySettings;
 
   return {
     id: row.id as string,
     reservationNo: row.reservation_no as string,
-    guestName: ((row as any).guests?.name as string) ?? "",
-    guestPhone: ((row as any).guests?.phone as string) ?? null,
-    propertyName: ((row as any).properties?.name as string) ?? "",
+    guestName: (row.guests?.name as string) ?? "",
+    guestPhone: (row.guests?.phone as string) ?? null,
+    propertyName: (row.properties?.name as string) ?? "",
     propertyAddress: (settingsRow?.address as string) ?? null,
     parkingInfo: (settingsRow?.parking_info as string) ?? null,
     mapUrl: (settingsRow?.map_url as string) ?? null,
@@ -755,8 +774,8 @@ export async function listReceivables(): Promise<ReceivableSummary[]> {
 /** 把一筆應收款標記為已收款 */
 export async function markPaymentPaid(paymentId: string): Promise<void> {
   const supabase = createServiceRoleClient();
-  const { error } = await supabase
-    .from("payments")
+  // 同樣的型別檢查問題，見 getReservationDetail 裡 `as any` 那段的說明
+  const { error } = await (supabase.from("payments") as any)
     .update({ status: "paid", paid_at: new Date().toISOString() })
     .eq("id", paymentId);
 
@@ -877,8 +896,8 @@ export interface ReservationUpdateFields {
 
 export async function updateReservation(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
   const supabase = createServiceRoleClient();
-  const { error } = await supabase
-    .from("reservations")
+  // 同樣的型別檢查問題，見 getReservationDetail 裡 `as any` 那段的說明
+  const { error } = await (supabase.from("reservations") as any)
     .update({
       check_in: fields.checkIn,
       check_out: fields.checkOut,

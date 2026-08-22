@@ -153,8 +153,11 @@ export async function calculateAndSaveQuoteAction(request: StayRequest): Promise
     const quoteNo = generateDocNo("Q");
 
     const supabase = createServiceRoleClient();
-    const { data: row, error } = await supabase
-      .from("quotes")
+    // 型別檢查繞過：見 lib/pricing/queries.ts 裡 getReservationDetail
+    // 的 `as any` 說明——專案裡的 Supabase 產生型別檔案比 010/012
+    // migration 舊，不認得 request_snapshot/quote_snapshot 這些欄位，
+    // 會讓 Vercel 的 `next build` 型別檢查失敗。
+    const { data: row, error } = await (supabase.from("quotes") as any)
       .insert({
         organization_id: organizationId,
         property_id: propertyId,
@@ -329,8 +332,7 @@ export async function confirmReservationFromQuoteAction(
   const organizationId = await getSingleOrganizationId();
   const supabase = createServiceRoleClient();
 
-  const { data: reservationRow, error: reservationError } = await supabase
-    .from("reservations")
+  const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
     .insert({
       organization_id: organizationId,
       property_id: propertyId,
@@ -409,7 +411,7 @@ export async function confirmReservationFromQuoteAction(
       });
     }
     if (roomLines.length > 0) {
-      const { error: roomLineError } = await supabase.from("reservation_room_lines").insert(roomLines);
+      const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
       if (roomLineError) throw new Error(`寫入房型明細失敗：${roomLineError.message}`);
     }
   }
@@ -450,12 +452,12 @@ export async function confirmReservationFromQuoteAction(
     });
   }
   if (itemLines.length > 0) {
-    const { error: itemError } = await supabase.from("reservation_items").insert(itemLines);
+    const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
     if (itemError) throw new Error(`寫入加購項目失敗：${itemError.message}`);
   }
 
   // 訂金應收款
-  const { error: paymentError } = await supabase.from("payments").insert({
+  const { error: paymentError } = await (supabase.from("payments") as any).insert({
     organization_id: organizationId,
     reservation_id: reservationId,
     payment_kind: "deposit",
@@ -475,7 +477,7 @@ export async function confirmReservationFromQuoteAction(
   checkInDate.setDate(checkInDate.getDate() - balanceDueDaysBeforeCheckIn);
   const balanceDueDate = checkInDate.toISOString().slice(0, 10);
 
-  const { error: balancePaymentError } = await supabase.from("payments").insert({
+  const { error: balancePaymentError } = await (supabase.from("payments") as any).insert({
     organization_id: organizationId,
     reservation_id: reservationId,
     payment_kind: "balance",
@@ -487,7 +489,7 @@ export async function confirmReservationFromQuoteAction(
   });
   if (balancePaymentError) throw new Error(`建立尾款應收款失敗：${balancePaymentError.message}`);
 
-  const { error: updateError } = await supabase.from("quotes").update({ status: "accepted" }).eq("id", quoteId);
+  const { error: updateError } = await (supabase.from("quotes") as any).update({ status: "accepted" }).eq("id", quoteId);
   if (updateError) throw new Error(`更新報價單狀態失敗：${updateError.message}`);
 
   return { reservationId, reservationNo };
