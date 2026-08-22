@@ -1,9 +1,34 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "包棟報價試算",
   description: "民宿包棟報價試算工具",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  // iOS Safari 對「加到主畫面」的支援跟 manifest.json 是分開的兩套
+  // 機制，沒有下面這幾個 apple-mobile-web-app-* 標籤的話，就算有
+  // manifest 也一樣會顯示網址列，不會有 standalone 的效果。
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "民宿管理",
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  // viewport-fit=cover 讓內容延伸到瀏海/圓角這些安全區域之外，
+  // 搭配 standalone 模式時畫面看起來才會滿版、不會四周留一圈黑邊
+  viewportFit: "cover",
+  themeColor: "#33422E",
 };
 
 /**
