@@ -590,6 +590,7 @@ export interface ReservationDetail {
   reservationNo: string;
   guestName: string;
   guestPhone: string | null;
+  propertyId: string;
   propertyName: string;
   propertyAddress: string | null;
   parkingInfo: string | null;
@@ -628,7 +629,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
   const { data: rowData, error } = await supabase
     .from("reservations")
     .select(
-      "id, reservation_no, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(name, property_settings(address, parking_info, map_url))"
+      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(name, property_settings(address, parking_info, map_url))"
     )
     .eq("id", reservationId)
     .maybeSingle();
@@ -670,6 +671,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
     reservationNo: row.reservation_no as string,
     guestName: (row.guests?.name as string) ?? "",
     guestPhone: (row.guests?.phone as string) ?? null,
+    propertyId: row.property_id as string,
     propertyName: (row.properties?.name as string) ?? "",
     propertyAddress: (settingsRow?.address as string) ?? null,
     parkingInfo: (settingsRow?.parking_info as string) ?? null,
@@ -922,4 +924,279 @@ export async function updateReservation(reservationId: string, fields: Reservati
   if (error) {
     throw new Error(`更新訂單失敗：${error.message}`);
   }
+}
+
+function generateReservationNo(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `R${y}${m}${d}-${rand}`;
+}
+
+/**
+ * 直接建立訂單，跳過報價／訂房確認單那一整套流程——Airbnb 等 OTA
+ * 平台上訂房的客人，房價、訂金/尾款收款都是平台在處理，民宿不需要
+ * 再產生一次報價單或訂房確認單給客人，這裡讓櫃檯直接把訂單記錄
+ * 建起來就好。
+ *
+ * 跟 confirmReservationFromQuoteAction（報價確認訂房那條路）不同的
+ * 地方：這裡不會建立 payments 應收款記錄（訂金/尾款）——OTA 平台
+ * 已經處理收款，不需要民宿這邊再追蹤一次應收，不然「查詢應收」頁面
+ * 會顯示這筆其實已經收到錢的訂單還在等收款，造成誤導。
+ */
+export interface CreateReservationFields {
+  propertyCode: PropertyCode;
+  guestName: string;
+  guestPhone: string;
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  infants: number;
+  pets: number;
+  visitors: number;
+  bookingSource: string;
+  finalTotal: number;
+  needsInvoice: boolean;
+  invoiceTitle: string | null;
+  invoiceTaxId: string | null;
+  fourPersonSuiteCount: number;
+  fourPersonDowngradeCount: number;
+  doubleSuiteCount: number;
+  doublePlainCount: number;
+  extraBedFixedRoomCodes: string[];
+  /** 加臨時床要放哪幾個房號 */
+  extraBedTempRoomCodes: string[];
+  extraRoomQty: number;
+  bbq: boolean;
+  foodTruck: boolean;
+  earlyCheckin: boolean;
+}
+
+export async function createReservationDirectly(
+  fields: CreateReservationFields
+): Promise<{ reservationId: string; reservationNo: string }> {
+  const supabase = createServiceRoleClient();
+  const organizationId = await getSingleOrganizationId();
+  const propertyId = await getPropertyId(fields.propertyCode);
+  const guestId = await findOrCreateGuest({ name: fields.guestName, phone: fields.guestPhone });
+  const reservationNo = generateReservationNo();
+
+  const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
+    .insert({
+      organization_id: organizationId,
+      property_id: propertyId,
+      guest_id: guestId,
+      source_quote_id: null, // 沒有經過報價流程
+      reservation_no: reservationNo,
+      booking_source: fields.bookingSource,
+      status: "confirmed",
+      check_in: fields.checkIn,
+      check_out: fields.checkOut,
+      adults: fields.adults,
+      children: fields.children,
+      infants: fields.infants,
+      pets: fields.pets,
+      visitors: fields.visitors,
+      quoted_total: fields.finalTotal,
+      final_total: fields.finalTotal,
+      currency: "TWD",
+      needs_invoice: fields.needsInvoice,
+      invoice_title: fields.needsInvoice ? fields.invoiceTitle : null,
+      invoice_tax_id: fields.needsInvoice ? fields.invoiceTaxId : null,
+      four_person_suite_count: fields.fourPersonSuiteCount,
+      four_person_downgrade_count: fields.fourPersonDowngradeCount,
+      double_suite_count: fields.doubleSuiteCount,
+      double_plain_count: fields.doublePlainCount,
+    })
+    .select("id")
+    .single();
+
+  if (reservationError || !reservationRow) {
+    throw new Error(`建立訂單失敗：${reservationError?.message}`);
+  }
+  const reservationId = reservationRow.id as string;
+
+  // 房型明細（跟 confirmReservationFromQuoteAction 同樣的寫法，只記
+  // 數量／說明，正式的金額 authoritative 來源是 reservations.final_total）
+  const roomLines: Record<string, unknown>[] = [];
+  if (fields.fourPersonSuiteCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.fourPersonSuiteCount, notes: "四人套房" });
+  }
+  if (fields.fourPersonDowngradeCount > 0) {
+    roomLines.push({
+      reservation_id: reservationId,
+      line_role: "included",
+      quantity: fields.fourPersonDowngradeCount,
+      beds_open: 1,
+      notes: "降規四人套房（提供1床，以雙人套房計費）",
+    });
+  }
+  if (fields.doubleSuiteCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doubleSuiteCount, notes: "雙人套房" });
+  }
+  if (fields.doublePlainCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doublePlainCount, notes: "雙人雅房" });
+  }
+  if (roomLines.length > 0) {
+    const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
+    if (roomLineError) throw new Error(`寫入房型明細失敗：${roomLineError.message}`);
+  }
+
+  // 加購項目（加床/加開房間/烤肉/餐車/提前入住）——這幾項的單價用
+  // services 表的固定牌價查出來記錄在每筆項目上，方便之後對帳看
+  // 明細；但這不影響 reservations.final_total（那個數字是職員手動
+  // 填的實收金額，不會因為這裡查到的牌價被覆蓋或加總回去）。
+  const servicePrices = await getFlatServicePrices(propertyId);
+  const itemLines: Record<string, unknown>[] = [];
+
+  if (fields.extraBedFixedRoomCodes.length > 0) {
+    const qty = fields.extraBedFixedRoomCodes.length;
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "extra_bed_fixed",
+      description: "加固定床",
+      quantity: qty,
+      unit_price: servicePrices.extraBedFixed,
+      amount: servicePrices.extraBedFixed * qty,
+      notes: `房號：${fields.extraBedFixedRoomCodes.join("、")}`,
+    });
+  }
+  if (fields.extraBedTempRoomCodes.length > 0) {
+    const qty = fields.extraBedTempRoomCodes.length;
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "extra_bed_temporary",
+      description: "加臨時床",
+      quantity: qty,
+      unit_price: servicePrices.extraBedTemp,
+      amount: servicePrices.extraBedTemp * qty,
+      notes: `房號：${fields.extraBedTempRoomCodes.join("、")}`,
+    });
+  }
+  if (fields.extraRoomQty > 0) {
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "other",
+      description: "加開房間",
+      quantity: fields.extraRoomQty,
+      unit_price: servicePrices.extraRoom,
+      amount: servicePrices.extraRoom * fields.extraRoomQty,
+    });
+  }
+  if (fields.bbq) {
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "bbq",
+      description: "烤肉",
+      quantity: 1,
+      unit_price: servicePrices.bbq,
+      amount: servicePrices.bbq,
+    });
+  }
+  if (fields.foodTruck) {
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "food_truck",
+      description: "餐車場地費",
+      quantity: 1,
+      unit_price: servicePrices.foodTruck,
+      amount: servicePrices.foodTruck,
+    });
+  }
+  if (fields.earlyCheckin) {
+    itemLines.push({
+      reservation_id: reservationId,
+      item_type: "early_checkin",
+      description: "提前入住",
+      quantity: 1,
+      unit_price: servicePrices.earlyCheckin,
+      amount: servicePrices.earlyCheckin,
+    });
+  }
+  if (itemLines.length > 0) {
+    const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
+    if (itemError) throw new Error(`寫入加購項目失敗：${itemError.message}`);
+  }
+
+  return { reservationId, reservationNo };
+}
+
+/** 民宿基本資料＋設定，編輯民宿資料頁面用 */
+export interface PropertySettingsDetail {
+  propertyId: string;
+  code: string;
+  name: string;
+  bankName: string | null;
+  bankBranch: string | null;
+  bankAccountFull: string | null;
+  accountName: string | null;
+  address: string | null;
+  parkingInfo: string | null;
+  mapUrl: string | null;
+}
+
+export async function getAllPropertiesSettings(): Promise<PropertySettingsDetail[]> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("properties")
+    .select(
+      "id, code, name, property_settings(bank_name, bank_branch, bank_account_full, account_name, address, parking_info, map_url)"
+    )
+    .order("code");
+
+  if (error) {
+    throw new Error(`查詢民宿資料失敗：${error.message}`);
+  }
+
+  return ((data ?? []) as any[]).map((row) => {
+    const settings = Array.isArray(row.property_settings) ? row.property_settings[0] : row.property_settings;
+    return {
+      propertyId: row.id as string,
+      code: row.code as string,
+      name: row.name as string,
+      bankName: (settings?.bank_name as string) ?? null,
+      bankBranch: (settings?.bank_branch as string) ?? null,
+      bankAccountFull: (settings?.bank_account_full as string) ?? null,
+      accountName: (settings?.account_name as string) ?? null,
+      address: (settings?.address as string) ?? null,
+      parkingInfo: (settings?.parking_info as string) ?? null,
+      mapUrl: (settings?.map_url as string) ?? null,
+    };
+  });
+}
+
+export interface PropertySettingsFields {
+  name: string;
+  bankName: string | null;
+  bankBranch: string | null;
+  bankAccountFull: string | null;
+  accountName: string | null;
+  address: string | null;
+  parkingInfo: string | null;
+  mapUrl: string | null;
+}
+
+export async function updatePropertySettings(propertyId: string, fields: PropertySettingsFields): Promise<void> {
+  const supabase = createServiceRoleClient();
+
+  const { error: nameError } = await (supabase.from("properties") as any)
+    .update({ name: fields.name })
+    .eq("id", propertyId);
+  if (nameError) throw new Error(`更新民宿名稱失敗：${nameError.message}`);
+
+  const { error: settingsError } = await (supabase.from("property_settings") as any)
+    .update({
+      bank_name: fields.bankName,
+      bank_branch: fields.bankBranch,
+      bank_account_full: fields.bankAccountFull,
+      account_name: fields.accountName,
+      address: fields.address,
+      parking_info: fields.parkingInfo,
+      map_url: fields.mapUrl,
+    })
+    .eq("property_id", propertyId);
+  if (settingsError) throw new Error(`更新民宿設定失敗：${settingsError.message}`);
 }

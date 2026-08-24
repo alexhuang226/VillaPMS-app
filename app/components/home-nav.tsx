@@ -2,19 +2,11 @@
 
 /**
  * 首頁導覽
- *
- * 目前實際可用的功能：製作報價單／查詢報價單／查詢訂單／查詢應收。
- * 排班相關（安排排班／本日班表／每月班表）先放路由但顯示「即將
- * 推出」——這是完全不同的功能領域（員工排班/任務指派），資料庫
- * schema 裡雖然已經有 housekeeping_tasks 之類的表，但還沒有實際的
- * 查詢/操作邏輯跟畫面，需要先確認具體要怎麼運作（例如：排班是排
- * 「哪個員工哪天上班」，還是排「哪個員工負責哪間房的清潔任務」？
- * 本日班表跟每月班表要顯示什麼欄位？）才能開始做，不想先亂猜一個
- * 版本出來。
  */
 
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
+import { logoutAction } from "@/app/actions/auth";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -52,9 +44,11 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/quotes", icon: "🔍", title: "查詢報價單", description: "找以前的報價，客人確認後轉為訂房記錄" },
   { href: "/reservations", icon: "📖", title: "查詢訂單", description: "查已確認的訂房記錄與付款狀態" },
   { href: "/receivables", icon: "💰", title: "查詢應收", description: "訂金／尾款收款狀況，標記已收款" },
-  { href: "/schedule", icon: "🗓️", title: "安排排班", description: "即將推出", disabled: true },
-  { href: "/schedule/today", icon: "📅", title: "本日班表", description: "即將推出", disabled: true },
-  { href: "/schedule/monthly", icon: "🗂️", title: "每月班表", description: "即將推出", disabled: true },
+  { href: "/schedule/today", icon: "📅", title: "本日班表", description: "今天上班名單與房務準備內容" },
+  { href: "/schedule/monthly", icon: "🗂️", title: "房務排班", description: "月曆檢視、指派房務人員，退房訂單缺人會警示" },
+  { href: "/employees", icon: "🧑‍💼", title: "員工管理", description: "新增／編輯員工資料" },
+  { href: "/properties", icon: "🏠", title: "民宿資料", description: "編輯匯款帳號、地址、停車資訊" },
+  { href: "/revenue", icon: "📊", title: "營收統計", description: "年度總營收、住房率、每月明細" },
 ];
 
 export function HomeNav() {
@@ -66,7 +60,7 @@ export function HomeNav() {
             宜蘭・包棟民宿
           </p>
           <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
-            民宿管理
+            民宿管理系統
           </h1>
         </header>
 
@@ -100,6 +94,12 @@ export function HomeNav() {
             )
           )}
         </div>
+
+        <form action={logoutAction} className="mt-4">
+          <button type="submit" className="w-full border py-2.5 text-xs tracking-wide" style={{ borderColor: colors.line, color: colors.muted }}>
+            登出
+          </button>
+        </form>
       </div>
     </div>
   );

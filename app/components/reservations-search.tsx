@@ -23,8 +23,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, getCalendarReservationsAction, getReservationDetailAction, updateReservationAction } from "@/app/actions/reservation";
-import type { CalendarReservation, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
+import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction } from "@/app/actions/reservation";
+import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
+import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -89,6 +90,53 @@ const PAYMENT_STATUS_LABEL: Record<string, string> = {
   void: "作廢",
   refunded: "已退款",
 };
+
+const BOOKING_SOURCE_OPTIONS = Object.entries(BOOKING_SOURCE_LABEL).map(([value, label]) => ({ value, label }));
+
+const EMPTY_CREATE_FIELDS: CreateReservationFields = {
+  propertyCode: "zhici",
+  guestName: "",
+  guestPhone: "",
+  checkIn: "",
+  checkOut: "",
+  adults: 10,
+  children: 0,
+  infants: 0,
+  pets: 0,
+  visitors: 0,
+  bookingSource: "airbnb",
+  finalTotal: 0,
+  needsInvoice: false,
+  invoiceTitle: null,
+  invoiceTaxId: null,
+  fourPersonSuiteCount: 0,
+  fourPersonDowngradeCount: 0,
+  doubleSuiteCount: 0,
+  doublePlainCount: 0,
+  extraBedFixedRoomCodes: [],
+  extraBedTempRoomCodes: [],
+  extraRoomQty: 0,
+  bbq: false,
+  foodTruck: false,
+  earlyCheckin: false,
+};
+
+/** Date 物件轉成「本地日曆日期」的 'YYYY-MM-DD'（不透過 toISOString，
+ * 那個一定轉成 UTC，會有時區位移問題，見 quote-form.tsx 的說明） */
+function formatLocalDate(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** 新增訂單表單的預設入住日期：今天起一個月後——跟報價單的預設值
+ * 一致（見 quote-form.tsx 的 getDefaultCheckIn） */
+function getDefaultCreateCheckIn(): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() + 1);
+  return formatLocalDate(d);
+}
 
 const WEEKDAY_HEADERS = ["日", "一", "二", "三", "四", "五", "六"];
 
@@ -197,6 +245,23 @@ export function ReservationsSearch() {
   const [editError, setEditError] = useState<string | null>(null);
   const [editFields, setEditFields] = useState<ReservationUpdateFields | null>(null);
 
+  // 直接建立訂單（跳過報價/訂房確認單流程），給 Airbnb 等 OTA 平台
+  // 訂房用——房價、收款平台都處理過了，不需要走一次報價確認流程
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [createFields, setCreateFields] = useState<CreateReservationFields>(EMPTY_CREATE_FIELDS);
+  const [isSavingCreate, setIsSavingCreate] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createdReservationNo, setCreatedReservationNo] = useState<string | null>(null);
+  // 總金額刻意留空白，不套用計價公式（Airbnb 等平台的房價是平台
+  // 訂的，不是照民宿自己的計價規則算），用獨立的原始字串狀態存，
+  // 才能讓欄位一開始是真的空白，不是顯示著「0」
+  const [finalTotalRaw, setFinalTotalRaw] = useState("");
+  // 房型配置是不是職員手動調整過——調整過之後，人數再變動就不要
+  // 覆蓋掉職員自己填的數字，跟報價單「手動覆寫房型」的邏輯一致
+  const [roomAllocationTouched, setRoomAllocationTouched] = useState(false);
+  // 加臨時床要放哪些房號的選項，跟著民宿變動即時查
+  const [extraBedRoomOptions, setExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
+
   // 年/月留到 mount 後才設定成「今天」，避免 SSR 跟 client 算出的
   // 「今天」不一樣造成 hydration 不一致的警告/閃爍（跟 quote-form.tsx
   // 入住日期預設值的處理方式一樣）。
@@ -227,6 +292,118 @@ export function ReservationsSearch() {
       cancelled = true;
     };
   }, [year, month]);
+
+  function openCreateForm() {
+    const defaultCheckIn = getDefaultCreateCheckIn();
+    setCreateFields({ ...EMPTY_CREATE_FIELDS, checkIn: defaultCheckIn, checkOut: addOneDayToYMD(defaultCheckIn) });
+    setFinalTotalRaw("");
+    setRoomAllocationTouched(false);
+    setExtraBedRoomOptions([]);
+    setCreateError(null);
+    setCreatedReservationNo(null);
+    setShowCreateForm(true);
+    setSelectedId(null);
+  }
+
+  function updateCreateField<K extends keyof CreateReservationFields>(key: K, value: CreateReservationFields[K]) {
+    setCreateFields((prev) => ({ ...prev, [key]: value }));
+  }
+
+  /** 入住日期規則跟報價單一致：只要動了入住日期，退房日期就重算成
+   * 入住日期+1 天（見 quote-form.tsx 的 handleCheckInChange 說明） */
+  function handleCreateCheckInChange(newCheckIn: string) {
+    setCreateFields((prev) => ({
+      ...prev,
+      checkIn: newCheckIn,
+      checkOut: newCheckIn ? addOneDayToYMD(newCheckIn) : prev.checkOut,
+    }));
+  }
+
+  /** 房型數量欄位一旦被手動改過，就不要再讓自動計算蓋掉——理由跟
+   * 報價單「手動覆寫房型」一致：職員可能因為客人特殊需求調整過，
+   * 人數再變動時不應該悄悄把調整覆蓋掉 */
+  function updateCreateRoomField<K extends keyof CreateReservationFields>(key: K, value: CreateReservationFields[K]) {
+    setRoomAllocationTouched(true);
+    updateCreateField(key, value);
+  }
+
+  function toggleCreateExtraBedRoom(field: "extraBedFixedRoomCodes" | "extraBedTempRoomCodes", code: string) {
+    setCreateFields((prev) => ({
+      ...prev,
+      [field]: prev[field].includes(code) ? prev[field].filter((c) => c !== code) : [...prev[field], code],
+    }));
+  }
+
+  // 房型配置自動跟著民宿／人數重算，套用跟報價單同一套分配公式——
+  // 只有表單開著、而且房型還沒被手動調整過才會自動重算
+  useEffect(() => {
+    if (!showCreateForm || roomAllocationTouched) return;
+    let cancelled = false;
+    calculateAutoRoomAllocationAction(createFields.propertyCode, createFields.adults, createFields.children)
+      .then((allocation) => {
+        if (cancelled) return;
+        setCreateFields((prev) => ({
+          ...prev,
+          fourPersonSuiteCount: allocation.fourPersonSuiteCount,
+          fourPersonDowngradeCount: allocation.fourPersonDowngradeCount,
+          doubleSuiteCount: allocation.doubleSuiteCount,
+          doublePlainCount: allocation.doublePlainCount,
+        }));
+      })
+      .catch(() => {
+        // 自動計算失敗不擋表單——職員還是可以手動填房型數量
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showCreateForm, roomAllocationTouched, createFields.propertyCode, createFields.adults, createFields.children]);
+
+  // 加臨時床的房號選項跟著民宿變動即時查——民宿改變時，之前選的
+  // 房號可能不再適用，一併清空避免留著錯的民宿的房號
+  useEffect(() => {
+    if (!showCreateForm) return;
+    let cancelled = false;
+    getExtraBedRoomOptionsForCreateAction(createFields.propertyCode)
+      .then((options) => {
+        if (!cancelled) setExtraBedRoomOptions(options);
+      })
+      .catch(() => {
+        // 查詢失敗不擋表單，只是加床位置選單會是空的
+      });
+    setCreateFields((prev) => ({ ...prev, extraBedFixedRoomCodes: [], extraBedTempRoomCodes: [] }));
+    return () => {
+      cancelled = true;
+    };
+  }, [showCreateForm, createFields.propertyCode]);
+
+  async function handleCreateSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!createFields.guestName.trim() || !createFields.checkIn || !createFields.checkOut) {
+      setCreateError("請填寫客人姓名、入住日期、退房日期");
+      return;
+    }
+    setIsSavingCreate(true);
+    setCreateError(null);
+    try {
+      const { reservationNo } = await createReservationDirectlyAction({
+        ...createFields,
+        guestName: createFields.guestName.trim(),
+        guestPhone: createFields.guestPhone.trim(),
+        finalTotal: Number(finalTotalRaw) || 0,
+      });
+      setCreatedReservationNo(reservationNo);
+      setShowCreateForm(false);
+      // 建立成功後重新查一次目前這個月的日曆，讓新訂單馬上顯示出來
+      if (year !== null && month !== null) {
+        const rows = await getCalendarReservationsAction(year, month);
+        setReservations(rows);
+      }
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "建立訂單失敗，請稍後再試");
+    } finally {
+      setIsSavingCreate(false);
+    }
+  }
 
   function goToPrevMonth() {
     if (year === null || month === null) return;
@@ -311,12 +488,33 @@ export function ReservationsSearch() {
   }
 
   async function saveEdit() {
-    if (!selectedId || !editFields) return;
+    if (!selectedId || !editFields || !detail) return;
+
+    // 退房日期如果被改掉，原本安排的房務人員不一定能配合新日期，
+    // 需要先跟他們確認過才能繼續用——不是靜靜地留著一筆「看起來已經
+    // 排好人」但其實日期已經不對的排班，避免當天開天窗。這裡用簡單
+    // 的瀏覽器確認視窗詢問，選「確定」才會清掉舊退房日的房務排班，
+    // 選「取消」就維持原本的排班不動（畫面上之後可能會顯示「非退房
+    // 日」的提醒，見 monthly-schedule.tsx 的說明）。
+    const checkOutChanged = editFields.checkOut !== detail.checkOut;
+    let shouldClearOldAssignment = false;
+    if (checkOutChanged) {
+      shouldClearOldAssignment = window.confirm(
+        `退房日期從 ${detail.checkOut} 改成 ${editFields.checkOut}。\n\n` +
+          `原本安排在 ${detail.checkOut} 的房務人員需要重新跟他們確認新日期能不能配合。\n\n` +
+          `要不要現在把 ${detail.checkOut} 這天的房務排班清除，之後再重新安排？\n` +
+          `（選「取消」會保留原本的排班，但日期已經跟訂單對不上了，要自己記得處理）`
+      );
+    }
+
     setIsSaving(true);
     setEditError(null);
 
     try {
       await updateReservationAction(selectedId, editFields);
+      if (checkOutChanged && shouldClearOldAssignment) {
+        await deleteStaffAssignmentsForPropertyDateAction(detail.propertyId, detail.checkOut);
+      }
       // 存檔成功後重新讀一次訂單內容，確保畫面顯示的跟資料庫一致
       const result = await getReservationDetailAction(selectedId);
       if (result) setDetail(result);
@@ -369,6 +567,462 @@ export function ReservationsSearch() {
             訂單查詢
           </h1>
         </header>
+
+        {!showCreateForm && (
+          <button
+            type="button"
+            onClick={openCreateForm}
+            className="mb-4 w-full border py-2 text-xs tracking-wide"
+            style={{ borderColor: colors.line, color: colors.ink }}
+          >
+            ＋ 新增訂單（Airbnb 等平台訂房，跳過報價流程直接建立）
+          </button>
+        )}
+
+        {createdReservationNo && (
+          <p className="mb-4 border-l-2 pl-3 text-xs leading-relaxed" style={{ borderColor: colors.pine, color: colors.pine }}>
+            ✓ 已建立訂單，訂單編號：{createdReservationNo}
+          </p>
+        )}
+
+        {showCreateForm && (
+          <form onSubmit={handleCreateSubmit} className="mb-6 flex flex-col gap-4 border p-4" style={{ borderColor: colors.line }}>
+            <p className="text-xs font-bold" style={{ color: colors.blue }}>
+              新增訂單
+            </p>
+
+            <div>
+              <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                民宿
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {PROPERTIES.map((p) => {
+                  const active = createFields.propertyCode === p.code;
+                  return (
+                    <button
+                      key={p.code}
+                      type="button"
+                      onClick={() => updateCreateField("propertyCode", p.code as CreateReservationFields["propertyCode"])}
+                      className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                      style={
+                        active
+                          ? { borderColor: p.color, backgroundColor: p.color, color: "#FFFFFF" }
+                          : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                      }
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  入住日期
+                </span>
+                <input
+                  type="date"
+                  value={createFields.checkIn}
+                  onChange={(e) => handleCreateCheckInChange(e.target.value)}
+                  required
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  退房日期
+                </span>
+                <input
+                  type="date"
+                  value={createFields.checkOut}
+                  onChange={(e) => updateCreateField("checkOut", e.target.value)}
+                  required
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  客人姓名
+                </span>
+                <input
+                  type="text"
+                  value={createFields.guestName}
+                  onChange={(e) => updateCreateField("guestName", e.target.value)}
+                  required
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  客人電話（選填）
+                </span>
+                <input
+                  type="tel"
+                  value={createFields.guestPhone}
+                  onChange={(e) => updateCreateField("guestPhone", e.target.value)}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            </div>
+
+            <label className="flex flex-col gap-1">
+              <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                客戶來源
+              </span>
+              <select
+                value={createFields.bookingSource}
+                onChange={(e) => updateCreateField("bookingSource", e.target.value)}
+                className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                {BOOKING_SOURCE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  大人
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.adults}
+                  onChange={(e) => updateCreateField("adults", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  小孩
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.children}
+                  onChange={(e) => updateCreateField("children", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  嬰幼兒
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.infants}
+                  onChange={(e) => updateCreateField("infants", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  寵物
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.pets}
+                  onChange={(e) => updateCreateField("pets", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  訪客
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.visitors}
+                  onChange={(e) => updateCreateField("visitors", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  總金額（選填，Airbnb 等平台的房價不套用計價公式，直接填實收金額）
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={finalTotalRaw}
+                  onChange={(e) => setFinalTotalRaw(e.target.value)}
+                  placeholder="0"
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            </div>
+
+            <div>
+              <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                房型配置（跟著民宿／人數自動建議，可以手動調整）
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    四人套房
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={createFields.fourPersonSuiteCount}
+                    onChange={(e) => updateCreateRoomField("fourPersonSuiteCount", Number(e.target.value))}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    降規四人套房
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={createFields.fourPersonDowngradeCount}
+                    onChange={(e) => updateCreateRoomField("fourPersonDowngradeCount", Number(e.target.value))}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    雙人套房
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={createFields.doubleSuiteCount}
+                    onChange={(e) => updateCreateRoomField("doubleSuiteCount", Number(e.target.value))}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    雙人雅房
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={createFields.doublePlainCount}
+                    onChange={(e) => updateCreateRoomField("doublePlainCount", Number(e.target.value))}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                額外服務
+              </p>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  加開房間
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.extraRoomQty}
+                  onChange={(e) => updateCreateField("extraRoomQty", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+
+              <div className="mt-3">
+                <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                  加固定床房號（複選）
+                </p>
+                {extraBedRoomOptions.length === 0 ? (
+                  <p className="text-[11px]" style={{ color: colors.alert }}>
+                    這間民宿沒有設定可加床的房號，請直接跟房務確認
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {extraBedRoomOptions.map((room) => {
+                      const active = createFields.extraBedFixedRoomCodes.includes(room.code);
+                      return (
+                        <button
+                          key={room.id}
+                          type="button"
+                          onClick={() => toggleCreateExtraBedRoom("extraBedFixedRoomCodes", room.code)}
+                          className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                          style={
+                            active
+                              ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                              : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                          }
+                        >
+                          {room.code}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3">
+                <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                  加臨時床房號（複選）
+                </p>
+                {extraBedRoomOptions.length === 0 ? (
+                  <p className="text-[11px]" style={{ color: colors.alert }}>
+                    這間民宿沒有設定可加床的房號，請直接跟房務確認
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {extraBedRoomOptions.map((room) => {
+                      const active = createFields.extraBedTempRoomCodes.includes(room.code);
+                      return (
+                        <button
+                          key={room.id}
+                          type="button"
+                          onClick={() => toggleCreateExtraBedRoom("extraBedTempRoomCodes", room.code)}
+                          className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                          style={
+                            active
+                              ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                              : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                          }
+                        >
+                          {room.code}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-4">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={createFields.bbq}
+                    onChange={(e) => updateCreateField("bbq", e.target.checked)}
+                    className="h-3.5 w-3.5"
+                    style={{ accentColor: colors.pine }}
+                  />
+                  <span className="text-xs">烤肉</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={createFields.foodTruck}
+                    onChange={(e) => updateCreateField("foodTruck", e.target.checked)}
+                    className="h-3.5 w-3.5"
+                    style={{ accentColor: colors.pine }}
+                  />
+                  <span className="text-xs">餐車場地</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={createFields.earlyCheckin}
+                    onChange={(e) => updateCreateField("earlyCheckin", e.target.checked)}
+                    className="h-3.5 w-3.5"
+                    style={{ accentColor: colors.pine }}
+                  />
+                  <span className="text-xs">提前入住</span>
+                </label>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={createFields.needsInvoice}
+                onChange={(e) => updateCreateField("needsInvoice", e.target.checked)}
+                className="h-3.5 w-3.5"
+                style={{ accentColor: colors.pine }}
+              />
+              需要開立發票
+            </label>
+
+            {createFields.needsInvoice && (
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    發票抬頭
+                  </span>
+                  <input
+                    type="text"
+                    value={createFields.invoiceTitle ?? ""}
+                    onChange={(e) => updateCreateField("invoiceTitle", e.target.value)}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span style={{ color: colors.muted }} className="text-[11px]">
+                    統一編號
+                  </span>
+                  <input
+                    type="text"
+                    value={createFields.invoiceTaxId ?? ""}
+                    onChange={(e) => updateCreateField("invoiceTaxId", e.target.value)}
+                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  />
+                </label>
+              </div>
+            )}
+
+            <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+              ⚠️ 這裡建立的訂單不會產生訂金/尾款應收款記錄——OTA 平台
+              已經處理收款，避免「查詢應收」顯示這筆其實已經收到錢的
+              訂單還在等收款。
+            </p>
+
+            {createError && (
+              <p role="alert" className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                {createError}
+              </p>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreateForm(false)}
+                disabled={isSavingCreate}
+                className="flex-1 border py-2.5 text-xs tracking-wide disabled:opacity-50"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingCreate}
+                className="flex-1 py-2.5 text-xs tracking-wide disabled:opacity-50"
+                style={{ backgroundColor: colors.pine, color: colors.pineText }}
+              >
+                {isSavingCreate ? "建立中…" : "建立訂單"}
+              </button>
+            </div>
+          </form>
+        )}
 
         <div className="flex items-center justify-between">
           <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.pine }}>

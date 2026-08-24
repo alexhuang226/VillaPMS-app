@@ -9,6 +9,10 @@
  */
 
 import {
+  createReservationDirectly,
+  getExtraBedEligibleRooms,
+  getPropertyId,
+  getPropertyRoomCounts,
   getReservationDetail,
   getReservationsForMonthCalendar,
   listReceivables,
@@ -18,12 +22,16 @@ import {
 } from "@/lib/pricing/queries";
 import type {
   CalendarReservation,
+  CreateReservationFields,
+  ExtraBedRoomOption,
   ReceivableSummary,
   ReservationDetail,
   ReservationSummary,
   ReservationUpdateFields,
 } from "@/lib/pricing/queries";
 import { buildReservationConfirmationMessage } from "@/lib/pricing/reservation-message";
+import { resolveRoomAllocation } from "@/lib/pricing/property-room-allocation";
+import type { PropertyCode } from "@/lib/pricing/types";
 
 export async function searchReservationsAction(params?: {
   search?: string;
@@ -77,4 +85,51 @@ export async function buildReservationConfirmationMessageAction(reservationId: s
  */
 export async function updateReservationAction(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
   return updateReservation(reservationId, fields);
+}
+
+/**
+ * 直接建立訂單，跳過報價／訂房確認單流程——給 Airbnb 等 OTA 平台
+ * 訂房用，房價跟收款平台都已經處理過了，不需要民宿這邊再走一次
+ * 報價確認的流程。
+ */
+export async function createReservationDirectlyAction(
+  fields: CreateReservationFields
+): Promise<{ reservationId: string; reservationNo: string }> {
+  return createReservationDirectly(fields);
+}
+
+/** 房型配置，只有數量，不含價格 */
+export interface AutoRoomAllocation {
+  fourPersonSuiteCount: number;
+  fourPersonDowngradeCount: number;
+  doubleSuiteCount: number;
+  doublePlainCount: number;
+}
+
+/**
+ * 純粹依人數自動算出房型配置，不跑計價——「新增訂單」表單用，跟
+ * 報價單套用完全同一套分配公式（resolveRoomAllocation），人數改變
+ * 時即時重算建議的房型組合，職員仍然可以在表單上手動調整覆蓋掉。
+ */
+export async function calculateAutoRoomAllocationAction(
+  propertyCode: PropertyCode,
+  adults: number,
+  children: number
+): Promise<AutoRoomAllocation> {
+  const propertyId = await getPropertyId(propertyCode);
+  const roomCounts = await getPropertyRoomCounts(propertyId);
+  const totalGuests = adults + children;
+  const { allocation } = resolveRoomAllocation(propertyCode, totalGuests, roomCounts);
+  return {
+    fourPersonSuiteCount: allocation.fullPriceCount,
+    fourPersonDowngradeCount: allocation.downgradeCount,
+    doubleSuiteCount: allocation.doubleSuiteCount,
+    doublePlainCount: allocation.doublePlainCount,
+  };
+}
+
+/** 該民宿「可以加床」的房間選項，跟報價確認訂房那邊共用同一個查詢 */
+export async function getExtraBedRoomOptionsForCreateAction(propertyCode: PropertyCode): Promise<ExtraBedRoomOption[]> {
+  const propertyId = await getPropertyId(propertyCode);
+  return getExtraBedEligibleRooms(propertyId);
 }
