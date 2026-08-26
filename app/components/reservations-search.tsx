@@ -57,9 +57,13 @@ const PROPERTIES = [
   // 一塊時顏色太深、不容易看清楚，這裡另外用一個淺一點的綠。
   // 陌隱／水景璞堤的顏色互換（原本陌隱藍、水景璞堤金，改成陌隱金、
   // 水景璞堤藍）。
-  { code: "zhici", label: "只此清綠", color: "#5C7A4A" },
-  { code: "moyin", label: "陌隱", color: colors.gold },
-  { code: "shuijing", label: "水景璞堤", color: colors.blue },
+  // shortLabel 跟房務班表（monthly-schedule.tsx 的
+  // PROPERTY_SHORT_LABELS）用同一套簡稱，日曆色塊欄位窄，全名塞
+  // 不下——即使只跨 1 天的訂單也要看得出是哪間民宿，不能乾脆不顯示
+  // 文字，只顯示顏色的話還要另外去對照圖例，不夠直覺。
+  { code: "zhici", label: "只此清綠", shortLabel: "清綠", color: "#5C7A4A" },
+  { code: "moyin", label: "陌隱", shortLabel: "陌隱", color: colors.gold },
+  { code: "shuijing", label: "水景璞堤", shortLabel: "璞堤", color: colors.blue },
 ];
 
 /** 訂單狀態——只留這三種給人選/顯示，資料庫的 enum 本身還有
@@ -237,6 +241,16 @@ function computeWeekSegments(
 
     segments.push({ reservation: res, startCol, endCol, isActualStart, isActualEnd });
   }
+
+  // 依欄位（startCol）排序，確保畫面上的 DOM 順序跟實際欄位順序一致。
+  // 這點很關鍵：CSS Grid 預設的 sparse 排列演算法，是按照 DOM 順序
+  // 依序把每個元素往「目前游標之後最小可行的列」放，游標只會前進、
+  // 不會回頭去補前面空出來的位置——如果這裡傳進來的 propertyReservations
+  // 順序剛好不是按入住日期排的（例如來自資料庫查詢時沒有明確
+  // order by，或是歷史資料匯入時是照原始試算表的順序寫入、不是照
+  // 日期順序），會導致「後面的元素欄位其實比較前面」這種情況，
+  // 讓瀏覽器誤判成需要另開一排，即使實際上完全沒有日期重疊。
+  segments.sort((a, b) => a.startCol - b.startCol);
 
   return segments;
 }
@@ -1178,28 +1192,35 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                       const propertyReservations = reservations.filter((r) => r.propertyCode === property.code);
                       const segments = computeWeekSegments(week, year, month, propertyReservations);
                       return (
-                        <div key={property.code} className="grid grid-cols-7 gap-1" style={{ height: "16px" }}>
-                          {segments.map((seg) => (
-                            <button
-                              key={seg.reservation.id}
-                              type="button"
-                              onClick={() => handleSelectReservation(seg.reservation)}
-                              className="flex items-center justify-center overflow-hidden whitespace-nowrap px-0.5 text-[8px] leading-none text-white"
-                              style={{
-                                gridColumnStart: seg.startCol,
-                                gridColumnEnd: seg.endCol + 1,
-                                backgroundColor: property.color,
-                                borderTopLeftRadius: seg.isActualStart ? "8px" : 0,
-                                borderBottomLeftRadius: seg.isActualStart ? "8px" : 0,
-                                borderTopRightRadius: seg.isActualEnd ? "8px" : 0,
-                                borderBottomRightRadius: seg.isActualEnd ? "8px" : 0,
-                              }}
-                            >
-                              {property.label}
-                              {seg.reservation.hasBbq ? "🍖" : ""}
-                              {seg.reservation.balanceUnpaid ? " ⚠" : ""}
-                            </button>
-                          ))}
+                        <div
+                          key={property.code}
+                          className="grid grid-cols-7 gap-1"
+                          style={{ minHeight: "16px", gridAutoRows: "16px" }}
+                        >
+                          {segments.map((seg) => {
+                            return (
+                              <button
+                                key={seg.reservation.id}
+                                type="button"
+                                onClick={() => handleSelectReservation(seg.reservation)}
+                                className="flex h-full items-center justify-center overflow-hidden whitespace-nowrap px-0.5 text-[8px] leading-none text-white"
+                                style={{
+                                  gridColumnStart: seg.startCol,
+                                  gridColumnEnd: seg.endCol + 1,
+                                  gridRow: 1,
+                                  backgroundColor: property.color,
+                                  borderTopLeftRadius: seg.isActualStart ? "8px" : 0,
+                                  borderBottomLeftRadius: seg.isActualStart ? "8px" : 0,
+                                  borderTopRightRadius: seg.isActualEnd ? "8px" : 0,
+                                  borderBottomRightRadius: seg.isActualEnd ? "8px" : 0,
+                                }}
+                              >
+                                {property.shortLabel}
+                                {seg.reservation.hasBbq ? "🍖" : ""}
+                                {seg.reservation.balanceUnpaid ? " ⚠" : ""}
+                              </button>
+                            );
+                          })}
                         </div>
                       );
                     })}

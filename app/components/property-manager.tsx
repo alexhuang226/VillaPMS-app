@@ -1,13 +1,16 @@
 "use client";
 
 /**
- * 編輯民宿資料頁面
+ * 編輯民宿資料頁面（已併入房價設定）
  *
- * 只有 3 間民宿，固定列出來，各自一張卡片，點「編輯」展開表單。
- * 涵蓋的欄位：民宿名稱、匯款帳號（銀行/分行/帳號/戶名）、地址、
- * 停車資訊、導航連結——這些都是報價單/訂房確認單會實際用到的
- * 資料，不含房型/價格設定（那些牽涉到計價引擎，改動風險高很多，
- * 不在這個頁面開放編輯）。
+ * 只有 3 間民宿，固定列出來，各自一張卡片。每張卡片有兩個獨立的
+ * 編輯入口：
+ * - 「編輯」：民宿基本資料（名稱/匯款帳號/地址/停車/導航連結）
+ * - 「編輯房價」：這間民宿每種房型配置在平日/旺日/假日/節日/春節/
+ *   跨年的價格（原本是獨立的 /pricing 頁面，併進來這裡，同一個
+ *   畫面就能處理跟這間民宿有關的全部設定，不用再多開一個功能選單）
+ *
+ * 這兩個編輯區塊各自獨立展開/收合、互不影響。
  */
 
 import { useEffect, useState } from "react";
@@ -15,6 +18,8 @@ import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { getAllPropertiesSettingsAction, updatePropertySettingsAction } from "@/app/actions/property";
 import type { PropertySettingsDetail, PropertySettingsFields } from "@/lib/pricing/queries";
+import { getRoomConfigPricingAction, updateRoomConfigPricingAction } from "@/app/actions/pricing";
+import type { RoomConfigPricing } from "@/lib/pricing/rate-editor";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -39,6 +44,15 @@ const colors = {
   alert: "#A23E2D",
   blue: "#2455A4",
 };
+
+const PRICE_FIELDS: { key: keyof RoomConfigPricing; label: string }[] = [
+  { key: "weekdayPrice", label: "平日" },
+  { key: "peakPrice", label: "旺日" },
+  { key: "holidayPrice", label: "假日" },
+  { key: "festivalPrice", label: "節日" },
+  { key: "lunarNewYearPrice", label: "春節" },
+  { key: "newYearEvePrice", label: "跨年" },
+];
 
 function detailToFields(detail: PropertySettingsDetail): PropertySettingsFields {
   return {
@@ -71,10 +85,22 @@ export function PropertyManager() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // 民宿基本資料編輯
   const [editingId, setEditingId] = useState<string | null>(null);
   const [fields, setFields] = useState<PropertySettingsFields | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // 房價編輯（原 /pricing 頁面併過來的部分）——一次只會展開一間
+  // 民宿的房價，用 propertyId 記錄目前展開的是哪一間
+  const [pricingOpenId, setPricingOpenId] = useState<string | null>(null);
+  const [pricingConfigs, setPricingConfigs] = useState<RoomConfigPricing[] | null>(null);
+  const [pricingLoading, setPricingLoading] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
+  const [pricingEditedValues, setPricingEditedValues] = useState<Record<string, Partial<RoomConfigPricing>>>({});
+  const [pricingSavingKey, setPricingSavingKey] = useState<string | null>(null);
+  const [pricingSavedKey, setPricingSavedKey] = useState<string | null>(null);
+  const [pricingSaveError, setPricingSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     loadProperties();
@@ -125,6 +151,71 @@ export function PropertyManager() {
       setSaveError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function togglePricing(propertyId: string) {
+    if (pricingOpenId === propertyId) {
+      setPricingOpenId(null);
+      return;
+    }
+    setPricingOpenId(propertyId);
+    setPricingLoading(true);
+    setPricingError(null);
+    setPricingEditedValues({});
+    setPricingSavedKey(null);
+    try {
+      const data = await getRoomConfigPricingAction(propertyId);
+      setPricingConfigs(data);
+    } catch (err) {
+      setPricingError(err instanceof Error ? err.message : "讀取失敗，請稍後再試");
+    } finally {
+      setPricingLoading(false);
+    }
+  }
+
+  function pricingConfigKey(c: RoomConfigPricing): string {
+    return `${c.configLabel}|${c.roomTypeId}`;
+  }
+
+  function getPricingValue(c: RoomConfigPricing, field: keyof RoomConfigPricing): number {
+    const edited = pricingEditedValues[pricingConfigKey(c)]?.[field];
+    return typeof edited === "number" ? edited : (c[field] as number);
+  }
+
+  function updatePricingValue(c: RoomConfigPricing, field: keyof RoomConfigPricing, value: number) {
+    const key = pricingConfigKey(c);
+    setPricingEditedValues((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
+  }
+
+  async function handleSavePricing(c: RoomConfigPricing) {
+    if (!pricingOpenId) return;
+    const key = pricingConfigKey(c);
+    setPricingSavingKey(key);
+    setPricingSaveError(null);
+    setPricingSavedKey(null);
+    try {
+      await updateRoomConfigPricingAction({
+        weekdayTierId: c.weekdayTierId,
+        peakTierId: c.peakTierId,
+        holidayTierId: c.holidayTierId,
+        festivalTierId: c.festivalTierId,
+        lunarNewYearTierId: c.lunarNewYearTierId,
+        newYearEveTierId: c.newYearEveTierId,
+        weekdayPrice: getPricingValue(c, "weekdayPrice"),
+        peakPrice: getPricingValue(c, "peakPrice"),
+        holidayPrice: getPricingValue(c, "holidayPrice"),
+        festivalPrice: getPricingValue(c, "festivalPrice"),
+        lunarNewYearPrice: getPricingValue(c, "lunarNewYearPrice"),
+        newYearEvePrice: getPricingValue(c, "newYearEvePrice"),
+      });
+      setPricingSavedKey(key);
+      const data = await getRoomConfigPricingAction(pricingOpenId);
+      setPricingConfigs(data);
+    } catch (err) {
+      setPricingSaveError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
+    } finally {
+      setPricingSavingKey(null);
     }
   }
 
@@ -297,9 +388,14 @@ export function PropertyManager() {
                 <>
                   <div className="flex items-baseline justify-between">
                     <span className={`${display.className} text-xl italic`}>{p.name}</span>
-                    <button type="button" onClick={() => startEdit(p)} className="text-xs" style={{ color: colors.blue }}>
-                      編輯
-                    </button>
+                    <div className="flex gap-3">
+                      <button type="button" onClick={() => startEdit(p)} className="text-xs" style={{ color: colors.blue }}>
+                        編輯
+                      </button>
+                      <button type="button" onClick={() => togglePricing(p.propertyId)} className="text-xs" style={{ color: colors.blue }}>
+                        {pricingOpenId === p.propertyId ? "收合房價" : "編輯房價"}
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-2 flex flex-col gap-0.5 text-xs" style={{ color: colors.muted }}>
                     <p>
@@ -309,6 +405,69 @@ export function PropertyManager() {
                     <p>{p.parkingInfo || "（未填停車資訊）"}</p>
                   </div>
                 </>
+              )}
+
+              {pricingOpenId === p.propertyId && (
+                <div className="mt-3 border-t pt-3" style={{ borderColor: colors.line }}>
+                  {pricingLoading && (
+                    <p className="text-xs" style={{ color: colors.muted }}>
+                      讀取中…
+                    </p>
+                  )}
+                  {pricingError && (
+                    <p role="alert" className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                      {pricingError}
+                    </p>
+                  )}
+                  {!pricingLoading && pricingConfigs && pricingConfigs.length === 0 && (
+                    <p className="text-xs" style={{ color: colors.muted }}>
+                      這間民宿還沒有設定任何房型價格，需要先在資料庫建立 rate_rule_tiers（room_type_rate）才能在這裡編輯。
+                    </p>
+                  )}
+                  <div className="flex flex-col gap-3">
+                    {pricingConfigs?.map((c) => {
+                      const key = pricingConfigKey(c);
+                      return (
+                        <div key={key} className="border p-3" style={{ borderColor: colors.line }}>
+                          <p className={`${display.className} text-base italic`}>{c.configLabel}</p>
+                          <div className="mt-2 grid grid-cols-2 gap-3">
+                            {PRICE_FIELDS.map((f) => (
+                              <label key={f.key} className="flex flex-col gap-1">
+                                <span style={{ color: colors.muted }} className="text-[11px]">
+                                  {f.label}
+                                </span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={getPricingValue(c, f.key)}
+                                  onChange={(e) => updatePricingValue(c, f.key, Number(e.target.value))}
+                                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                                  style={{ borderColor: colors.line, color: colors.ink }}
+                                />
+                              </label>
+                            ))}
+                          </div>
+
+                          {pricingSavingKey === key && pricingSaveError && (
+                            <p role="alert" className="mt-2 text-[11px]" style={{ color: colors.alert }}>
+                              {pricingSaveError}
+                            </p>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleSavePricing(c)}
+                            disabled={pricingSavingKey === key}
+                            className="mt-3 w-full py-2 text-xs tracking-wide disabled:opacity-50"
+                            style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                          >
+                            {pricingSavingKey === key ? "儲存中…" : pricingSavedKey === key ? "已儲存 ✓" : "儲存"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
             </div>
           ))}

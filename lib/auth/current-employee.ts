@@ -47,3 +47,52 @@ export async function getCurrentEmployeePosition(): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * 查目前登入者對應的員工職稱＋簡稱，給首頁導覽顯示「目前是誰登入」
+ * 用。跟上面 getCurrentEmployeePosition() 是分開的兩個函式，不是
+ * 把舊函式改回傳更多欄位——避免動到其他已經在用
+ * getCurrentEmployeePosition() 那幾個頁面（只需要職稱，不需要簡稱）
+ * 的呼叫方式。
+ */
+export interface CurrentEmployeeInfo {
+  position: string | null;
+  shortName: string | null;
+}
+
+export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) return { position: null, shortName: null };
+
+  try {
+    const cookieStore = await cookies();
+    const supabase = createServerClient(url, anonKey, {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll() {
+          // 見 getCurrentEmployeePosition() 的說明
+        },
+      },
+    });
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return { position: null, shortName: null };
+
+    const serviceClient = createServiceRoleClient();
+    const { data } = await (serviceClient.from("employees") as any)
+      .select("position, short_name")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    return {
+      position: (data?.position as string) ?? null,
+      shortName: (data?.short_name as string) ?? null,
+    };
+  } catch {
+    return { position: null, shortName: null };
+  }
+}

@@ -1,8 +1,15 @@
 import { HomeNav } from "@/app/components/home-nav";
-import { getCurrentEmployeePosition } from "@/lib/auth/current-employee";
+import { getCurrentEmployeeInfo } from "@/lib/auth/current-employee";
 
 export default async function HomePage() {
-  const position = await getCurrentEmployeePosition();
+  const { position, shortName } = await getCurrentEmployeeInfo();
   const isHousekeepingStaff = position === "房務員";
-  return <HomeNav isHousekeepingStaff={isHousekeepingStaff} />;
+  const isHousekeepingManager = position === "管家";
+  return (
+    <HomeNav
+      isHousekeepingStaff={isHousekeepingStaff}
+      isHousekeepingManager={isHousekeepingManager}
+      currentUserShortName={shortName}
+    />
+  );
 }
