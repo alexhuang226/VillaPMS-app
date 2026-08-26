@@ -16,6 +16,15 @@
  * holidays 表裡的節日／跨年／春節區間，跟「星期六算假日」是兩條互不
  * 干擾的規則：如果某個星期六剛好是連續假期的最後一天或前一天，
  * 以 holidays 表驅動的旺日判斷優先。
+ *
+ * 「最後一天降為旺日」有一個例外：如果連假結束後緊接著的隔天，本身
+ * 依星期幾預設也會拿到旺日/假日待遇（星期五/六/日），代表這段休息
+ * 時間實際上還沒真的結束，只是 holidays 表沒有把那個普通週末日也列
+ * 進節日清單——這種情況下，連假最後一天不會被降級，維持原本的節日／
+ * 跨年／春節價格；只有隔天是「星期一到四」的正常平日，才代表假期真
+ * 的結束了，最後一天才降為旺日。例如：跨年元旦（1/1）隔天如果是週六，
+ * 1/1 維持完整假日價；228（2/28）隔天如果是週日，2/28 也維持假日價；
+ * 但清明兒童節連假最後一天隔天是平日的話，那天還是照樣降為旺日。
  */
 
 import type { DayType, PriceCategory } from "./types";
@@ -72,7 +81,10 @@ function groupConsecutiveDates(sortedDates: string[]): string[][] {
 /**
  * 把原始節日清單（單純的「日期→節日分類」）轉換成套用旺日規則之後的
  * 「最終日期分類」對照表：
- * - 連續 2 天以上的假期，最後一天改標記為 peak（旺日價，不是節日價）
+ * - 連續 2 天以上的假期，最後一天原則上改標記為 peak（旺日價，不是
+ *   節日價）——但如果緊接著的隔天依星期幾預設也是旺日/假日（代表
+ *   假期實際上還沒結束，只是那天沒有另外記錄在 holidays 表），則
+ *   最後一天不降級，維持原本的分類
  * - 假期第一天的前一天，也標記為 peak
  * - 單獨一天的節日則維持原分類不變
  *
@@ -94,8 +106,16 @@ export function buildEffectiveDayTypeMap(holidayMap: HolidayMap): EffectiveDayTy
     for (let i = 0; i < run.length - 1; i++) {
       effective.set(run[i], holidayMap.get(run[i])!);
     }
-    // 最後一天降為旺日
-    effective.set(run[run.length - 1], "peak");
+
+    // 最後一天要不要降為旺日，取決於隔天是不是「真的」平日——如果隔天
+    // 依星期幾預設也是旺日/假日（週五/六/日），代表假期還沒真的結束，
+    // 這裡不降級；只有隔天是週一到四的平日，才代表假期真的結束了。
+    // （run 的最後一天隔天必然不在 holidayMap 裡，不然 groupConsecutiveDates
+    // 早就把它併進同一段 run 了，所以這裡不需要另外判斷是否在 holidayMap）
+    const lastDay = run[run.length - 1];
+    const dayAfterRun = addDaysToDateStr(lastDay, 1);
+    const holidayReallyEndsHere = resolveDayTypeByDayOfWeek(dayAfterRun) === "weekday";
+    effective.set(lastDay, holidayReallyEndsHere ? "peak" : holidayMap.get(lastDay)!);
 
     // 假期開始前一天，若本身不是另一段假期的一部分，標記為旺日
     const dayBefore = addDaysToDateStr(run[0], -1);
@@ -119,11 +139,14 @@ export function resolveDayType(dateStr: string, effectiveMap: EffectiveDayTypeMa
 }
 
 /**
- * 把 6 種 day_type 收斂成「每日住宿費用明細」實際會用到的 5 種價格分類
- * （weekday 與 peak 共用「平旺日」價格）。
+ * 把 DayType 轉成 PriceCategory——兩者現在是一一對應的 6 種值，這個
+ * 函式留著純粹是語意上區分「這是日期分類」還是「這是報價要用的價格
+ * 分類」兩個不同概念，實際上就是直接照抄過去，不再把 weekday/peak
+ * 收斂成同一個 regular（那是舊版的行為，已經確認過會導致「平日」
+ * 「旺日」設定不同價格時，旺日夜晚仍然套用平日價格算，是需要修正
+ * 的問題，不是刻意設計）。
  */
 export function toPriceCategory(dayType: DayType): PriceCategory {
-  if (dayType === "weekday" || dayType === "peak") return "regular";
   return dayType;
 }
 

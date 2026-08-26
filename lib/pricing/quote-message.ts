@@ -56,9 +56,12 @@ const DAY_TYPE_INFO: Record<DayType, { label: string; note: string }> = {
   new_year_eve: { label: "跨年", note: "跨年夜" },
 };
 
-// 用於「房型訂價」參考區塊：weekday/peak 共用同一組「平旺日」價格
+// 用於「房型訂價」參考區塊——weekday/peak 現在各自獨立顯示，跟
+// DAY_TYPE_INFO 內容一致，兩份分開維護是因為使用情境不同（一個是
+// 入住人數提醒、一個是房型訂價明細），但標籤文字統一
 const PRICE_CATEGORY_INFO: Record<PriceCategory, { label: string; note: string }> = {
-  regular: { label: "平旺日", note: "週日至週五" },
+  weekday: { label: "平日", note: "週一至週四" },
+  peak: { label: "旺日", note: "週五/日/假日前" },
   holiday: { label: "假日", note: "週六" },
   festival: { label: "節日", note: "國定連假" },
   lunar_new_year: { label: "春節", note: "春節期間" },

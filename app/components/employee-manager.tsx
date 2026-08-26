@@ -95,7 +95,7 @@ function detailToFields(detail: EmployeeDetail): EmployeeFields {
   };
 }
 
-export function EmployeeManager() {
+export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeepingManager?: boolean }) {
   const [employees, setEmployees] = useState<EmployeeDetail[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -133,7 +133,8 @@ export function EmployeeManager() {
   }
 
   function startCreate() {
-    setFields(EMPTY_FIELDS);
+    // 管家只能新增房務員——職稱直接鎖定，畫面上也會把職稱欄位停用
+    setFields(isHousekeepingManager ? { ...EMPTY_FIELDS, position: "房務員" } : EMPTY_FIELDS);
     setSaveError(null);
     setEditingId("new");
   }
@@ -205,6 +206,11 @@ export function EmployeeManager() {
 
   const showForm = editingId !== null;
   const editingEmployee = editingId && editingId !== "new" ? employees?.find((e) => e.id === editingId) ?? null : null;
+  // 管家只看得到、只能管理房務員：列表只顯示房務員，編輯已存在的員工
+  // 時只能改在職狀態，其他欄位都不能碰（新增員工時可以填其他欄位，
+  // 但職稱鎖定房務員，見 startCreate）
+  const visibleEmployees = isHousekeepingManager ? employees?.filter((e) => e.position === "房務員") : employees;
+  const isRestrictedEdit = isHousekeepingManager && editingId !== null && editingId !== "new";
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
@@ -244,7 +250,7 @@ export function EmployeeManager() {
             )}
 
             <div className="mt-4 flex flex-col gap-2">
-              {employees?.map((emp) => {
+              {visibleEmployees?.map((emp) => {
                 const inactive = emp.employmentStatus !== "active";
                 return (
                   <button
@@ -272,7 +278,61 @@ export function EmployeeManager() {
           </>
         )}
 
-        {showForm && (
+        {isRestrictedEdit ? (
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            <p className="text-xs font-bold" style={{ color: colors.blue }}>
+              修改在職狀態
+            </p>
+            <p className="text-sm font-semibold">
+              {fields.name}
+              {fields.shortName && fields.shortName !== fields.name ? `（${fields.shortName}）` : ""}
+            </p>
+            <label className="flex flex-col gap-1">
+              <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                在職狀態
+              </span>
+              <select
+                value={fields.employmentStatus}
+                onChange={(e) => updateField("employmentStatus", e.target.value)}
+                className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                {STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {saveError && (
+              <p role="alert" className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                {saveError}
+              </p>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={cancelEdit}
+                disabled={isSaving}
+                className="flex-1 border py-2.5 text-xs tracking-wide disabled:opacity-50"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="flex-1 py-2.5 text-xs tracking-wide disabled:opacity-50"
+                style={{ backgroundColor: colors.pine, color: colors.pineText }}
+              >
+                {isSaving ? "儲存中…" : "儲存"}
+              </button>
+            </div>
+          </form>
+        ) : (
+          showForm && (
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <p className="text-xs font-bold" style={{ color: colors.blue }}>
               {editingId === "new" ? "新增員工" : "編輯員工"}
@@ -315,7 +375,8 @@ export function EmployeeManager() {
                   value={fields.position ?? ""}
                   onChange={(e) => updateField("position", e.target.value)}
                   required
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  disabled={isHousekeepingManager}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none disabled:opacity-60"
                   style={{ borderColor: colors.line, color: colors.ink }}
                 >
                   <option value="" disabled>
@@ -327,6 +388,11 @@ export function EmployeeManager() {
                     </option>
                   ))}
                 </select>
+                {isHousekeepingManager && (
+                  <p className="text-[11px]" style={{ color: colors.muted }}>
+                    只能新增房務員
+                  </p>
+                )}
               </label>
               <label className="flex flex-col gap-1">
                 <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
@@ -522,6 +588,7 @@ export function EmployeeManager() {
               </button>
             </div>
           </form>
+          )
         )}
       </div>
     </div>

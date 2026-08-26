@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * 房務排班（原本的「安排排班」跟「每月班表」合併成這一頁）
+ * 房務班表（原本的「安排排班」跟「每月班表」合併成這一頁）
  *
  * 月曆版面（一列一週）。每天格子改成用民宿「名稱文字」呈現（不是
  * 色點）——名稱後面接兩個小圖示：🍖 代表下一組客人有加購烤肉，
@@ -122,7 +122,7 @@ function EmployeeMultiSelect({
   );
 }
 
-export function MonthlySchedule() {
+export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepingStaff?: boolean }) {
   const [year, setYear] = useState<number | null>(null);
   const [month, setMonth] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<StaffAssignment[]>([]);
@@ -132,6 +132,10 @@ export function MonthlySchedule() {
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // 只看某一間民宿／某一位房務人員的排班狀況——null 代表不篩選
+  const [propertyScheduleFilter, setPropertyScheduleFilter] = useState<string | null>(null);
+  const [staffScheduleFilter, setStaffScheduleFilter] = useState<string | null>(null);
 
   // 針對未分配訂單快速指派（支援複選）
   const [assigningReservationId, setAssigningReservationId] = useState<string | null>(null);
@@ -227,8 +231,32 @@ export function MonthlySchedule() {
     }
   }
 
+  /** 房務員只能看上個月／本月／下個月，超出這個範圍不能再切換——
+   * 回傳 null 代表沒有限制（管理員/管家） */
+  function getMonthBounds(): { minYear: number; minMonth: number; maxYear: number; maxMonth: number } | null {
+    if (!isHousekeepingStaff) return null;
+    const now = new Date();
+    const curYear = now.getFullYear();
+    const curMonth = now.getMonth() + 1; // 1-12
+    let minYear = curYear;
+    let minMonth = curMonth - 1;
+    if (minMonth < 1) {
+      minMonth = 12;
+      minYear -= 1;
+    }
+    let maxYear = curYear;
+    let maxMonth = curMonth + 1;
+    if (maxMonth > 12) {
+      maxMonth = 1;
+      maxYear += 1;
+    }
+    return { minYear, minMonth, maxYear, maxMonth };
+  }
+
   function goToPrevMonth() {
     if (year === null || month === null) return;
+    const bounds = getMonthBounds();
+    if (bounds && year === bounds.minYear && month === bounds.minMonth) return;
     if (month === 1) {
       setYear(year - 1);
       setMonth(12);
@@ -239,6 +267,8 @@ export function MonthlySchedule() {
 
   function goToNextMonth() {
     if (year === null || month === null) return;
+    const bounds = getMonthBounds();
+    if (bounds && year === bounds.maxYear && month === bounds.maxMonth) return;
     if (month === 12) {
       setYear(year + 1);
       setMonth(1);
@@ -386,7 +416,9 @@ export function MonthlySchedule() {
   function unassignedForDay(day: number): CheckOutCoverage[] {
     if (year === null || month === null) return [];
     const dateStr = formatYMD(year, month, day);
-    return coverage.filter((c) => c.checkOut === dateStr && !c.hasAssignment);
+    return coverage.filter(
+      (c) => c.checkOut === dateStr && !c.hasAssignment && (!propertyScheduleFilter || c.propertyId === propertyScheduleFilter)
+    );
   }
 
   /** 這天每間有活動（退房或排班）的民宿狀態，日曆格子上要顯示
@@ -403,6 +435,7 @@ export function MonthlySchedule() {
     const map = new Map<string, DayPropertyStatus>();
 
     for (const c of coverage.filter((c) => c.checkOut === dateStr)) {
+      if (propertyScheduleFilter && c.propertyId !== propertyScheduleFilter) continue;
       map.set(c.propertyId, {
         propertyId: c.propertyId,
         shortLabel: PROPERTY_SHORT_LABELS[c.propertyCode] ?? c.propertyName,
@@ -412,6 +445,7 @@ export function MonthlySchedule() {
     }
     for (const a of assignments.filter((a) => a.workDate === dateStr && a.propertyId)) {
       const pid = a.propertyId as string;
+      if (propertyScheduleFilter && pid !== propertyScheduleFilter) continue;
       if (!map.has(pid)) {
         map.set(pid, {
           propertyId: pid,
@@ -421,11 +455,28 @@ export function MonthlySchedule() {
         });
       }
     }
+
+    // 篩選了特定房務人員的話，「已指派」的意思要改成「這個人有沒有
+    // 被排到」，不是「隨便誰有沒有被排到」
+    if (staffScheduleFilter) {
+      for (const status of map.values()) {
+        status.isAssigned = assignments.some(
+          (a) => a.workDate === dateStr && a.propertyId === status.propertyId && a.employeeId === staffScheduleFilter
+        );
+      }
+    }
+
     return Array.from(map.values());
   }
 
-  const selectedDayAssignments = selectedDate ? assignments.filter((a) => a.workDate === selectedDate) : [];
-  const selectedDayUnassigned = selectedDate ? coverage.filter((c) => c.checkOut === selectedDate && !c.hasAssignment) : [];
+  const selectedDayAssignments = selectedDate
+    ? assignments.filter((a) => a.workDate === selectedDate && (!propertyScheduleFilter || a.propertyId === propertyScheduleFilter))
+    : [];
+  const selectedDayUnassigned = selectedDate
+    ? coverage.filter(
+        (c) => c.checkOut === selectedDate && !c.hasAssignment && (!propertyScheduleFilter || c.propertyId === propertyScheduleFilter)
+      )
+    : [];
 
   /** 這筆排班的（民宿＋日期）當天是不是真的有訂單退房——不是的話要
    * 標注清楚，避免被誤會成「這天有客人退房」 */
@@ -470,6 +521,8 @@ export function MonthlySchedule() {
   const monthlyStaffStats: PropertyStaffStats[] = (() => {
     const groups: PropertyStaffStats[] = [];
     for (const a of assignments) {
+      if (propertyScheduleFilter && a.propertyId !== propertyScheduleFilter) continue;
+      if (staffScheduleFilter && a.employeeId !== staffScheduleFilter) continue;
       const key = a.propertyId ?? null;
       let group = groups.find((g) => g.propertyId === key);
       if (!group) {
@@ -489,6 +542,8 @@ export function MonthlySchedule() {
     return groups.sort((a, b) => (a.propertyId === null ? 1 : b.propertyId === null ? -1 : 0));
   })();
 
+  const monthBounds = getMonthBounds();
+
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
       <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
@@ -500,19 +555,84 @@ export function MonthlySchedule() {
             宜蘭・包棟民宿
           </p>
           <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
-            房務排班
+            房務班表
           </h1>
         </header>
 
+        {!isHousekeepingStaff && (
+          <div className="mb-2 flex flex-wrap justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPropertyScheduleFilter(null)}
+              className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+              style={
+                propertyScheduleFilter === null
+                  ? { borderColor: colors.ink, backgroundColor: colors.ink, color: "#FFFFFF" }
+                  : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+              }
+            >
+              全部民宿
+            </button>
+            {PROPERTY_OPTIONS.map((opt) => {
+              const active = propertyScheduleFilter === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setPropertyScheduleFilter(active ? null : opt.value)}
+                  className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                  style={
+                    active
+                      ? { borderColor: opt.color, backgroundColor: opt.color, color: colors.pineText }
+                      : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                  }
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {!isHousekeepingStaff && (
+          <div className="mb-4 flex justify-center">
+            <select
+              value={staffScheduleFilter ?? ""}
+              onChange={(e) => setStaffScheduleFilter(e.target.value || null)}
+              className="border-b bg-transparent px-2 py-1.5 text-xs outline-none"
+              style={{ borderColor: colors.line, color: colors.ink }}
+            >
+              <option value="">全部人員</option>
+              {employees.map((emp) => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.shortName}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {year !== null && month !== null && (
           <div className="mb-4 flex items-center justify-between">
-            <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            <button
+              type="button"
+              onClick={goToPrevMonth}
+              disabled={monthBounds !== null && year === monthBounds.minYear && month === monthBounds.minMonth}
+              className="px-3 py-1 text-sm disabled:opacity-30"
+              style={{ color: colors.blue }}
+            >
               ← 上個月
             </button>
             <span className="text-sm font-semibold">
               {year} 年 {month} 月
             </span>
-            <button type="button" onClick={goToNextMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            <button
+              type="button"
+              onClick={goToNextMonth}
+              disabled={monthBounds !== null && year === monthBounds.maxYear && month === monthBounds.maxMonth}
+              className="px-3 py-1 text-sm disabled:opacity-30"
+              style={{ color: colors.blue }}
+            >
               下個月 →
             </button>
           </div>
@@ -605,7 +725,7 @@ export function MonthlySchedule() {
                           </div>
                           <p style={{ color: colors.muted }}>{c.guestName || "（未填姓名）"}</p>
 
-                          {assigningReservationId === c.reservationId ? (
+                          {isHousekeepingStaff ? null : assigningReservationId === c.reservationId ? (
                             <div className="mt-1 flex flex-col gap-2">
                               <EmployeeMultiSelect
                                 employees={employees}
@@ -660,7 +780,7 @@ export function MonthlySchedule() {
                             )}
                           </div>
 
-                          {editingGroupKey === (group.propertyId ?? "none") ? (
+                          {editingGroupKey === (group.propertyId ?? "none") && !isHousekeepingStaff ? (
                             <div className="mt-2 flex flex-col gap-2">
                               <p style={{ color: colors.muted }} className="text-[11px]">
                                 勾選這間民宿這天要指派的房務人員（取消勾選代表移除）
@@ -720,26 +840,30 @@ export function MonthlySchedule() {
                                       {a.employeeShortName}
                                       {a.notes ? `　${a.notes}` : ""}
                                     </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDelete(a.id)}
-                                      disabled={deletingId === a.id}
-                                      className="shrink-0 px-2 py-1 text-[11px] disabled:opacity-50"
-                                      style={{ color: colors.alert }}
-                                    >
-                                      {deletingId === a.id ? "刪除中…" : "刪除"}
-                                    </button>
+                                    {!isHousekeepingStaff && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDelete(a.id)}
+                                        disabled={deletingId === a.id}
+                                        className="shrink-0 px-2 py-1 text-[11px] disabled:opacity-50"
+                                        style={{ color: colors.alert }}
+                                      >
+                                        {deletingId === a.id ? "刪除中…" : "刪除"}
+                                      </button>
+                                    )}
                                   </div>
                                 ))}
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => startEditGroup(group)}
-                                className="mt-2 text-[11px]"
-                                style={{ color: colors.blue }}
-                              >
-                                編輯房務人員（新增／變更）
-                              </button>
+                              {!isHousekeepingStaff && (
+                                <button
+                                  type="button"
+                                  onClick={() => startEditGroup(group)}
+                                  className="mt-2 text-[11px]"
+                                  style={{ color: colors.blue }}
+                                >
+                                  編輯房務人員（新增／變更）
+                                </button>
+                              )}
                             </>
                           )}
 
@@ -756,20 +880,21 @@ export function MonthlySchedule() {
                   </div>
                 )}
 
-                {!showGeneralForm ? (
-                  <button
-                    type="button"
-                    onClick={openGeneralForm}
-                    className="mt-3 w-full border py-2 text-xs tracking-wide"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  >
-                    ＋ 新增排班
-                  </button>
-                ) : (
-                  <form onSubmit={handleGeneralSubmit} className="mt-3 flex flex-col gap-3 border p-3" style={{ borderColor: colors.line }}>
-                    <div>
-                      <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
-                        負責民宿（選填）
+                {!isHousekeepingStaff &&
+                  (!showGeneralForm ? (
+                    <button
+                      type="button"
+                      onClick={openGeneralForm}
+                      className="mt-3 w-full border py-2 text-xs tracking-wide"
+                      style={{ borderColor: colors.line, color: colors.ink }}
+                    >
+                      ＋ 新增排班
+                    </button>
+                  ) : (
+                    <form onSubmit={handleGeneralSubmit} className="mt-3 flex flex-col gap-3 border p-3" style={{ borderColor: colors.line }}>
+                      <div>
+                        <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                          負責民宿（選填）
                       </p>
                       <div className="flex flex-wrap gap-2">
                         {PROPERTY_OPTIONS.map((opt) => {
@@ -839,7 +964,7 @@ export function MonthlySchedule() {
                       </button>
                     </div>
                   </form>
-                )}
+                ))}
               </div>
             )}
 

@@ -9,9 +9,11 @@ export type PropertyCode = "zhici" | "moyin" | "shuijing";
 
 /**
  * 價格日期分類，對應資料庫 enum day_type。
- * weekday 與 peak 的「房價」完全相同（原始 Excel 的「平旺日」欄位），
- * 只有「基本人數」不同；目前所有計價公式都不使用 base_guests，
- * 所以在計價邏輯裡 weekday / peak 可以視為同一組價格處理。
+ * weekday 與 peak 原本設計成「房價」完全相同（原始 Excel 的「平旺日」
+ * 欄位），只有「基本人數」不同；但這只是最初的資料設定慣例，不是
+ * 系統的硬性限制——房價設定頁面（/pricing）現在讓兩者可以各自獨立
+ * 設定不同價格，報價引擎也已經改成兩者分開查價、分開套用，不會
+ * 再互相覆蓋。
  */
 export type DayType =
   | "weekday"
@@ -30,8 +32,11 @@ export type DayType =
  */
 export type RoomConfigLabel = "四人套房" | "降規雙人套房" | "雙人套房" | "雙人雅房";
 
-/** 每晚實際套用的價格分類，weekday/peak 收斂成 regular（見 day-type.ts） */
-export type PriceCategory = "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
+/** 每晚實際套用的價格分類，跟 DayType 的 6 種值一一對應——weekday／
+ * peak 不再收斂成同一個 regular（原本的做法，見 day-type.ts
+ * toPriceCategory 的說明），各自獨立，才能讓「平日」「旺日」設定
+ * 不同價格時，報價引擎真的會查到、套用各自的價格。 */
+export type PriceCategory = "weekday" | "peak" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
 
 /** 每晚各房型配置的價格（新台幣） */
 export interface NightlyRateTable {

@@ -10,6 +10,7 @@
 
 import {
   createReservationDirectly,
+  deleteReservation,
   getExtraBedEligibleRooms,
   getPropertyId,
   getPropertyRoomCounts,
@@ -79,12 +80,22 @@ export async function buildReservationConfirmationMessageAction(reservationId: s
 }
 
 /**
- * 編輯訂單基本資料（人數/客戶來源/發票/總金額/狀態），因應客人
- * 確認訂房後又變更人數或其他需求。不含入住/退房日期跟房型配置的
- * 編輯——見 ReservationUpdateFields 的說明。
+ * 編輯訂單基本資料（人數/客戶來源/發票/總金額/訂單狀態/付款狀況），
+ * 因應客人確認訂房後又變更人數或其他需求。不含入住/退房日期跟房型
+ * 配置的編輯——見 ReservationUpdateFields 的說明。
  */
 export async function updateReservationAction(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
   return updateReservation(reservationId, fields);
+}
+
+/**
+ * 真正刪除一筆訂單（連子資料一起刪掉，無法復原）——測試訂單/建錯的
+ * 訂單用這個清掉。客人真的取消預訂，應該用「編輯」把訂單狀態改成
+ * 「已取消」，不要用這個：那樣訂單記錄還會保留，系統裡的統計/房務
+ * 排班本來就會自動排除已取消的訂單。
+ */
+export async function deleteReservationAction(reservationId: string): Promise<void> {
+  return deleteReservation(reservationId);
 }
 
 /**

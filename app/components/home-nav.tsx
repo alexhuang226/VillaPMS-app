@@ -37,21 +37,34 @@ interface NavItem {
   title: string;
   description: string;
   disabled?: boolean;
+  /** 房務員登入後只看得到標記這個的項目——見 middleware.ts 的說明，
+   * 這裡的過濾只是畫面上不顯示，真正擋存取的是 middleware */
+  housekeepingVisible?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/quote", icon: "📝", title: "製作報價單", description: "填入住資訊，自動算價格並存檔" },
   { href: "/quotes", icon: "🔍", title: "查詢報價單", description: "找以前的報價，客人確認後轉為訂房記錄" },
-  { href: "/reservations", icon: "📖", title: "查詢訂單", description: "查已確認的訂房記錄與付款狀態" },
+  { href: "/reservations", icon: "📖", title: "訂單管理", description: "查已確認的訂房記錄與付款狀態" },
   { href: "/receivables", icon: "💰", title: "查詢應收", description: "訂金／尾款收款狀況，標記已收款" },
-  { href: "/schedule/today", icon: "📅", title: "本日班表", description: "今天上班名單與房務準備內容" },
-  { href: "/schedule/monthly", icon: "🗂️", title: "房務排班", description: "月曆檢視、指派房務人員，退房訂單缺人會警示" },
+  { href: "/schedule/today", icon: "📅", title: "本日班表", description: "今天上班名單與房務準備內容", housekeepingVisible: true },
+  {
+    href: "/schedule/monthly",
+    icon: "🗂️",
+    title: "房務班表",
+    description: "月曆檢視、指派房務人員，退房訂單缺人會警示",
+    housekeepingVisible: true,
+  },
   { href: "/employees", icon: "🧑‍💼", title: "員工管理", description: "新增／編輯員工資料" },
   { href: "/properties", icon: "🏠", title: "民宿資料", description: "編輯匯款帳號、地址、停車資訊" },
+  { href: "/pricing", icon: "💵", title: "房價設定", description: "編輯各房型在平旺日/假日/節日/春節/跨年的價格" },
+  { href: "/holidays", icon: "📆", title: "節日設定", description: "查看/新增/編輯節日，一鍵批次匯入整年" },
   { href: "/revenue", icon: "📊", title: "營收統計", description: "年度總營收、住房率、每月明細" },
 ];
 
-export function HomeNav() {
+export function HomeNav({ isHousekeepingStaff = false }: { isHousekeepingStaff?: boolean }) {
+  const visibleItems = isHousekeepingStaff ? NAV_ITEMS.filter((item) => item.housekeepingVisible) : NAV_ITEMS;
+
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
       <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
@@ -65,7 +78,7 @@ export function HomeNav() {
         </header>
 
         <div className="grid grid-cols-2 gap-3">
-          {NAV_ITEMS.map((item) =>
+          {visibleItems.map((item) =>
             item.disabled ? (
               <div
                 key={item.href}
@@ -95,7 +108,15 @@ export function HomeNav() {
           )}
         </div>
 
-        <form action={logoutAction} className="mt-4">
+        <Link
+          href="/change-password"
+          className="mt-4 block w-full border py-2.5 text-center text-xs tracking-wide"
+          style={{ borderColor: colors.line, color: colors.muted }}
+        >
+          變更密碼
+        </Link>
+
+        <form action={logoutAction} className="mt-2">
           <button type="submit" className="w-full border py-2.5 text-xs tracking-wide" style={{ borderColor: colors.line, color: colors.muted }}>
             登出
           </button>

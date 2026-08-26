@@ -75,7 +75,7 @@ interface AssignmentWithPrep {
   prep: UpcomingPrepInfo | null;
 }
 
-export function TodaySchedule() {
+export function TodaySchedule({ isHousekeepingStaff = false }: { isHousekeepingStaff?: boolean }) {
   const [today, setToday] = useState<string>("");
   const [rows, setRows] = useState<AssignmentWithPrep[] | null>(null);
   const [unassigned, setUnassigned] = useState<CheckOutCoverage[]>([]);
@@ -230,7 +230,7 @@ export function TodaySchedule() {
                   </div>
                   <p style={{ color: colors.muted }}>{c.guestName || "（未填姓名）"}</p>
 
-                  {assigningReservationId === c.reservationId ? (
+                  {isHousekeepingStaff ? null : assigningReservationId === c.reservationId ? (
                     <div className="mt-2 flex flex-col gap-2">
                       <div className="flex flex-wrap gap-2">
                         {employees.map((emp) => {

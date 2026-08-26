@@ -48,7 +48,7 @@ import type { ExtraBedRoomOption, QuoteSummary } from "@/lib/pricing/queries";
 import type { PackageQuote, PropertyCode, QuoteRoomAllocation, StayRequest } from "@/lib/pricing/types";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
-const PRICE_CATEGORIES = ["regular", "holiday", "festival", "lunar_new_year", "new_year_eve"] as const;
+const PRICE_CATEGORIES = ["weekday", "peak", "holiday", "festival", "lunar_new_year", "new_year_eve"] as const;
 
 export async function calculateQuoteAction(request: StayRequest): Promise<PackageQuote> {
   const propertyId = await getPropertyId(request.propertyCode);

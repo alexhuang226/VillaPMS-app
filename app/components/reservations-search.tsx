@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * 訂單查詢 — 日曆檢視
+ * 訂單管理 — 日曆檢視
  *
  * 傳統月曆版面：一個畫面顯示完整一個月，一列一週（週日~週六 7 欄）。
  * 日期數字下面，每個民宿各自固定一條色帶（同一民宿永遠同一個位置，
@@ -23,7 +23,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
@@ -62,12 +62,24 @@ const PROPERTIES = [
   { code: "shuijing", label: "水景璞堤", color: colors.blue },
 ];
 
+/** 訂單狀態——只留這三種給人選/顯示，資料庫的 enum 本身還有
+ * checked_in/checked_out 這兩個值，但這個規模的民宿不需要細分到
+ * 那個程度，日常操作只會用到這三種 */
 const STATUS_LABEL: Record<string, string> = {
   confirmed: "已確認",
-  checked_in: "已入住",
-  checked_out: "已退房",
   cancelled: "已取消",
   no_show: "未到",
+};
+/** 訂單整體「付款狀況」——跟 PAYMENT_STATUS_LABEL（下面，是單筆
+ * payments 記錄的 pending/paid 狀態）是兩回事，這個是
+ * reservations.payment_status 這個獨立欄位，管理者手動維護的整體
+ * 標籤 */
+const RESERVATION_PAYMENT_STATUS_LABEL: Record<string, string> = {
+  pending_deposit: "待匯訂金",
+  deposit_paid: "已匯訂金",
+  balance_paid: "已匯尾款",
+  deposit_refunded: "退還訂金",
+  deposit_forfeited: "沒收訂金",
 };
 const BOOKING_SOURCE_LABEL: Record<string, string> = {
   line_official: "LINE官方",
@@ -106,6 +118,7 @@ const EMPTY_CREATE_FIELDS: CreateReservationFields = {
   visitors: 0,
   bookingSource: "airbnb",
   finalTotal: 0,
+  paymentStatus: "pending_deposit",
   needsInvoice: false,
   invoiceTitle: null,
   invoiceTaxId: null,
@@ -128,6 +141,20 @@ function formatLocalDate(d: Date): string {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/** 從 reservation_items 的 notes 欄位（格式「房號：A1、A2」）反解析出
+ * 房號陣列——編輯訂單時，要把已經存在的加床項目還原成表單可以編輯
+ * 的複選狀態，這是對應寫入時的格式（見 lib/pricing/queries.ts 的
+ * buildAddOnItemLines） */
+function parseRoomCodesFromNotes(notes: string | null): string[] {
+  if (!notes) return [];
+  const match = notes.match(/房號：(.+)/);
+  if (!match) return [];
+  return match[1]
+    .split("、")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** 新增訂單表單的預設入住日期：今天起一個月後——跟報價單的預設值
@@ -225,10 +252,12 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function ReservationsSearch() {
+export function ReservationsSearch({ isHousekeepingManager = false }: { isHousekeepingManager?: boolean }) {
   const [year, setYear] = useState<number | null>(null);
   const [month, setMonth] = useState<number | null>(null);
   const [reservations, setReservations] = useState<CalendarReservation[]>([]);
+  // 只看某一間民宿的訂房狀況——null 代表全部民宿都顯示
+  const [propertyFilter, setPropertyFilter] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -244,6 +273,12 @@ export function ReservationsSearch() {
   const [isSaving, setIsSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [editFields, setEditFields] = useState<ReservationUpdateFields | null>(null);
+  const [editExtraBedRoomOptions, setEditExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
+
+  // 刪除訂單（測試訂單/建錯的訂單用，客人真的取消請改用編輯狀態）
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // 直接建立訂單（跳過報價/訂房確認單流程），給 Airbnb 等 OTA 平台
   // 訂房用——房價、收款平台都處理過了，不需要走一次報價確認流程
@@ -435,6 +470,8 @@ export function ReservationsSearch() {
     setCopyError(null);
     setIsEditing(false);
     setEditError(null);
+    setShowDeleteConfirm(false);
+    setDeleteError(null);
     setIsLoadingDetail(true);
 
     try {
@@ -451,10 +488,39 @@ export function ReservationsSearch() {
     }
   }
 
+  async function handleDeleteReservation() {
+    if (!selectedId) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteReservationAction(selectedId);
+      setSelectedId(null);
+      setDetail(null);
+      setShowDeleteConfirm(false);
+      // 刪除成功後重新查一次目前這個月的日曆，讓訂單馬上從列表消失
+      if (year !== null && month !== null) {
+        const rows = await getCalendarReservationsAction(year, month);
+        setReservations(rows);
+      }
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "刪除失敗，請稍後再試");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   /** 開始編輯：用目前的訂單內容當作表單初始值 */
   function startEdit() {
     if (!detail) return;
     setEditError(null);
+
+    const extraBedFixedItem = detail.items.find((i) => i.itemType === "extra_bed_fixed");
+    const extraBedTempItem = detail.items.find((i) => i.itemType === "extra_bed_temporary");
+    const extraRoomItem = detail.items.find((i) => i.itemType === "other" && i.description === "加開房間");
+    const bbqItem = detail.items.find((i) => i.itemType === "bbq");
+    const foodTruckItem = detail.items.find((i) => i.itemType === "food_truck");
+    const earlyCheckinItem = detail.items.find((i) => i.itemType === "early_checkin");
+
     setEditFields({
       checkIn: detail.checkIn,
       checkOut: detail.checkOut,
@@ -465,6 +531,7 @@ export function ReservationsSearch() {
       visitors: detail.visitors,
       bookingSource: detail.bookingSource,
       status: detail.status,
+      paymentStatus: detail.paymentStatus,
       finalTotal: detail.finalTotal,
       needsInvoice: detail.needsInvoice,
       invoiceTitle: detail.invoiceTitle,
@@ -473,8 +540,31 @@ export function ReservationsSearch() {
       fourPersonDowngradeCount: detail.roomAllocation.fourPersonDowngradeCount,
       doubleSuiteCount: detail.roomAllocation.doubleSuiteCount,
       doublePlainCount: detail.roomAllocation.doublePlainCount,
+      extraBedFixedRoomCodes: parseRoomCodesFromNotes(extraBedFixedItem?.notes ?? null),
+      extraBedTempRoomCodes: parseRoomCodesFromNotes(extraBedTempItem?.notes ?? null),
+      extraRoomQty: extraRoomItem?.quantity ?? 0,
+      bbq: Boolean(bbqItem),
+      foodTruck: Boolean(foodTruckItem),
+      earlyCheckin: Boolean(earlyCheckinItem),
     });
     setIsEditing(true);
+
+    // 加床位置選項要用民宿代碼查——編輯訂單不能換民宿，查一次就夠
+    getExtraBedRoomOptionsForCreateAction(detail.propertyCode as CreateReservationFields["propertyCode"])
+      .then((options) => setEditExtraBedRoomOptions(options))
+      .catch(() => {
+        // 查詢失敗不擋編輯，只是加床位置選單會是空的
+      });
+  }
+
+  function toggleEditExtraBedRoom(field: "extraBedFixedRoomCodes" | "extraBedTempRoomCodes", code: string) {
+    setEditFields((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        [field]: prev[field].includes(code) ? prev[field].filter((c) => c !== code) : [...prev[field], code],
+      };
+    });
   }
 
   function cancelEdit() {
@@ -493,7 +583,7 @@ export function ReservationsSearch() {
     // 退房日期如果被改掉，原本安排的房務人員不一定能配合新日期，
     // 需要先跟他們確認過才能繼續用——不是靜靜地留著一筆「看起來已經
     // 排好人」但其實日期已經不對的排班，避免當天開天窗。這裡用簡單
-    // 的瀏覽器確認視窗詢問，選「確定」才會清掉舊退房日的房務排班，
+    // 的瀏覽器確認視窗詢問，選「確定」才會清掉舊退房日的房務班表，
     // 選「取消」就維持原本的排班不動（畫面上之後可能會顯示「非退房
     // 日」的提醒，見 monthly-schedule.tsx 的說明）。
     const checkOutChanged = editFields.checkOut !== detail.checkOut;
@@ -502,7 +592,7 @@ export function ReservationsSearch() {
       shouldClearOldAssignment = window.confirm(
         `退房日期從 ${detail.checkOut} 改成 ${editFields.checkOut}。\n\n` +
           `原本安排在 ${detail.checkOut} 的房務人員需要重新跟他們確認新日期能不能配合。\n\n` +
-          `要不要現在把 ${detail.checkOut} 這天的房務排班清除，之後再重新安排？\n` +
+          `要不要現在把 ${detail.checkOut} 這天的房務班表清除，之後再重新安排？\n` +
           `（選「取消」會保留原本的排班，但日期已經跟訂單對不上了，要自己記得處理）`
       );
     }
@@ -564,11 +654,44 @@ export function ReservationsSearch() {
             宜蘭・包棟民宿
           </p>
           <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
-            訂單查詢
+            訂單管理
           </h1>
         </header>
 
-        {!showCreateForm && (
+        <div className="mb-4 flex flex-wrap justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPropertyFilter(null)}
+            className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+            style={
+              propertyFilter === null
+                ? { borderColor: colors.ink, backgroundColor: colors.ink, color: "#FFFFFF" }
+                : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+            }
+          >
+            全部
+          </button>
+          {PROPERTIES.map((p) => {
+            const active = propertyFilter === p.code;
+            return (
+              <button
+                key={p.code}
+                type="button"
+                onClick={() => setPropertyFilter(active ? null : p.code)}
+                className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                style={
+                  active
+                    ? { borderColor: p.color, backgroundColor: p.color, color: "#FFFFFF" }
+                    : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                }
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {!showCreateForm && !isHousekeepingManager && (
           <button
             type="button"
             onClick={openCreateForm}
@@ -616,6 +739,24 @@ export function ReservationsSearch() {
                 })}
               </div>
             </div>
+
+            <label className="flex flex-col gap-1">
+              <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                付款狀況
+              </span>
+              <select
+                value={createFields.paymentStatus}
+                onChange={(e) => updateCreateField("paymentStatus", e.target.value)}
+                className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
 
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
@@ -674,23 +815,38 @@ export function ReservationsSearch() {
               </label>
             </div>
 
-            <label className="flex flex-col gap-1">
-              <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                客戶來源
-              </span>
-              <select
-                value={createFields.bookingSource}
-                onChange={(e) => updateCreateField("bookingSource", e.target.value)}
-                className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                style={{ borderColor: colors.line, color: colors.ink }}
-              >
-                {BOOKING_SOURCE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  客戶來源
+                </span>
+                <select
+                  value={createFields.bookingSource}
+                  onChange={(e) => updateCreateField("bookingSource", e.target.value)}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                >
+                  {BOOKING_SOURCE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  訪客
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={createFields.visitors}
+                  onChange={(e) => updateCreateField("visitors", Number(e.target.value))}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            </div>
 
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
@@ -741,33 +897,6 @@ export function ReservationsSearch() {
                   min={0}
                   value={createFields.pets}
                   onChange={(e) => updateCreateField("pets", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  訪客
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.visitors}
-                  onChange={(e) => updateCreateField("visitors", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  總金額（選填，Airbnb 等平台的房價不套用計價公式，直接填實收金額）
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={finalTotalRaw}
-                  onChange={(e) => setFinalTotalRaw(e.target.value)}
-                  placeholder="0"
                   className="w-full border-b bg-transparent py-1 text-sm outline-none"
                   style={{ borderColor: colors.line, color: colors.ink }}
                 />
@@ -838,51 +967,6 @@ export function ReservationsSearch() {
               <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
                 額外服務
               </p>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  加開房間
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.extraRoomQty}
-                  onChange={(e) => updateCreateField("extraRoomQty", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-
-              <div className="mt-3">
-                <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
-                  加固定床房號（複選）
-                </p>
-                {extraBedRoomOptions.length === 0 ? (
-                  <p className="text-[11px]" style={{ color: colors.alert }}>
-                    這間民宿沒有設定可加床的房號，請直接跟房務確認
-                  </p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {extraBedRoomOptions.map((room) => {
-                      const active = createFields.extraBedFixedRoomCodes.includes(room.code);
-                      return (
-                        <button
-                          key={room.id}
-                          type="button"
-                          onClick={() => toggleCreateExtraBedRoom("extraBedFixedRoomCodes", room.code)}
-                          className="rounded-full border px-3 py-1.5 text-xs transition-colors"
-                          style={
-                            active
-                              ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                              : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                          }
-                        >
-                          {room.code}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
 
               <div className="mt-3">
                 <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
@@ -996,6 +1080,23 @@ export function ReservationsSearch() {
               訂單還在等收款。
             </p>
 
+            <div className="border-t pt-3" style={{ borderColor: colors.line }}>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  總金額（選填，Airbnb 等平台的房價不套用計價公式，直接填實收金額）
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={finalTotalRaw}
+                  onChange={(e) => setFinalTotalRaw(e.target.value)}
+                  placeholder="0"
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            </div>
+
             {createError && (
               <p role="alert" className="text-xs leading-relaxed" style={{ color: colors.alert }}>
                 {createError}
@@ -1073,7 +1174,7 @@ export function ReservationsSearch() {
                     ))}
                   </div>
                   <div className="mt-1 flex flex-col gap-[3px]">
-                    {PROPERTIES.map((property) => {
+                    {(propertyFilter ? PROPERTIES.filter((p) => p.code === propertyFilter) : PROPERTIES).map((property) => {
                       const propertyReservations = reservations.filter((r) => r.propertyCode === property.code);
                       const segments = computeWeekSegments(week, year, month, propertyReservations);
                       return (
@@ -1139,22 +1240,97 @@ export function ReservationsSearch() {
               <div className="mt-4 border p-4" style={{ borderColor: colors.line }}>
                 <div className="flex items-baseline justify-between">
                   <span className={`${display.className} text-xl italic`}>{detail.propertyName}</span>
-                  {!isEditing && (
-                    <button type="button" onClick={startEdit} className="text-xs" style={{ color: colors.blue }}>
-                      編輯
-                    </button>
+                  {!isEditing && !isHousekeepingManager && (
+                    <div className="flex gap-3">
+                      <button type="button" onClick={startEdit} className="text-xs" style={{ color: colors.blue }}>
+                        編輯
+                      </button>
+                      <button type="button" onClick={() => setShowDeleteConfirm(true)} className="text-xs" style={{ color: colors.alert }}>
+                        刪除
+                      </button>
+                    </div>
                   )}
                 </div>
 
+                {showDeleteConfirm && (
+                  <div className="mt-3 border-l-2 pl-3" style={{ borderColor: colors.alert }}>
+                    <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                      確定要刪除這筆訂單嗎？連同房型明細、加購項目、付款記錄都會一起刪掉，無法復原。
+                      <br />
+                      客人如果是真的取消預訂，建議改用「編輯」把訂單狀態改成「已取消」，保留記錄比較好查——這個刪除是給測試訂單/建錯的訂單用的。
+                    </p>
+                    {deleteError && (
+                      <p role="alert" className="mt-2 text-xs" style={{ color: colors.alert }}>
+                        {deleteError}
+                      </p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowDeleteConfirm(false)}
+                        disabled={isDeleting}
+                        className="border px-3 py-1.5 text-xs disabled:opacity-50"
+                        style={{ borderColor: colors.line, color: colors.ink }}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeleteReservation}
+                        disabled={isDeleting}
+                        className="px-3 py-1.5 text-xs disabled:opacity-50"
+                        style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
+                      >
+                        {isDeleting ? "刪除中…" : "確定刪除"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {isEditing && editFields ? (
                   <div className="mt-3 flex flex-col gap-3 text-xs">
-                    <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
-                      ⚠️ 改了入住/退房日期或房型配置後，「總金額」不會自動
-                      重算（系統沒有存完整的原始報價條件，沒辦法像 /quote
-                      那樣重新算出正確金額）。需要的話，另外開 /quote 用
-                      同樣的條件重新試算一次，再把算出來的金額填到下面的
-                      「總金額」欄位。
-                    </p>
+                    <div className="grid grid-cols-2 gap-4">
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          訂單狀態
+                        </span>
+                        <select
+                          value={editFields.status}
+                          onChange={(e) => updateEditField("status", e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          {Object.entries(STATUS_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          付款狀況
+                        </span>
+                        <select
+                          value={editFields.paymentStatus}
+                          onChange={(e) => updateEditField("paymentStatus", e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    {editFields.status === "cancelled" && editFields.paymentStatus === "deposit_forfeited" && (
+                      <p className="text-[11px] leading-relaxed" style={{ color: colors.pine }}>
+                        ⚠️
+                        這筆訂單已取消、付款狀況是「沒收訂金」——訂金金額會照樣計入這個月的營收（用實際收到的訂金金額，不是訂單總金額），住房天數不會計入。
+                      </p>
+                    )}
 
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex flex-col gap-1">
@@ -1296,6 +1472,26 @@ export function ReservationsSearch() {
                           style={{ borderColor: colors.line, color: colors.ink }}
                         />
                       </label>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          客戶來源
+                        </span>
+                        <select
+                          value={editFields.bookingSource}
+                          onChange={(e) => updateEditField("bookingSource", e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          {Object.entries(BOOKING_SOURCE_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="flex flex-col gap-1">
                         <span style={{ color: colors.muted }} className="text-[11px]">
                           訪客
@@ -1309,56 +1505,78 @@ export function ReservationsSearch() {
                           style={{ borderColor: colors.line, color: colors.ink }}
                         />
                       </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          總金額
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.finalTotal}
-                          onChange={(e) => updateEditField("finalTotal", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
                     </div>
 
-                    <label className="flex flex-col gap-1">
-                      <span style={{ color: colors.muted }} className="text-[11px]">
-                        訂單狀態
-                      </span>
-                      <select
-                        value={editFields.status}
-                        onChange={(e) => updateEditField("status", e.target.value)}
-                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                        style={{ borderColor: colors.line, color: colors.ink }}
-                      >
-                        {Object.entries(STATUS_LABEL).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div>
+                      <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                        額外服務
+                      </p>
 
-                    <label className="flex flex-col gap-1">
-                      <span style={{ color: colors.muted }} className="text-[11px]">
-                        客戶來源
-                      </span>
-                      <select
-                        value={editFields.bookingSource}
-                        onChange={(e) => updateEditField("bookingSource", e.target.value)}
-                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                        style={{ borderColor: colors.line, color: colors.ink }}
-                      >
-                        {Object.entries(BOOKING_SOURCE_LABEL).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                      <div className="mt-3">
+                        <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                          加臨時床房號（複選）
+                        </p>
+                        {editExtraBedRoomOptions.length === 0 ? (
+                          <p className="text-[11px]" style={{ color: colors.alert }}>
+                            這間民宿沒有設定可加床的房號，請直接跟房務確認
+                          </p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {editExtraBedRoomOptions.map((room) => {
+                              const active = editFields.extraBedTempRoomCodes.includes(room.code);
+                              return (
+                                <button
+                                  key={room.id}
+                                  type="button"
+                                  onClick={() => toggleEditExtraBedRoom("extraBedTempRoomCodes", room.code)}
+                                  className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                                  style={
+                                    active
+                                      ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                                      : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                                  }
+                                >
+                                  {room.code}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-4">
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editFields.bbq}
+                            onChange={(e) => updateEditField("bbq", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">烤肉</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editFields.foodTruck}
+                            onChange={(e) => updateEditField("foodTruck", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">餐車場地</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editFields.earlyCheckin}
+                            onChange={(e) => updateEditField("earlyCheckin", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">提前入住</span>
+                        </label>
+                      </div>
+                    </div>
 
                     <label className="flex items-center gap-2">
                       <input
@@ -1400,6 +1618,25 @@ export function ReservationsSearch() {
                       </div>
                     )}
 
+                    <div className="border-t pt-3" style={{ borderColor: colors.line }}>
+                      <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                        ⚠️ 改了入住/退房日期或房型配置後，「總金額」不會自動重算。
+                      </p>
+                      <label className="mt-2 flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          總金額
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editFields.finalTotal}
+                          onChange={(e) => updateEditField("finalTotal", Number(e.target.value))}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                    </div>
+
                     {editError && (
                       <p style={{ color: colors.alert }} className="text-[11px] leading-relaxed">
                         {editError}
@@ -1431,6 +1668,10 @@ export function ReservationsSearch() {
                   <div className="mt-3 flex flex-col gap-1.5 text-xs">
                     <InfoRow label="訂單編號" value={detail.reservationNo} />
                     <InfoRow label="狀態" value={STATUS_LABEL[detail.status] ?? detail.status} />
+                    <InfoRow
+                      label="付款狀況"
+                      value={RESERVATION_PAYMENT_STATUS_LABEL[detail.paymentStatus] ?? detail.paymentStatus}
+                    />
                     <InfoRow label="入住日期" value={detail.checkIn} />
                     <InfoRow label="退房日期" value={detail.checkOut} />
                     <InfoRow
@@ -1486,14 +1727,16 @@ export function ReservationsSearch() {
                       </>
                     )}
 
-                    <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
-                      <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                        訂單總金額
-                      </p>
-                      <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
-                        NT$ {detail.finalTotal.toLocaleString()}
-                      </p>
-                    </div>
+                    {!isHousekeepingManager && (
+                      <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
+                        <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                          訂單總金額
+                        </p>
+                        <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
+                          NT$ {detail.finalTotal.toLocaleString()}
+                        </p>
+                      </div>
+                    )}
 
                     {detail.payments.length > 0 && (
                       <>
