@@ -1,20 +1,16 @@
 "use client";
 
 /**
- * 節日管理頁面
+ * 節日管理頁面 — 月曆檢視
  *
- * 上方年份下拉選單，底下列出該年度所有節日（日期/名稱/分類），可以
- * 單筆編輯分類、刪除，也可以新增單筆。
+ * 比照行政院辦公日曆表的呈現方式：一格一天的月曆，節日用顏色標記，
+ * 比條列式清單更容易一眼看出哪些日子是節日、連續假期的範圍多大。
+ * 點一天會在下方展開該天的詳細內容，可以新增／編輯／刪除。
  *
- * 「批次匯入」是貼上一段文字、一次匯入整年節日的地方——這是「一鍵
- * 匯入」實際的樣子：由 Claude（或你自己）先查好official行事曆、
- * 整理成「日期,名稱,分類」一行一筆的格式，貼到這裡，按一次「匯入」
- * 就整批寫進資料庫，不用再手動一筆一筆新增、也不用另外寫 SQL
- * migration 檔案。同一個日期重複貼進來會直接覆蓋成最新的內容，
- * 不會出現重複資料。
- *
- * 分類欄位可以填英文代碼（holiday／festival／lunar_new_year／
- * new_year_eve）或中文（假日／節日／春節／跨年），兩種都看得懂。
+ * 「批次匯入」維持原本貼上文字整批匯入的做法（見 lib/pricing/
+ * holidays.ts 的說明），這是輸入一整年份資料最快的方式，跟月曆
+ * 檢視是互補的兩件事：批次匯入負責「一次性把資料放進去」，月曆
+ * 檢視負責「檢查資料對不對、事後個別調整」。
  */
 
 import { useEffect, useState } from "react";
@@ -25,7 +21,6 @@ import {
   createHolidayAction,
   deleteHolidayAction,
   getHolidaysForYearAction,
-  updateHolidayAction,
 } from "@/app/actions/holidays";
 import type { BulkHolidayEntry, HolidayDayType, HolidayEntry } from "@/lib/pricing/holidays";
 
@@ -51,6 +46,7 @@ const colors = {
   pineText: "#FFFFFF",
   alert: "#A23E2D",
   blue: "#2455A4",
+  gold: "#A67C3D",
 };
 
 const DAY_TYPE_LABEL: Record<HolidayDayType, string> = {
@@ -60,6 +56,12 @@ const DAY_TYPE_LABEL: Record<HolidayDayType, string> = {
   new_year_eve: "跨年",
 };
 const DAY_TYPE_OPTIONS: HolidayDayType[] = ["holiday", "festival", "lunar_new_year", "new_year_eve"];
+const DAY_TYPE_COLOR: Record<HolidayDayType, string> = {
+  holiday: "#FF99FF",
+  festival: "#FF99FF",
+  lunar_new_year: "#FF99FF",
+  new_year_eve: "#FF99FF",
+};
 
 const CATEGORY_ALIASES: Record<string, HolidayDayType> = {
   holiday: "holiday",
@@ -104,19 +106,30 @@ function parseBulkText(text: string): { entries: BulkHolidayEntry[]; errors: str
   return { entries, errors };
 }
 
+function firstWeekdayOfMonth(year: number, month: number): number {
+  return new Date(year, month - 1, 1).getDay();
+}
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
+function formatYMD(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
 export function HolidayManager() {
-  const [year, setYear] = useState<number | null>(null);
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
   const [holidays, setHolidays] = useState<HolidayEntry[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newDate, setNewDate] = useState("");
-  const [newName, setNewName] = useState("");
-  const [newDayType, setNewDayType] = useState<HolidayDayType>("holiday");
-  const [isSavingNew, setIsSavingNew] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDayType, setEditDayType] = useState<HolidayDayType>("holiday");
+  const [isSavingDay, setIsSavingDay] = useState(false);
+  const [dayError, setDayError] = useState<string | null>(null);
+  const [isDeletingDay, setIsDeletingDay] = useState(false);
 
   const [showBulkForm, setShowBulkForm] = useState(false);
   const [bulkText, setBulkText] = useState("");
@@ -125,11 +138,6 @@ export function HolidayManager() {
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   useEffect(() => {
-    setYear(new Date().getFullYear());
-  }, []);
-
-  useEffect(() => {
-    if (year === null) return;
     loadYear(year);
   }, [year]);
 
@@ -146,46 +154,65 @@ export function HolidayManager() {
     }
   }
 
-  async function handleCategoryChange(entry: HolidayEntry, newType: HolidayDayType) {
-    try {
-      await updateHolidayAction(entry.id, entry.name ?? "", newType);
-      if (year !== null) await loadYear(year);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "更新失敗，請稍後再試");
+  function goToPrevMonth() {
+    if (month === 1) {
+      setYear((y) => y - 1);
+      setMonth(12);
+    } else {
+      setMonth((m) => m - 1);
     }
+    setSelectedDate(null);
+  }
+  function goToNextMonth() {
+    if (month === 12) {
+      setYear((y) => y + 1);
+      setMonth(1);
+    } else {
+      setMonth((m) => m + 1);
+    }
+    setSelectedDate(null);
   }
 
-  async function handleDelete(id: string) {
-    setDeletingId(id);
-    try {
-      await deleteHolidayAction(id);
-      setHolidays((prev) => prev?.filter((h) => h.id !== id) ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "刪除失敗，請稍後再試");
-    } finally {
-      setDeletingId(null);
-    }
+  function selectDate(dateStr: string) {
+    setSelectedDate(dateStr);
+    setDayError(null);
+    const existing = holidays?.find((h) => h.holidayDate === dateStr);
+    setEditName(existing?.name ?? "");
+    setEditDayType(existing?.dayType ?? "holiday");
   }
 
-  async function handleAddSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newDate || !newName.trim()) {
-      setAddError("請填寫日期跟名稱");
+  async function handleSaveDay() {
+    if (!selectedDate) return;
+    if (!editName.trim()) {
+      setDayError("請填寫名稱");
       return;
     }
-    setIsSavingNew(true);
-    setAddError(null);
+    setIsSavingDay(true);
+    setDayError(null);
     try {
-      await createHolidayAction(newDate, newName.trim(), newDayType);
-      setShowAddForm(false);
-      setNewDate("");
-      setNewName("");
-      setNewDayType("holiday");
-      if (year !== null) await loadYear(year);
+      await createHolidayAction(selectedDate, editName.trim(), editDayType);
+      await loadYear(year);
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : "新增失敗，請稍後再試");
+      setDayError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
     } finally {
-      setIsSavingNew(false);
+      setIsSavingDay(false);
+    }
+  }
+
+  async function handleDeleteDay() {
+    if (!selectedDate) return;
+    const existing = holidays?.find((h) => h.holidayDate === selectedDate);
+    if (!existing) return;
+    setIsDeletingDay(true);
+    setDayError(null);
+    try {
+      await deleteHolidayAction(existing.id);
+      setSelectedDate(null);
+      await loadYear(year);
+    } catch (err) {
+      setDayError(err instanceof Error ? err.message : "刪除失敗，請稍後再試");
+    } finally {
+      setIsDeletingDay(false);
     }
   }
 
@@ -208,7 +235,7 @@ export function HolidayManager() {
       setBulkResult(`✓ 已匯入 ${result.imported} 筆節日資料`);
       setBulkText("");
       setShowBulkForm(false);
-      if (year !== null) await loadYear(year);
+      await loadYear(year);
     } catch (err) {
       setBulkErrors([err instanceof Error ? err.message : "匯入失敗，請稍後再試"]);
     } finally {
@@ -216,8 +243,12 @@ export function HolidayManager() {
     }
   }
 
-  const thisYear = new Date().getFullYear();
-  const yearOptions = Array.from({ length: 7 }, (_, i) => thisYear + 2 - i);
+  const holidaysByDate = new Map((holidays ?? []).map((h) => [h.holidayDate, h]));
+  const firstWeekday = firstWeekdayOfMonth(year, month);
+  const totalDays = daysInMonth(year, month);
+  const weekdayHeaders = ["日", "一", "二", "三", "四", "五", "六"];
+
+  const selectedHoliday = selectedDate ? holidaysByDate.get(selectedDate) : undefined;
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
@@ -234,145 +265,17 @@ export function HolidayManager() {
           </h1>
         </header>
 
-        {year !== null && (
-          <select
-            value={year}
-            onChange={(e) => setYear(Number(e.target.value))}
-            className="mb-4 w-full border-b bg-transparent py-2 text-center text-sm outline-none"
-            style={{ borderColor: colors.line, color: colors.ink }}
-          >
-            {yearOptions.map((y) => (
-              <option key={y} value={y}>
-                {y} 年
-              </option>
-            ))}
-          </select>
-        )}
-
-        <div className="mb-4 flex gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              setShowAddForm((v) => !v);
-              setShowBulkForm(false);
-            }}
-            className="flex-1 border py-2 text-xs tracking-wide"
-            style={{ borderColor: colors.line, color: colors.ink }}
-          >
-            ＋ 新增單筆
+        <div className="mb-3 flex items-center justify-between">
+          <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            ← 上個月
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setShowBulkForm((v) => !v);
-              setShowAddForm(false);
-            }}
-            className="flex-1 py-2 text-xs tracking-wide"
-            style={{ backgroundColor: colors.pine, color: colors.pineText }}
-          >
-            批次匯入
+          <span className="text-sm font-semibold">
+            {year} 年 {month} 月
+          </span>
+          <button type="button" onClick={goToNextMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            下個月 →
           </button>
         </div>
-
-        {showAddForm && (
-          <form onSubmit={handleAddSubmit} className="mb-4 flex flex-col gap-3 border p-3" style={{ borderColor: colors.line }}>
-            <label className="flex flex-col gap-1">
-              <span style={{ color: colors.muted }} className="text-[11px]">
-                日期
-              </span>
-              <input
-                type="date"
-                value={newDate}
-                onChange={(e) => setNewDate(e.target.value)}
-                className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                style={{ borderColor: colors.line, color: colors.ink }}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span style={{ color: colors.muted }} className="text-[11px]">
-                名稱
-              </span>
-              <input
-                type="text"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                style={{ borderColor: colors.line, color: colors.ink }}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span style={{ color: colors.muted }} className="text-[11px]">
-                分類
-              </span>
-              <select
-                value={newDayType}
-                onChange={(e) => setNewDayType(e.target.value as HolidayDayType)}
-                className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                style={{ borderColor: colors.line, color: colors.ink }}
-              >
-                {DAY_TYPE_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {DAY_TYPE_LABEL[opt]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {addError && (
-              <p role="alert" className="text-[11px]" style={{ color: colors.alert }}>
-                {addError}
-              </p>
-            )}
-            <button
-              type="submit"
-              disabled={isSavingNew}
-              className="py-2 text-xs tracking-wide disabled:opacity-50"
-              style={{ backgroundColor: colors.pine, color: colors.pineText }}
-            >
-              {isSavingNew ? "新增中…" : "新增"}
-            </button>
-          </form>
-        )}
-
-        {showBulkForm && (
-          <div className="mb-4 flex flex-col gap-2 border p-3" style={{ borderColor: colors.line }}>
-            <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
-              一行一筆，格式「日期,名稱,分類」，例如：
-              <br />
-              2027-01-01,元旦,holiday
-              <br />
-              2027-02-05,除夕,春節
-            </p>
-            <textarea
-              value={bulkText}
-              onChange={(e) => setBulkText(e.target.value)}
-              rows={8}
-              className="w-full border p-2 text-xs outline-none"
-              style={{ borderColor: colors.line, color: colors.ink }}
-              placeholder="2027-01-01,元旦,holiday"
-            />
-            {bulkErrors.length > 0 && (
-              <div className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
-                {bulkErrors.map((e, i) => (
-                  <p key={i}>{e}</p>
-                ))}
-              </div>
-            )}
-            {bulkResult && (
-              <p className="text-[11px]" style={{ color: colors.pine }}>
-                {bulkResult}
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={handleBulkImport}
-              disabled={isBulkImporting}
-              className="py-2 text-xs tracking-wide disabled:opacity-50"
-              style={{ backgroundColor: colors.pine, color: colors.pineText }}
-            >
-              {isBulkImporting ? "匯入中…" : "匯入"}
-            </button>
-          </div>
-        )}
 
         {isLoading && (
           <p className="text-xs" style={{ color: colors.muted }}>
@@ -384,25 +287,73 @@ export function HolidayManager() {
             {error}
           </p>
         )}
-        {!isLoading && holidays && holidays.length === 0 && (
-          <p className="text-xs" style={{ color: colors.muted }}>
-            這一年還沒有任何節日資料。
-          </p>
+
+        {!isLoading && (
+          <div>
+            <div className="grid grid-cols-7 gap-1 text-center text-[10px]" style={{ color: colors.muted }}>
+              {weekdayHeaders.map((w) => (
+                <div key={w} className="py-1">
+                  {w}
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {Array.from({ length: firstWeekday }).map((_, i) => (
+                <div key={`blank-${i}`} />
+              ))}
+              {Array.from({ length: totalDays }, (_, i) => i + 1).map((day) => {
+                const dateStr = formatYMD(year, month, day);
+                const holiday = holidaysByDate.get(dateStr);
+                const isSelected = selectedDate === dateStr;
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => selectDate(dateStr)}
+                    className="flex min-h-[3.25rem] flex-col items-center justify-start gap-0.5 rounded-sm border px-0.5 py-1 text-[11px] transition-colors"
+                    style={
+                      holiday
+                        ? { backgroundColor: DAY_TYPE_COLOR[holiday.dayType], color: colors.ink, borderColor: DAY_TYPE_COLOR[holiday.dayType] }
+                        : isSelected
+                          ? { borderColor: colors.ink, color: colors.ink, backgroundColor: "transparent" }
+                          : { borderColor: colors.line, color: colors.ink, backgroundColor: "transparent" }
+                    }
+                  >
+                    <span>{day}</span>
+                    {holiday && (
+                      <span className="text-center text-[8px] leading-[1.1] break-all">{holiday.name}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         )}
 
-        <div className="flex flex-col gap-2">
-          {holidays?.map((h) => (
-            <div key={h.id} className="flex items-center justify-between border p-3 text-xs" style={{ borderColor: colors.line }}>
-              <div>
-                <p className="font-semibold">
-                  {h.holidayDate}　{h.name}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
+        {selectedDate && (
+          <div className="mt-4 border p-3" style={{ borderColor: colors.line }}>
+            <p className="mb-2 text-xs font-semibold">{selectedDate}</p>
+            <div className="flex flex-col gap-2">
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  名稱
+                </span>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px]">
+                  分類
+                </span>
                 <select
-                  value={h.dayType}
-                  onChange={(e) => handleCategoryChange(h, e.target.value as HolidayDayType)}
-                  className="border-b bg-transparent py-1 text-xs outline-none"
+                  value={editDayType}
+                  onChange={(e) => setEditDayType(e.target.value as HolidayDayType)}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
                   style={{ borderColor: colors.line, color: colors.ink }}
                 >
                   {DAY_TYPE_OPTIONS.map((opt) => (
@@ -411,18 +362,89 @@ export function HolidayManager() {
                     </option>
                   ))}
                 </select>
+              </label>
+
+              {dayError && (
+                <p role="alert" className="text-[11px]" style={{ color: colors.alert }}>
+                  {dayError}
+                </p>
+              )}
+
+              <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => handleDelete(h.id)}
-                  disabled={deletingId === h.id}
-                  className="px-2 py-1 disabled:opacity-50"
-                  style={{ color: colors.alert }}
+                  onClick={handleSaveDay}
+                  disabled={isSavingDay}
+                  className="flex-1 py-2 text-xs tracking-wide disabled:opacity-50"
+                  style={{ backgroundColor: colors.pine, color: colors.pineText }}
                 >
-                  {deletingId === h.id ? "刪除中…" : "刪除"}
+                  {isSavingDay ? "儲存中…" : selectedHoliday ? "更新" : "新增"}
                 </button>
+                {selectedHoliday && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteDay}
+                    disabled={isDeletingDay}
+                    className="flex-1 border py-2 text-xs tracking-wide disabled:opacity-50"
+                    style={{ borderColor: colors.alert, color: colors.alert }}
+                  >
+                    {isDeletingDay ? "刪除中…" : "刪除"}
+                  </button>
+                )}
               </div>
             </div>
-          ))}
+          </div>
+        )}
+
+        <div className="mt-6">
+          <button
+            type="button"
+            onClick={() => setShowBulkForm((v) => !v)}
+            className="w-full py-2 text-xs tracking-wide"
+            style={{ backgroundColor: colors.pine, color: colors.pineText }}
+          >
+            批次匯入
+          </button>
+          {showBulkForm && (
+            <div className="mt-2 flex flex-col gap-2 border p-3" style={{ borderColor: colors.line }}>
+              <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                一行一筆，格式「日期,名稱,分類」，例如：
+                <br />
+                2027-01-01,元旦,holiday
+                <br />
+                2027-02-05,除夕,春節
+              </p>
+              <textarea
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                rows={8}
+                className="w-full border p-2 text-xs outline-none"
+                style={{ borderColor: colors.line, color: colors.ink }}
+                placeholder="2027-01-01,元旦,holiday"
+              />
+              {bulkErrors.length > 0 && (
+                <div className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                  {bulkErrors.map((e, i) => (
+                    <p key={i}>{e}</p>
+                  ))}
+                </div>
+              )}
+              {bulkResult && (
+                <p className="text-[11px]" style={{ color: colors.pine }}>
+                  {bulkResult}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleBulkImport}
+                disabled={isBulkImporting}
+                className="py-2 text-xs tracking-wide disabled:opacity-50"
+                style={{ backgroundColor: colors.pine, color: colors.pineText }}
+              >
+                {isBulkImporting ? "匯入中…" : "匯入"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

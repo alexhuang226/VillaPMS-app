@@ -28,7 +28,8 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
  * - 管家：首頁、/schedule（可以排班，不是唯讀）、/reservations
  *   （唯讀、金額隱藏，見 reservations-search.tsx）、/employees
  *   （只能新增房務人員、改房務人員在職狀態，見 employee-manager.tsx）、
- *   變更密碼。看不到報價、應收、營收統計、民宿資料。
+ *   /holidays（節日設定，跟管理員權限一樣沒有限制）、變更密碼。看不到
+ *   報價、應收、營收統計、房價設定、民宿資料。
  * - 管理員（以及任何職稱不是上面兩種的登入者）：不受限制。
  *
  * 用 service role client 查職稱，不透過 RLS——這裡不確定
@@ -37,7 +38,14 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
  * 失效或誤擋。
  */
 const HOUSEKEEPING_STAFF_ALLOWED_PREFIXES = ["/schedule", "/change-password", "/login"];
-const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = ["/schedule", "/reservations", "/employees", "/change-password", "/login"];
+const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = [
+  "/schedule",
+  "/reservations",
+  "/employees",
+  "/holidays",
+  "/change-password",
+  "/login",
+];
 
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
