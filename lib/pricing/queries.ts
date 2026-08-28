@@ -15,6 +15,7 @@ import type {
   DayType,
   FlatServicePrices,
   NightlyRateTable,
+  PriceCategory,
   PropertyCode,
   PropertyRoomCounts,
 } from "./types";
@@ -44,29 +45,13 @@ export async function getPropertyId(propertyCode: PropertyCode): Promise<string>
  */
 export async function getNightlyRateTable(
   propertyId: string,
-  priceCategory: "regular" | "holiday" | "festival" | "lunar_new_year" | "new_year_eve"
+  priceCategory: PriceCategory
 ): Promise<NightlyRateTable> {
   const supabase = createServiceRoleClient();
-  const dbDayType = priceCategory === "regular" ? "weekday" : priceCategory;
-
-  const { data, error } = await supabase
-    .from("rate_rule_tiers")
-    .select(
-      `
-        amount,
-        config_label,
-        rate_rules!inner (
-          day_type,
-          rate_plans!inner ( property_id )
-        )
-      `
-    )
-    .eq("rate_rules.day_type", dbDayType)
-    .eq("rate_rules.rate_plans.property_id", propertyId);
-
-  if (error) {
-    throw new Error(`查詢每晚房價失敗：${error.message}`);
-  }
+  // priceCategory 現在直接對應資料庫的 day_type 值，不需要再把
+  // "regular" 特別轉成 "weekday"——weekday/peak 已經是各自獨立的
+  // 分類，不會再互相覆蓋（見 day-type.ts toPriceCategory 的說明）
+  const dbDayType = priceCategory;
 
   const table: NightlyRateTable = {
     fourPersonSuite: 0,
@@ -75,7 +60,37 @@ export async function getNightlyRateTable(
     doublePlain: 0,
   };
 
-  for (const row of data ?? []) {
+  // 分兩步查，不要用一次查詢裡「透過兩層關聯表過濾」的巢狀 filter
+  // （原本這裡是 .eq("rate_rules.rate_plans.property_id", ...) 這種
+  // 雙層巢狀寫法）——那種寫法在 PostgREST／supabase-js 上不夠可靠，
+  // 平日／假日這種天天都會用到的分類剛好每次都能查到資料所以沒被
+  // 發現，但節日／跨年／春節在 2026 年節日資料匯入之前，從來沒有
+  // 真正被觸發過這段查詢，所以這個問題一直沒被抓到。跟
+  // lib/pricing/rate-editor.ts 用的是同一種穩妥、已經驗證過可以正常
+  // 運作的兩段式查詢寫法。
+  const { data: ruleData, error: ruleError } = await supabase
+    .from("rate_rules")
+    .select("id, rate_plans!inner(property_id)")
+    .eq("day_type", dbDayType)
+    .eq("rate_plans.property_id", propertyId)
+    .maybeSingle();
+
+  if (ruleError) {
+    throw new Error(`查詢定價規則失敗：${ruleError.message}`);
+  }
+  if (!ruleData) return table;
+
+  const { data: tiersData, error: tiersError } = await supabase
+    .from("rate_rule_tiers")
+    .select("amount, config_label")
+    .eq("tier_type", "room_type_rate")
+    .eq("rate_rule_id", (ruleData as any).id);
+
+  if (tiersError) {
+    throw new Error(`查詢每晚房價失敗：${tiersError.message}`);
+  }
+
+  for (const row of (tiersData ?? []) as any[]) {
     const amount = Number(row.amount);
     switch (row.config_label) {
       case "四人套房":
@@ -591,6 +606,8 @@ export interface ReservationDetail {
   guestName: string;
   guestPhone: string | null;
   propertyId: string;
+  /** 民宿代碼（zhici/moyin/shuijing），編輯訂單時查加床房號選項要用 */
+  propertyCode: string;
   propertyName: string;
   propertyAddress: string | null;
   parkingInfo: string | null;
@@ -604,6 +621,7 @@ export interface ReservationDetail {
   visitors: number;
   finalTotal: number;
   status: string;
+  paymentStatus: string;
   bookingSource: string;
   needsInvoice: boolean;
   invoiceTitle: string | null;
@@ -619,7 +637,7 @@ export interface ReservationDetail {
     doublePlainCount: number;
   };
   roomLines: { quantity: number; notes: string | null }[];
-  items: { description: string; amount: number; notes: string | null }[];
+  items: { itemType: string; description: string; quantity: number; amount: number; notes: string | null }[];
   payments: { paymentKind: string; amount: number; status: string; dueDate: string | null; paidAt: string | null }[];
 }
 
@@ -629,7 +647,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
   const { data: rowData, error } = await supabase
     .from("reservations")
     .select(
-      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(name, property_settings(address, parking_info, map_url))"
+      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, payment_status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(code, name, property_settings(address, parking_info, map_url))"
     )
     .eq("id", reservationId)
     .maybeSingle();
@@ -654,7 +672,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
 
   const [{ data: roomLinesData }, { data: itemsData }, { data: paymentsData }] = await Promise.all([
     supabase.from("reservation_room_lines").select("quantity, notes").eq("reservation_id", reservationId),
-    supabase.from("reservation_items").select("description, amount, notes").eq("reservation_id", reservationId),
+    supabase.from("reservation_items").select("item_type, description, quantity, amount, notes").eq("reservation_id", reservationId),
     supabase
       .from("payments")
       .select("payment_kind, amount, status, due_date, paid_at")
@@ -672,6 +690,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
     guestName: (row.guests?.name as string) ?? "",
     guestPhone: (row.guests?.phone as string) ?? null,
     propertyId: row.property_id as string,
+    propertyCode: (row.properties?.code as string) ?? "",
     propertyName: (row.properties?.name as string) ?? "",
     propertyAddress: (settingsRow?.address as string) ?? null,
     parkingInfo: (settingsRow?.parking_info as string) ?? null,
@@ -685,6 +704,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
     visitors: Number(row.visitors ?? 0),
     finalTotal: Number(row.final_total),
     status: row.status as string,
+    paymentStatus: (row.payment_status as string) ?? "pending_deposit",
     bookingSource: row.booking_source as string,
     needsInvoice: Boolean(row.needs_invoice),
     invoiceTitle: (row.invoice_title as string) ?? null,
@@ -697,7 +717,9 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
     },
     roomLines: (roomLinesData ?? []).map((r: any) => ({ quantity: Number(r.quantity), notes: r.notes ?? null })),
     items: (itemsData ?? []).map((r: any) => ({
+      itemType: r.item_type as string,
       description: r.description as string,
+      quantity: Number(r.quantity ?? 1),
       amount: Number(r.amount),
       notes: r.notes ?? null,
     })),
@@ -783,6 +805,68 @@ export async function markPaymentPaid(paymentId: string): Promise<void> {
 
   if (error) {
     throw new Error(`標記已收款失敗：${error.message}`);
+  }
+}
+
+/**
+ * 改整體付款狀況（reservations.payment_status），同時同步 payments
+ * 表裡訂金/尾款兩筆記錄的實際狀態——這兩個原本是各自獨立、沒有互相
+ * 連動的機制（見 lib/pricing/reservation-message.ts 開頭的說明），
+ * 之前只改 reservations.payment_status 的話，payments 表那邊的
+ * 訂金/尾款不會跟著變成「已收」，導致畫面上「付款狀況」跟底下
+ * 訂金/尾款的收款狀態顯示不一致。這個函式讓改一個地方、兩邊都會
+ * 對齊。
+ *
+ * 每種整體付款狀況，對應訂金/尾款各自該有的狀態：
+ * - 待匯訂金：訂金未收、尾款未收
+ * - 已匯訂金：訂金已收、尾款未收
+ * - 已匯尾款：訂金已收、尾款已收
+ * - 退還訂金：訂金已退款、尾款作廢（不會再收，訂單通常已取消）
+ * - 沒收訂金：訂金已收（客人付的訂金民宿留下當作取消費）、尾款作廢
+ */
+export async function updateReservationPaymentStatus(reservationId: string, paymentStatus: string): Promise<void> {
+  const supabase = createServiceRoleClient();
+
+  const { error: reservationError } = await (supabase.from("reservations") as any)
+    .update({ payment_status: paymentStatus })
+    .eq("id", reservationId);
+  if (reservationError) {
+    throw new Error(`更新付款狀況失敗：${reservationError.message}`);
+  }
+
+  const statusMap: Record<string, { deposit: "pending" | "paid" | "void" | "refunded"; balance: "pending" | "paid" | "void" | "refunded" }> = {
+    pending_deposit: { deposit: "pending", balance: "pending" },
+    deposit_paid: { deposit: "paid", balance: "pending" },
+    balance_paid: { deposit: "paid", balance: "paid" },
+    deposit_refunded: { deposit: "refunded", balance: "void" },
+    deposit_forfeited: { deposit: "paid", balance: "void" },
+  };
+  const target = statusMap[paymentStatus];
+  if (!target) return; // 不認得的狀態值就不動 payments 表，只更新上面那個整體欄位
+
+  const { data: paymentRows, error: fetchError } = await supabase
+    .from("payments")
+    .select("id, payment_kind, status, paid_at")
+    .eq("reservation_id", reservationId)
+    .in("payment_kind", ["deposit", "balance"]);
+  if (fetchError) {
+    throw new Error(`查詢付款記錄失敗：${fetchError.message}`);
+  }
+
+  const now = new Date().toISOString();
+  for (const row of (paymentRows ?? []) as any[]) {
+    const kind = row.payment_kind as "deposit" | "balance";
+    const newStatus = target[kind];
+    const shouldHavePaidAt = newStatus === "paid";
+    const { error: updateError } = await (supabase.from("payments") as any)
+      .update({
+        status: newStatus,
+        paid_at: shouldHavePaidAt ? (row.paid_at ?? now) : null,
+      })
+      .eq("id", row.id);
+    if (updateError) {
+      throw new Error(`同步${kind === "deposit" ? "訂金" : "尾款"}狀態失敗：${updateError.message}`);
+    }
   }
 }
 
@@ -876,7 +960,7 @@ export async function getReservationsForMonthCalendar(
  * 開 /quote 用同樣的條件重新試算一次，再把算出來的金額填回這裡的
  * 「總金額」欄位。
  */
-export interface ReservationUpdateFields {
+export interface ReservationUpdateFields extends ReservationAddOnFields {
   checkIn: string;
   checkOut: string;
   adults: number;
@@ -899,7 +983,7 @@ export interface ReservationUpdateFields {
 export async function updateReservation(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
   const supabase = createServiceRoleClient();
   // 同樣的型別檢查問題，見 getReservationDetail 裡 `as any` 那段的說明
-  const { error } = await (supabase.from("reservations") as any)
+  const { data: updatedRow, error } = await (supabase.from("reservations") as any)
     .update({
       check_in: fields.checkIn,
       check_out: fields.checkOut,
@@ -919,10 +1003,49 @@ export async function updateReservation(reservationId: string, fields: Reservati
       double_suite_count: fields.doubleSuiteCount,
       double_plain_count: fields.doublePlainCount,
     })
-    .eq("id", reservationId);
+    .eq("id", reservationId)
+    .select("property_id")
+    .single();
 
   if (error) {
     throw new Error(`更新訂單失敗：${error.message}`);
+  }
+
+  // 加購項目：不逐項比對哪個改了、哪個沒改（加床房號這種欄位改起來
+  // 不是簡單的「值變了就更新」），用「先把舊的全部刪掉、再依目前
+  // 表單狀態整組重新寫入」最不容易漏掉異動，也是為什麼上面
+  // buildAddOnItemLines() 要抽成共用函式——這裡實際套用的邏輯要跟
+  // 新增訂單那邊完全一致。
+  const propertyId = updatedRow?.property_id as string | undefined;
+  if (propertyId) {
+    const { error: deleteAddonError } = await supabase
+      .from("reservation_items")
+      .delete()
+      .eq("reservation_id", reservationId)
+      .in("item_type", ADDON_ITEM_TYPES);
+    if (deleteAddonError) {
+      throw new Error(`清除舊加購項目失敗：${deleteAddonError.message}`);
+    }
+
+    // 「加開房間」用 item_type='other'，用 description 額外篩選，
+    // 避免誤刪未來可能存在、跟這裡無關的其他 'other' 類型項目
+    const { error: deleteExtraRoomError } = await supabase
+      .from("reservation_items")
+      .delete()
+      .eq("reservation_id", reservationId)
+      .eq("item_type", "other")
+      .eq("description", "加開房間");
+    if (deleteExtraRoomError) {
+      throw new Error(`清除舊加開房間項目失敗：${deleteExtraRoomError.message}`);
+    }
+
+    const itemLines = await buildAddOnItemLines(propertyId, reservationId, fields);
+    if (itemLines.length > 0) {
+      const { error: insertAddonError } = await (supabase.from("reservation_items") as any).insert(itemLines);
+      if (insertAddonError) {
+        throw new Error(`寫入加購項目失敗：${insertAddonError.message}`);
+      }
+    }
   }
 }
 
@@ -982,26 +1105,10 @@ function generateReservationNo(): string {
  * 已經處理收款，不需要民宿這邊再追蹤一次應收，不然「查詢應收」頁面
  * 會顯示這筆其實已經收到錢的訂單還在等收款，造成誤導。
  */
-export interface CreateReservationFields {
-  propertyCode: PropertyCode;
-  guestName: string;
-  guestPhone: string;
-  checkIn: string;
-  checkOut: string;
-  adults: number;
-  children: number;
-  infants: number;
-  pets: number;
-  visitors: number;
-  bookingSource: string;
-  finalTotal: number;
-  needsInvoice: boolean;
-  invoiceTitle: string | null;
-  invoiceTaxId: string | null;
-  fourPersonSuiteCount: number;
-  fourPersonDowngradeCount: number;
-  doubleSuiteCount: number;
-  doublePlainCount: number;
+
+/** 加購項目（加床/加開房間/烤肉/餐車/提前入住），新增訂單、編輯
+ * 訂單兩個地方共用同一組欄位定義 */
+export interface ReservationAddOnFields {
   extraBedFixedRoomCodes: string[];
   /** 加臨時床要放哪幾個房號 */
   extraBedTempRoomCodes: string[];
@@ -1011,80 +1118,23 @@ export interface CreateReservationFields {
   earlyCheckin: boolean;
 }
 
-export async function createReservationDirectly(
-  fields: CreateReservationFields
-): Promise<{ reservationId: string; reservationNo: string }> {
-  const supabase = createServiceRoleClient();
-  const organizationId = await getSingleOrganizationId();
-  const propertyId = await getPropertyId(fields.propertyCode);
-  const guestId = await findOrCreateGuest({ name: fields.guestName, phone: fields.guestPhone });
-  const reservationNo = generateReservationNo();
+/** 加購項目在 reservation_items 表對應的 item_type，統一定義一次給
+ * 建立/編輯共用，也給「編輯時要清掉哪些舊項目」用 */
+const ADDON_ITEM_TYPES = ["extra_bed_fixed", "extra_bed_temporary", "bbq", "food_truck", "early_checkin"] as const;
 
-  const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
-    .insert({
-      organization_id: organizationId,
-      property_id: propertyId,
-      guest_id: guestId,
-      source_quote_id: null, // 沒有經過報價流程
-      reservation_no: reservationNo,
-      booking_source: fields.bookingSource,
-      status: "confirmed",
-      check_in: fields.checkIn,
-      check_out: fields.checkOut,
-      adults: fields.adults,
-      children: fields.children,
-      infants: fields.infants,
-      pets: fields.pets,
-      visitors: fields.visitors,
-      quoted_total: fields.finalTotal,
-      final_total: fields.finalTotal,
-      currency: "TWD",
-      needs_invoice: fields.needsInvoice,
-      invoice_title: fields.needsInvoice ? fields.invoiceTitle : null,
-      invoice_tax_id: fields.needsInvoice ? fields.invoiceTaxId : null,
-      four_person_suite_count: fields.fourPersonSuiteCount,
-      four_person_downgrade_count: fields.fourPersonDowngradeCount,
-      double_suite_count: fields.doubleSuiteCount,
-      double_plain_count: fields.doublePlainCount,
-    })
-    .select("id")
-    .single();
-
-  if (reservationError || !reservationRow) {
-    throw new Error(`建立訂單失敗：${reservationError?.message}`);
-  }
-  const reservationId = reservationRow.id as string;
-
-  // 房型明細（跟 confirmReservationFromQuoteAction 同樣的寫法，只記
-  // 數量／說明，正式的金額 authoritative 來源是 reservations.final_total）
-  const roomLines: Record<string, unknown>[] = [];
-  if (fields.fourPersonSuiteCount > 0) {
-    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.fourPersonSuiteCount, notes: "四人套房" });
-  }
-  if (fields.fourPersonDowngradeCount > 0) {
-    roomLines.push({
-      reservation_id: reservationId,
-      line_role: "included",
-      quantity: fields.fourPersonDowngradeCount,
-      beds_open: 1,
-      notes: "降規四人套房（提供1床，以雙人套房計費）",
-    });
-  }
-  if (fields.doubleSuiteCount > 0) {
-    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doubleSuiteCount, notes: "雙人套房" });
-  }
-  if (fields.doublePlainCount > 0) {
-    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doublePlainCount, notes: "雙人雅房" });
-  }
-  if (roomLines.length > 0) {
-    const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
-    if (roomLineError) throw new Error(`寫入房型明細失敗：${roomLineError.message}`);
-  }
-
-  // 加購項目（加床/加開房間/烤肉/餐車/提前入住）——這幾項的單價用
-  // services 表的固定牌價查出來記錄在每筆項目上，方便之後對帳看
-  // 明細；但這不影響 reservations.final_total（那個數字是職員手動
-  // 填的實收金額，不會因為這裡查到的牌價被覆蓋或加總回去）。
+/**
+ * 把加購欄位轉成要寫進 reservation_items 的資料列——這幾項的單價用
+ * services 表的固定牌價查出來記錄在每筆項目上，方便之後對帳看
+ * 明細；但這不影響 reservations.final_total（那個數字是職員手動
+ * 填的實收金額，不會因為這裡查到的牌價被覆蓋或加總回去）。
+ * 新增訂單、編輯訂單都呼叫這個函式產生要寫入的項目列，避免兩邊各寫
+ * 一份、之後改其中一邊忘記改另一邊。
+ */
+async function buildAddOnItemLines(
+  propertyId: string,
+  reservationId: string,
+  fields: ReservationAddOnFields
+): Promise<Record<string, unknown>[]> {
   const servicePrices = await getFlatServicePrices(propertyId);
   const itemLines: Record<string, unknown>[] = [];
 
@@ -1152,6 +1202,106 @@ export async function createReservationDirectly(
       amount: servicePrices.earlyCheckin,
     });
   }
+  return itemLines;
+}
+
+export interface CreateReservationFields extends ReservationAddOnFields {
+  propertyCode: PropertyCode;
+  guestName: string;
+  guestPhone: string;
+  checkIn: string;
+  checkOut: string;
+  adults: number;
+  children: number;
+  infants: number;
+  pets: number;
+  visitors: number;
+  bookingSource: string;
+  finalTotal: number;
+  paymentStatus: string;
+  needsInvoice: boolean;
+  invoiceTitle: string | null;
+  invoiceTaxId: string | null;
+  fourPersonSuiteCount: number;
+  fourPersonDowngradeCount: number;
+  doubleSuiteCount: number;
+  doublePlainCount: number;
+}
+
+export async function createReservationDirectly(
+  fields: CreateReservationFields
+): Promise<{ reservationId: string; reservationNo: string }> {
+  const supabase = createServiceRoleClient();
+  const organizationId = await getSingleOrganizationId();
+  const propertyId = await getPropertyId(fields.propertyCode);
+  const guestId = await findOrCreateGuest({ name: fields.guestName, phone: fields.guestPhone });
+  const reservationNo = generateReservationNo();
+
+  const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
+    .insert({
+      organization_id: organizationId,
+      property_id: propertyId,
+      guest_id: guestId,
+      source_quote_id: null, // 沒有經過報價流程
+      reservation_no: reservationNo,
+      booking_source: fields.bookingSource,
+      status: "confirmed",
+      payment_status: fields.paymentStatus,
+      check_in: fields.checkIn,
+      check_out: fields.checkOut,
+      adults: fields.adults,
+      children: fields.children,
+      infants: fields.infants,
+      pets: fields.pets,
+      visitors: fields.visitors,
+      quoted_total: fields.finalTotal,
+      final_total: fields.finalTotal,
+      currency: "TWD",
+      needs_invoice: fields.needsInvoice,
+      invoice_title: fields.needsInvoice ? fields.invoiceTitle : null,
+      invoice_tax_id: fields.needsInvoice ? fields.invoiceTaxId : null,
+      four_person_suite_count: fields.fourPersonSuiteCount,
+      four_person_downgrade_count: fields.fourPersonDowngradeCount,
+      double_suite_count: fields.doubleSuiteCount,
+      double_plain_count: fields.doublePlainCount,
+    })
+    .select("id")
+    .single();
+
+  if (reservationError || !reservationRow) {
+    throw new Error(`建立訂單失敗：${reservationError?.message}`);
+  }
+  const reservationId = reservationRow.id as string;
+
+  // 房型明細（跟 confirmReservationFromQuoteAction 同樣的寫法，只記
+  // 數量／說明，正式的金額 authoritative 來源是 reservations.final_total）
+  const roomLines: Record<string, unknown>[] = [];
+  if (fields.fourPersonSuiteCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.fourPersonSuiteCount, notes: "四人套房" });
+  }
+  if (fields.fourPersonDowngradeCount > 0) {
+    roomLines.push({
+      reservation_id: reservationId,
+      line_role: "included",
+      quantity: fields.fourPersonDowngradeCount,
+      beds_open: 1,
+      notes: "降規四人套房（提供1床，以雙人套房計費）",
+    });
+  }
+  if (fields.doubleSuiteCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doubleSuiteCount, notes: "雙人套房" });
+  }
+  if (fields.doublePlainCount > 0) {
+    roomLines.push({ reservation_id: reservationId, line_role: "included", quantity: fields.doublePlainCount, notes: "雙人雅房" });
+  }
+  if (roomLines.length > 0) {
+    const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
+    if (roomLineError) throw new Error(`寫入房型明細失敗：${roomLineError.message}`);
+  }
+
+  // 加購項目（加床/加開房間/烤肉/餐車/提前入住）——見
+  // buildAddOnItemLines() 的說明，新增/編輯訂單共用同一份邏輯
+  const itemLines = await buildAddOnItemLines(propertyId, reservationId, fields);
   if (itemLines.length > 0) {
     const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
     if (itemError) throw new Error(`寫入加購項目失敗：${itemError.message}`);

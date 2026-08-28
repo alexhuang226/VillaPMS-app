@@ -23,7 +23,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
@@ -281,6 +281,8 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
   const [detailError, setDetailError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [isUpdatingPaymentStatus, setIsUpdatingPaymentStatus] = useState(false);
+  const [paymentStatusError, setPaymentStatusError] = useState<string | null>(null);
 
   // 編輯模式：因應客人確認訂房後又變更人數或其他需求
   const [isEditing, setIsEditing] = useState(false);
@@ -502,6 +504,24 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
     }
   }
 
+  /** 改整體付款狀況，在訂單詳情頁面直接可以改，不用進到「編輯」表單。
+   * 改完重新查一次這筆訂單的詳細內容，讓下方訂金/尾款金額跟著更新
+   * （updateReservationPaymentStatusAction 會同步 payments 表） */
+  async function handleChangePaymentStatus(newStatus: string) {
+    if (!selectedId) return;
+    setIsUpdatingPaymentStatus(true);
+    setPaymentStatusError(null);
+    try {
+      await updateReservationPaymentStatusAction(selectedId, newStatus);
+      const result = await getReservationDetailAction(selectedId);
+      if (result) setDetail(result);
+    } catch (err) {
+      setPaymentStatusError(err instanceof Error ? err.message : "更新付款狀況失敗，請稍後再試");
+    } finally {
+      setIsUpdatingPaymentStatus(false);
+    }
+  }
+
   async function handleDeleteReservation() {
     if (!selectedId) return;
     setIsDeleting(true);
@@ -545,7 +565,6 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
       visitors: detail.visitors,
       bookingSource: detail.bookingSource,
       status: detail.status,
-      paymentStatus: detail.paymentStatus,
       finalTotal: detail.finalTotal,
       needsInvoice: detail.needsInvoice,
       invoiceTitle: detail.invoiceTitle,
@@ -1310,48 +1329,23 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
 
                 {isEditing && editFields ? (
                   <div className="mt-3 flex flex-col gap-3 text-xs">
-                    <div className="grid grid-cols-2 gap-4">
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          訂單狀態
-                        </span>
-                        <select
-                          value={editFields.status}
-                          onChange={(e) => updateEditField("status", e.target.value)}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          {Object.entries(STATUS_LABEL).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          付款狀況
-                        </span>
-                        <select
-                          value={editFields.paymentStatus}
-                          onChange={(e) => updateEditField("paymentStatus", e.target.value)}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    {editFields.status === "cancelled" && editFields.paymentStatus === "deposit_forfeited" && (
-                      <p className="text-[11px] leading-relaxed" style={{ color: colors.pine }}>
-                        ⚠️
-                        這筆訂單已取消、付款狀況是「沒收訂金」——訂金金額會照樣計入這個月的營收（用實際收到的訂金金額，不是訂單總金額），住房天數不會計入。
-                      </p>
-                    )}
+                    <label className="flex flex-col gap-1">
+                      <span style={{ color: colors.muted }} className="text-[11px]">
+                        訂單狀態
+                      </span>
+                      <select
+                        value={editFields.status}
+                        onChange={(e) => updateEditField("status", e.target.value)}
+                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                        style={{ borderColor: colors.line, color: colors.ink }}
+                      >
+                        {Object.entries(STATUS_LABEL).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
 
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex flex-col gap-1">
@@ -1689,10 +1683,6 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                   <div className="mt-3 flex flex-col gap-1.5 text-xs">
                     <InfoRow label="訂單編號" value={detail.reservationNo} />
                     <InfoRow label="狀態" value={STATUS_LABEL[detail.status] ?? detail.status} />
-                    <InfoRow
-                      label="付款狀況"
-                      value={RESERVATION_PAYMENT_STATUS_LABEL[detail.paymentStatus] ?? detail.paymentStatus}
-                    />
                     <InfoRow label="入住日期" value={detail.checkIn} />
                     <InfoRow label="退房日期" value={detail.checkOut} />
                     <InfoRow
@@ -1759,24 +1749,56 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                       </div>
                     )}
 
-                    {!isHousekeepingManager && detail.payments.length > 0 && (
+                    {!isHousekeepingManager && (
                       <>
                         <p className="mt-4 border-t pt-3 text-xs font-bold" style={{ borderColor: colors.line, color: colors.ink }}>
-                          付款狀態
+                          付款狀況
                         </p>
-                        <div className="mt-1 flex flex-col gap-1.5 text-xs">
-                          {detail.payments.map((p, i) => (
-                            <div key={i} className="flex items-baseline justify-between">
-                              <span style={{ color: colors.muted }}>
-                                {PAYMENT_KIND_LABEL[p.paymentKind] ?? p.paymentKind}
-                                {p.dueDate ? `（到期：${p.dueDate}）` : ""}
-                              </span>
-                              <span className="font-semibold" style={{ color: p.status === "paid" ? colors.pine : colors.alert }}>
-                                NT$ {p.amount.toLocaleString()}　{PAYMENT_STATUS_LABEL[p.status] ?? p.status}
-                              </span>
-                            </div>
+                        <select
+                          value={detail.paymentStatus}
+                          onChange={(e) => handleChangePaymentStatus(e.target.value)}
+                          disabled={isUpdatingPaymentStatus}
+                          className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
                           ))}
-                        </div>
+                        </select>
+                        {detail.status === "cancelled" && detail.paymentStatus === "deposit_forfeited" && (
+                          <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.pine }}>
+                            ⚠️
+                            這筆訂單已取消、付款狀況是「沒收訂金」——訂金金額會照樣計入這個月的營收（用實際收到的訂金金額，不是訂單總金額），住房天數不會計入。
+                          </p>
+                        )}
+                        {isUpdatingPaymentStatus && (
+                          <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
+                            更新中…
+                          </p>
+                        )}
+                        {paymentStatusError && (
+                          <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
+                            {paymentStatusError}
+                          </p>
+                        )}
+
+                        {detail.payments.length > 0 && (
+                          <div className="mt-2 flex flex-col gap-1.5 text-xs">
+                            {detail.payments.map((p, i) => (
+                              <div key={i} className="flex items-baseline justify-between">
+                                <span style={{ color: colors.muted }}>
+                                  {PAYMENT_KIND_LABEL[p.paymentKind] ?? p.paymentKind}
+                                  {p.dueDate ? `（到期：${p.dueDate}）` : ""}
+                                </span>
+                                <span className="font-semibold" style={{ color: p.status === "paid" ? colors.pine : colors.alert }}>
+                                  NT$ {p.amount.toLocaleString()}　{PAYMENT_STATUS_LABEL[p.status] ?? p.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </>
                     )}
 

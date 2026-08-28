@@ -20,6 +20,7 @@ import {
   listReservations,
   markPaymentPaid,
   updateReservation,
+  updateReservationPaymentStatus,
 } from "@/lib/pricing/queries";
 import type {
   CalendarReservation,
@@ -51,6 +52,15 @@ export async function listReceivablesAction(): Promise<ReceivableSummary[]> {
 
 export async function markPaymentPaidAction(paymentId: string): Promise<void> {
   return markPaymentPaid(paymentId);
+}
+
+/**
+ * 改整體付款狀況（訂單詳情頁面直接可以改，不用進到「編輯」表單），
+ * 會同時同步訂金/尾款兩筆付款記錄——見 lib/pricing/queries.ts
+ * updateReservationPaymentStatus() 的說明。
+ */
+export async function updateReservationPaymentStatusAction(reservationId: string, paymentStatus: string): Promise<void> {
+  return updateReservationPaymentStatus(reservationId, paymentStatus);
 }
 
 /**
