@@ -251,6 +251,59 @@ export async function getSavedQuoteAction(quoteId: string): Promise<{
   };
 }
 
+/**
+ * 客人在確認訂房前，臨時想改報價內容（最常見是入住人數變動），不用
+ * 逼客人整個報價流程重跑一次——在報價記錄查詢頁面直接改，重新試算
+ * 後，把新的報價內容覆蓋回這張報價單的快照，之後「確認訂房」照舊
+ * 呼叫 confirmReservationFromQuoteAction 就會用到新的數字，不用另外
+ * 改那個函式。
+ *
+ * 前端流程：改完欄位 → 呼叫 calculateQuoteAction 用新的 StayRequest
+ * 重新算一次 → 算出新的 PackageQuote 沒有警告的話 → 呼叫這個函式把
+ * 新的 request/quote 存回這張報價單。
+ */
+export async function updateQuoteSnapshotAction(
+  quoteId: string,
+  request: StayRequest,
+  quote: PackageQuote
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    const saved = await getQuoteSnapshot(quoteId);
+    if (!saved) {
+      return { success: false, message: "找不到這張報價單，請確認報價單編號是否正確" };
+    }
+    if (saved.status === "accepted") {
+      return { success: false, message: "這張報價單已經確認過訂房了，不能再修改內容" };
+    }
+
+    const supabase = createServiceRoleClient();
+    const { error } = await (supabase.from("quotes") as any)
+      .update({
+        check_in: request.checkIn,
+        check_out: request.checkOut,
+        adults: request.adults,
+        children: request.children,
+        infants: request.infants ?? 0,
+        pets: request.pets ?? 0,
+        visitors: request.visitorQty ?? 0,
+        subtotal: quote.packageTotal + quote.discountAmount,
+        discount_amount: quote.discountAmount,
+        total_amount: quote.packageTotal,
+        needs_invoice: request.invoice?.required ?? false,
+        request_snapshot: request,
+        quote_snapshot: quote,
+      })
+      .eq("id", quoteId);
+
+    if (error) {
+      return { success: false, message: `更新報價內容失敗：${error.message}` };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : "更新報價內容失敗，請稍後再試" };
+  }
+}
+
 /** 該民宿「可以加床」的房間選項，給確認訂房時指定加臨時床房號用 */
 export async function getExtraBedRoomOptionsAction(propertyCode: PropertyCode): Promise<ExtraBedRoomOption[]> {
   const propertyId = await getPropertyId(propertyCode);
@@ -277,7 +330,13 @@ export type BookingSource = "line_official" | "airbnb" | "walk_in" | "phone" | "
 
 export interface ConfirmReservationDetails {
   guestName: string;
-  guestPhone: string;
+  /**
+   * 電話號碼，選填——有些客人（尤其熟客、朋友介紹）不一定願意留
+   * 電話，不應該因為沒有電話就卡住整個確認訂房流程。findOrCreateGuest
+   * 本來就支援電話留空時直接新建一筆客人資料，這裡只是把「一定要
+   * 填」的限制拿掉，底層邏輯不用改。
+   */
+  guestPhone?: string;
   /** 訂房來源，記在 reservations.booking_source */
   bookingSource: BookingSource;
   /** 只有報價當初勾選「需要開立發票」時才需要填 */
@@ -289,6 +348,28 @@ export interface ConfirmReservationDetails {
    */
   extraBedTempRoomCodes?: string[];
 }
+
+/**
+ * confirmReservationFromQuoteAction 的回傳結果——刻意用「回傳值」
+ * 表達失敗，不是用 throw。
+ *
+ * ⚠️ 這是為了解決一個 Next.js Server Action 的已知限制：正式環境
+ * （production build）下，Server Action 裡任何用 throw 拋出的錯誤，
+ * 訊息內容都會被 Next.js 自動抹除、換成一段看不懂的通用訊息
+ * （Minified React error #441，只有一個 digest 代碼，原始的中文
+ * 錯誤訊息完全不會送到前端）——這是 Next.js 特意設計的資安機制
+ * （避免不小心把系統內部細節外洩給使用者），本機開發環境不會出現
+ * 這個問題，只有部署到正式環境才會發生，這也是為什麼這個 bug
+ * 一直到很後面才被發現。
+ *
+ * 這個檔案裡其他函式（calculateAndSaveQuoteAction 等）大多已經是用
+ * try/catch＋回傳值處理失敗，只有這個函式當初是用 throw，所以只有
+ * 這裡會踩到這個問題——這次先只修這個函式；如果之後其他按鈕也出現
+ * 同樣的「看不懂的錯誤」，代表那個函式也需要比照這裡改成回傳值。
+ */
+export type ConfirmReservationResult =
+  | { success: true; reservationId: string; reservationNo: string }
+  | { success: false; message: string };
 
 /**
  * 客人確認訂房後，把已存檔的報價單轉成正式訂房記錄：
@@ -305,13 +386,13 @@ export interface ConfirmReservationDetails {
 export async function confirmReservationFromQuoteAction(
   quoteId: string,
   details: ConfirmReservationDetails
-): Promise<{ reservationId: string; reservationNo: string }> {
+): Promise<ConfirmReservationResult> {
   const saved = await getQuoteSnapshot(quoteId);
   if (!saved) {
-    throw new Error("找不到這張報價單，請確認報價單編號是否正確");
+    return { success: false, message: "找不到這張報價單，請確認報價單編號是否正確" };
   }
   if (saved.status === "accepted") {
-    throw new Error("這張報價單已經確認過訂房了，不能重複確認");
+    return { success: false, message: "這張報價單已經確認過訂房了，不能重複確認" };
   }
 
   const quote = saved.quote as unknown as PackageQuote;
@@ -319,178 +400,194 @@ export async function confirmReservationFromQuoteAction(
   const { propertyId } = saved;
 
   if (quote.minimumGuestsWarning || quote.roomConfigWarning || quote.capacityWarning) {
-    throw new Error("這張報價單當初就沒有算出有效金額，無法確認訂房，請重新報價");
+    return { success: false, message: "這張報價單當初就沒有算出有效金額，無法確認訂房，請重新報價" };
   }
 
   const extraBedTempQty = request.extraBedTempQty ?? 0;
   if (extraBedTempQty > 0 && (details.extraBedTempRoomCodes?.length ?? 0) === 0) {
-    throw new Error("這張報價有加臨時床，請先選好要放在哪個房號再確認訂房");
+    return { success: false, message: "這張報價有加臨時床，請先選好要放在哪個房號再確認訂房" };
   }
 
-  const guestId = await findOrCreateGuest({ name: details.guestName, phone: details.guestPhone });
-  const reservationNo = generateDocNo("R");
-  const organizationId = await getSingleOrganizationId();
-  const supabase = createServiceRoleClient();
+  try {
+    const guestId = await findOrCreateGuest({ name: details.guestName, phone: details.guestPhone ?? "" });
+    const reservationNo = generateDocNo("R");
+    const organizationId = await getSingleOrganizationId();
+    const supabase = createServiceRoleClient();
 
-  const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
-    .insert({
+    const { data: reservationRow, error: reservationError } = await (supabase.from("reservations") as any)
+      .insert({
+        organization_id: organizationId,
+        property_id: propertyId,
+        guest_id: guestId,
+        source_quote_id: quoteId,
+        reservation_no: reservationNo,
+        booking_source: details.bookingSource,
+        status: "confirmed",
+        check_in: request.checkIn,
+        check_out: request.checkOut,
+        adults: request.adults,
+        children: request.children,
+        infants: request.infants ?? 0,
+        pets: request.pets ?? 0,
+        visitors: request.visitorQty ?? 0,
+        quoted_total: quote.packageTotal,
+        final_total: quote.packageTotal,
+        currency: "TWD",
+        needs_invoice: request.invoice?.required ?? false,
+        invoice_title: request.invoice?.required ? details.invoiceTitle ?? null : null,
+        invoice_tax_id: request.invoice?.required ? details.invoiceTaxId ?? null : null,
+        // 直接把房型數量存成結構化欄位（不是只存在 reservation_room_lines
+        // 的自由文字 notes 裡），訂房確認單要重建「房型配置」文字時才有
+        // 乾淨的數字可以用（見 lib/pricing/reservation-message.ts 的
+        // confirmationRoomAllocationLines），也不用擔心報價記錄被清除
+        // 之後房型配置就重建不出來了。
+        four_person_suite_count: quote.roomAllocation?.fourPersonSuiteCount ?? 0,
+        four_person_downgrade_count: quote.roomAllocation?.fourPersonDowngradeCount ?? 0,
+        double_suite_count: quote.roomAllocation?.doubleSuiteCount ?? 0,
+        double_plain_count: quote.roomAllocation?.doublePlainCount ?? 0,
+      })
+      .select("id")
+      .single();
+
+    if (reservationError || !reservationRow) {
+      return { success: false, message: `建立訂房記錄失敗：${reservationError?.message}` };
+    }
+    const reservationId = reservationRow.id as string;
+
+    // 房型明細（只記數量／說明，單價會因為連續訂房逐晚不同，正式的
+    // 金額 authoritative 來源是 reservations.final_total，不是這裡）
+    const allocation = quote.roomAllocation as QuoteRoomAllocation | null;
+    if (allocation) {
+      const roomLines: Record<string, unknown>[] = [];
+      if (allocation.fourPersonSuiteCount > 0) {
+        roomLines.push({
+          reservation_id: reservationId,
+          line_role: "included",
+          quantity: allocation.fourPersonSuiteCount,
+          notes: "四人套房",
+        });
+      }
+      if (allocation.fourPersonDowngradeCount > 0) {
+        roomLines.push({
+          reservation_id: reservationId,
+          line_role: "included",
+          quantity: allocation.fourPersonDowngradeCount,
+          beds_open: 1,
+          notes: "降規四人套房（提供1床，以雙人套房計費）",
+        });
+      }
+      if (allocation.doubleSuiteCount > 0) {
+        roomLines.push({
+          reservation_id: reservationId,
+          line_role: "included",
+          quantity: allocation.doubleSuiteCount,
+          notes: "雙人套房",
+        });
+      }
+      if (allocation.doublePlainCount > 0) {
+        roomLines.push({
+          reservation_id: reservationId,
+          line_role: "included",
+          quantity: allocation.doublePlainCount,
+          notes: "雙人雅房",
+        });
+      }
+      if (roomLines.length > 0) {
+        const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
+        if (roomLineError) {
+          return { success: false, message: `寫入房型明細失敗：${roomLineError.message}` };
+        }
+      }
+    }
+
+    // 加購項目（跟報價收據顯示的「費用明細」用同一份 addOnFeeBreakdown
+    // 邏輯算，確保訂房記錄裡的項目跟客人當初看到的一致）。加臨時床那筆
+    // 額外把選定的房號記進 notes，房務人員才知道要準備哪間房。
+    const itemLines: Record<string, unknown>[] = addOnFeeBreakdown(quote).map((item) => ({
+      reservation_id: reservationId,
+      item_type: ITEM_TYPE_BY_LABEL[item.label] ?? "other",
+      description: item.label,
+      quantity: 1,
+      unit_price: item.amount,
+      amount: item.amount,
+      notes:
+        item.label === "加臨時床" && details.extraBedTempRoomCodes && details.extraBedTempRoomCodes.length > 0
+          ? `房號：${details.extraBedTempRoomCodes.join("、")}`
+          : null,
+    }));
+    if (quote.discountAmount > 0) {
+      itemLines.push({
+        reservation_id: reservationId,
+        item_type: "discount",
+        description: "優惠折扣",
+        quantity: 1,
+        unit_price: -quote.discountAmount,
+        amount: -quote.discountAmount,
+      });
+    }
+    if (quote.invoiceTaxAmount > 0) {
+      itemLines.push({
+        reservation_id: reservationId,
+        item_type: "other",
+        description: "發票稅金(8%)",
+        quantity: 1,
+        unit_price: quote.invoiceTaxAmount,
+        amount: quote.invoiceTaxAmount,
+      });
+    }
+    if (itemLines.length > 0) {
+      const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
+      if (itemError) {
+        return { success: false, message: `寫入加購項目失敗：${itemError.message}` };
+      }
+    }
+
+    // 訂金應收款
+    const { error: paymentError } = await (supabase.from("payments") as any).insert({
       organization_id: organizationId,
-      property_id: propertyId,
-      guest_id: guestId,
-      source_quote_id: quoteId,
-      reservation_no: reservationNo,
-      booking_source: details.bookingSource,
-      status: "confirmed",
-      check_in: request.checkIn,
-      check_out: request.checkOut,
-      adults: request.adults,
-      children: request.children,
-      infants: request.infants ?? 0,
-      pets: request.pets ?? 0,
-      visitors: request.visitorQty ?? 0,
-      quoted_total: quote.packageTotal,
-      final_total: quote.packageTotal,
+      reservation_id: reservationId,
+      payment_kind: "deposit",
+      direction: "receivable",
+      amount: quote.deposit,
       currency: "TWD",
-      needs_invoice: request.invoice?.required ?? false,
-      invoice_title: request.invoice?.required ? details.invoiceTitle ?? null : null,
-      invoice_tax_id: request.invoice?.required ? details.invoiceTaxId ?? null : null,
-      // 直接把房型數量存成結構化欄位（不是只存在 reservation_room_lines
-      // 的自由文字 notes 裡），訂房確認單要重建「房型配置」文字時才有
-      // 乾淨的數字可以用（見 lib/pricing/reservation-message.ts 的
-      // confirmationRoomAllocationLines），也不用擔心報價記錄被清除
-      // 之後房型配置就重建不出來了。
-      four_person_suite_count: quote.roomAllocation?.fourPersonSuiteCount ?? 0,
-      four_person_downgrade_count: quote.roomAllocation?.fourPersonDowngradeCount ?? 0,
-      double_suite_count: quote.roomAllocation?.doubleSuiteCount ?? 0,
-      double_plain_count: quote.roomAllocation?.doublePlainCount ?? 0,
-    })
-    .select("id")
-    .single();
-
-  if (reservationError || !reservationRow) {
-    throw new Error(`建立訂房記錄失敗：${reservationError?.message}`);
-  }
-  const reservationId = reservationRow.id as string;
-
-  // 房型明細（只記數量／說明，單價會因為連續訂房逐晚不同，正式的
-  // 金額 authoritative 來源是 reservations.final_total，不是這裡）
-  const allocation = quote.roomAllocation as QuoteRoomAllocation | null;
-  if (allocation) {
-    const roomLines: Record<string, unknown>[] = [];
-    if (allocation.fourPersonSuiteCount > 0) {
-      roomLines.push({
-        reservation_id: reservationId,
-        line_role: "included",
-        quantity: allocation.fourPersonSuiteCount,
-        notes: "四人套房",
-      });
-    }
-    if (allocation.fourPersonDowngradeCount > 0) {
-      roomLines.push({
-        reservation_id: reservationId,
-        line_role: "included",
-        quantity: allocation.fourPersonDowngradeCount,
-        beds_open: 1,
-        notes: "降規四人套房（提供1床，以雙人套房計費）",
-      });
-    }
-    if (allocation.doubleSuiteCount > 0) {
-      roomLines.push({
-        reservation_id: reservationId,
-        line_role: "included",
-        quantity: allocation.doubleSuiteCount,
-        notes: "雙人套房",
-      });
-    }
-    if (allocation.doublePlainCount > 0) {
-      roomLines.push({
-        reservation_id: reservationId,
-        line_role: "included",
-        quantity: allocation.doublePlainCount,
-        notes: "雙人雅房",
-      });
-    }
-    if (roomLines.length > 0) {
-      const { error: roomLineError } = await (supabase.from("reservation_room_lines") as any).insert(roomLines);
-      if (roomLineError) throw new Error(`寫入房型明細失敗：${roomLineError.message}`);
-    }
-  }
-
-  // 加購項目（跟報價收據顯示的「費用明細」用同一份 addOnFeeBreakdown
-  // 邏輯算，確保訂房記錄裡的項目跟客人當初看到的一致）。加臨時床那筆
-  // 額外把選定的房號記進 notes，房務人員才知道要準備哪間房。
-  const itemLines: Record<string, unknown>[] = addOnFeeBreakdown(quote).map((item) => ({
-    reservation_id: reservationId,
-    item_type: ITEM_TYPE_BY_LABEL[item.label] ?? "other",
-    description: item.label,
-    quantity: 1,
-    unit_price: item.amount,
-    amount: item.amount,
-    notes:
-      item.label === "加臨時床" && details.extraBedTempRoomCodes && details.extraBedTempRoomCodes.length > 0
-        ? `房號：${details.extraBedTempRoomCodes.join("、")}`
-        : null,
-  }));
-  if (quote.discountAmount > 0) {
-    itemLines.push({
-      reservation_id: reservationId,
-      item_type: "discount",
-      description: "優惠折扣",
-      quantity: 1,
-      unit_price: -quote.discountAmount,
-      amount: -quote.discountAmount,
+      due_date: new Date().toISOString().slice(0, 10),
+      status: "pending",
     });
-  }
-  if (quote.invoiceTaxAmount > 0) {
-    itemLines.push({
+    if (paymentError) {
+      return { success: false, message: `建立訂金應收款失敗：${paymentError.message}` };
+    }
+
+    // 尾款應收款：到期日用報價單當初顯示的「入住前 N 天」（一般是 7
+    // 天）往前推算。這筆記錄是「日曆訂單查詢」判斷尾款有沒有收的
+    // 依據——沒有這筆 pending 記錄，日曆頁面就沒辦法標示「尾款未收」。
+    const balanceDueDaysBeforeCheckIn = quote.messageContext?.balanceDueDaysBeforeCheckIn ?? 7;
+    const checkInDate = new Date(`${request.checkIn}T00:00:00`);
+    checkInDate.setDate(checkInDate.getDate() - balanceDueDaysBeforeCheckIn);
+    const balanceDueDate = checkInDate.toISOString().slice(0, 10);
+
+    const { error: balancePaymentError } = await (supabase.from("payments") as any).insert({
+      organization_id: organizationId,
       reservation_id: reservationId,
-      item_type: "other",
-      description: "發票稅金(8%)",
-      quantity: 1,
-      unit_price: quote.invoiceTaxAmount,
-      amount: quote.invoiceTaxAmount,
+      payment_kind: "balance",
+      direction: "receivable",
+      amount: quote.balanceDue,
+      currency: "TWD",
+      due_date: balanceDueDate,
+      status: "pending",
     });
+    if (balancePaymentError) {
+      return { success: false, message: `建立尾款應收款失敗：${balancePaymentError.message}` };
+    }
+
+    const { error: updateError } = await (supabase.from("quotes") as any).update({ status: "accepted" }).eq("id", quoteId);
+    if (updateError) {
+      return { success: false, message: `更新報價單狀態失敗：${updateError.message}` };
+    }
+
+    return { success: true, reservationId, reservationNo };
+  } catch (err) {
+    // 任何沒預期到的例外（連線問題等），一樣用回傳值表達，不要用
+    // throw——理由見上面 ConfirmReservationResult 的說明
+    return { success: false, message: err instanceof Error ? err.message : "確認訂房失敗，請稍後再試" };
   }
-  if (itemLines.length > 0) {
-    const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
-    if (itemError) throw new Error(`寫入加購項目失敗：${itemError.message}`);
-  }
-
-  // 訂金應收款
-  const { error: paymentError } = await (supabase.from("payments") as any).insert({
-    organization_id: organizationId,
-    reservation_id: reservationId,
-    payment_kind: "deposit",
-    direction: "receivable",
-    amount: quote.deposit,
-    currency: "TWD",
-    due_date: new Date().toISOString().slice(0, 10),
-    status: "pending",
-  });
-  if (paymentError) throw new Error(`建立訂金應收款失敗：${paymentError.message}`);
-
-  // 尾款應收款：到期日用報價單當初顯示的「入住前 N 天」（一般是 7
-  // 天）往前推算。這筆記錄是「日曆訂單查詢」判斷尾款有沒有收的
-  // 依據——沒有這筆 pending 記錄，日曆頁面就沒辦法標示「尾款未收」。
-  const balanceDueDaysBeforeCheckIn = quote.messageContext?.balanceDueDaysBeforeCheckIn ?? 7;
-  const checkInDate = new Date(`${request.checkIn}T00:00:00`);
-  checkInDate.setDate(checkInDate.getDate() - balanceDueDaysBeforeCheckIn);
-  const balanceDueDate = checkInDate.toISOString().slice(0, 10);
-
-  const { error: balancePaymentError } = await (supabase.from("payments") as any).insert({
-    organization_id: organizationId,
-    reservation_id: reservationId,
-    payment_kind: "balance",
-    direction: "receivable",
-    amount: quote.balanceDue,
-    currency: "TWD",
-    due_date: balanceDueDate,
-    status: "pending",
-  });
-  if (balancePaymentError) throw new Error(`建立尾款應收款失敗：${balancePaymentError.message}`);
-
-  const { error: updateError } = await (supabase.from("quotes") as any).update({ status: "accepted" }).eq("id", quoteId);
-  if (updateError) throw new Error(`更新報價單狀態失敗：${updateError.message}`);
-
-  return { reservationId, reservationNo };
 }

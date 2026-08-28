@@ -36,6 +36,17 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
  * employees 表的 RLS policy 有沒有開放「查自己 user_id 對應的那筆」，
  * 用 service role 直接繞過，比較不會因為 RLS 設定不如預期而讓限制
  * 失效或誤擋。
+ *
+ * ⚠️ 效能優化：這裡查到的職稱/簡稱，會透過 x-employee-position／
+ * x-employee-short-name 這兩個 request header 往下傳給實際的頁面
+ * （server component）——lib/auth/current-employee.ts 的
+ * getCurrentEmployeePosition()／getCurrentEmployeeInfo() 會先看這兩個
+ * header 有沒有值，有的話直接用，不用的話才自己重新查一次。原本這裡
+ * 跟每個頁面各自獨立查一次職稱（等於同一個資訊、同一次請求裡查兩次
+ * Supabase：一次在這裡、一次在頁面的 server component），是「點首頁
+ * 按鈕後畫面偶爾卡住、查詢有點久」的主要原因之一——每次切換頁面都
+ * 多一輪不必要的資料庫查詢延遲。這樣改完，正常情況下整個請求只會
+ * 查一次職稱，不會查兩次。
  */
 const HOUSEKEEPING_STAFF_ALLOWED_PREFIXES = ["/schedule", "/change-password", "/login"];
 const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = [
@@ -99,10 +110,30 @@ export async function proxy(request: NextRequest) {
     try {
       const serviceClient = createServiceRoleClient();
       const { data: employeeRow } = await (serviceClient.from("employees") as any)
-        .select("position")
+        .select("position, short_name")
         .eq("user_id", user.id)
         .maybeSingle();
-      const position = employeeRow?.position as string | undefined;
+      const position = (employeeRow?.position as string | undefined) ?? "";
+      const shortName = (employeeRow?.short_name as string | undefined) ?? "";
+
+      // 把查到的職稱/簡稱寫進 request header，往下傳給實際的頁面，
+      // 避免頁面自己再查一次——見上面檔案開頭的效能優化說明。
+      // ⚠️ 這裡重建 supabaseResponse 時，要把「原本 supabaseResponse
+      // 上可能已經有的 cookie」複製過去——上面 supabase.auth.getUser()
+      // 如果剛好觸發 session token 刷新，會透過 setAll callback 把新
+      // 的 cookie 寫在原本的 supabaseResponse 上；如果這裡整個重新
+      // 建立一個新的 NextResponse.next() 卻沒有把這些 cookie 複製過
+      // 去，會把剛刷新好的 session cookie 弄丟，導致使用者的登入
+      // session 沒辦法正常延續。
+      const requestHeaders = new Headers(request.headers);
+      requestHeaders.set("x-employee-position", position);
+      requestHeaders.set("x-employee-short-name", shortName);
+      const responseWithHeaders = NextResponse.next({ request: { headers: requestHeaders } });
+      supabaseResponse.cookies.getAll().forEach((cookie) => {
+        responseWithHeaders.cookies.set(cookie.name, cookie.value);
+      });
+      supabaseResponse = responseWithHeaders;
+
       const allowedPrefixes =
         position === "房務員"
           ? HOUSEKEEPING_STAFF_ALLOWED_PREFIXES
@@ -121,8 +152,9 @@ export async function proxy(request: NextRequest) {
       }
     } catch {
       // 查角色失敗（例如資料庫暫時連不上）不要整個擋掉登入使用者，
-      // 只是這種情況下角色限制暫時不會生效——比起讓所有人都進不去，
-      // 這個折衷風險比較小
+      // 只是這種情況下角色限制暫時不會生效、也不會設定 header（頁面
+      // 那邊會偵測到 header 不存在，自動 fallback 回自己查一次）——
+      // 比起讓所有人都進不去，這個折衷風險比較小
     }
   }
 

@@ -23,12 +23,14 @@ import { useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
+  calculateQuoteAction,
   clearOldQuotesAction,
   confirmReservationFromQuoteAction,
   getExtraBedRoomOptionsAction,
   getReservationNoForQuoteAction,
   getSavedQuoteAction,
   searchQuotesAction,
+  updateQuoteSnapshotAction,
 } from "@/app/actions/quote";
 import type { BookingSource } from "@/app/actions/quote";
 import {
@@ -48,7 +50,7 @@ import {
   roomAllocationSummaryItems,
 } from "@/lib/pricing/quote-message";
 import type { ExtraBedRoomOption, QuoteSummary } from "@/lib/pricing/queries";
-import type { PackageQuote } from "@/lib/pricing/types";
+import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -127,8 +129,10 @@ function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) 
 }
 
 export function QuotesSearch() {
+  const now = new Date();
+  const [calendarYear, setCalendarYear] = useState(now.getFullYear());
+  const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
   const [checkInDate, setCheckInDate] = useState("");
-  const [searchTerm, setSearchTerm] = useState("");
   const [results, setResults] = useState<QuoteSummary[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -138,6 +142,14 @@ export function QuotesSearch() {
   const [selectedQuote, setSelectedQuote] = useState<PackageQuote | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+
+  // 確認訂房前臨時修改報價內容（最常見是入住人數變動）——不用逼客人
+  // 整個報價流程重跑一次，改完在這裡重新試算，通過後直接覆蓋這張
+  // 報價單的快照
+  const [isEditingQuote, setIsEditingQuote] = useState(false);
+  const [editRequest, setEditRequest] = useState<StayRequest | null>(null);
+  const [isRecalculating, setIsRecalculating] = useState(false);
+  const [recalculateError, setRecalculateError] = useState<string | null>(null);
 
   // 這些都是「確認訂房」這個階段才收集的資料，報價階段沒有問過
   const [confirmGuestName, setConfirmGuestName] = useState("");
@@ -175,7 +187,6 @@ export function QuotesSearch() {
       if (results) {
         const rows = await searchQuotesAction({
           checkInDate: checkInDate || undefined,
-          search: searchTerm || undefined,
         });
         setResults(rows);
       }
@@ -186,8 +197,35 @@ export function QuotesSearch() {
     }
   }
 
-  async function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
+  function firstWeekdayOfMonth(year: number, month: number): number {
+    return new Date(year, month - 1, 1).getDay();
+  }
+  function daysInCalendarMonth(year: number, month: number): number {
+    return new Date(year, month, 0).getDate();
+  }
+  function formatYMD(year: number, month: number, day: number): string {
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  function goToPrevMonth() {
+    if (calendarMonth === 1) {
+      setCalendarYear((y) => y - 1);
+      setCalendarMonth(12);
+    } else {
+      setCalendarMonth((m) => m - 1);
+    }
+  }
+  function goToNextMonth() {
+    if (calendarMonth === 12) {
+      setCalendarYear((y) => y + 1);
+      setCalendarMonth(1);
+    } else {
+      setCalendarMonth((m) => m + 1);
+    }
+  }
+
+  /** 點月曆上的日期直接查詢，不用再另外按確定 */
+  async function handleSelectDate(dateStr: string) {
+    setCheckInDate(dateStr);
     setIsSearching(true);
     setSearchError(null);
     setResults(null);
@@ -195,10 +233,7 @@ export function QuotesSearch() {
     setSelectedQuote(null);
 
     try {
-      const rows = await searchQuotesAction({
-        checkInDate: checkInDate || undefined,
-        search: searchTerm || undefined,
-      });
+      const rows = await searchQuotesAction({ checkInDate: dateStr });
       setResults(rows);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : "查詢失敗，請稍後再試");
@@ -260,8 +295,8 @@ export function QuotesSearch() {
   async function handleConfirmReservation() {
     if (!selectedId || !selectedQuote) return;
 
-    if (!confirmGuestName.trim() || !confirmGuestPhone.trim()) {
-      setDetailError("請先填寫客人姓名與電話再確認訂房");
+    if (!confirmGuestName.trim()) {
+      setDetailError("請先填寫客人姓名再確認訂房");
       return;
     }
     const extraBedTempQty = selectedQuote.request.extraBedTempQty ?? 0;
@@ -278,20 +313,100 @@ export function QuotesSearch() {
         .map((id) => extraBedRoomOptions.find((opt) => opt.id === id)?.code)
         .filter((code): code is string => Boolean(code));
 
-      const { reservationNo } = await confirmReservationFromQuoteAction(selectedId, {
+      const result = await confirmReservationFromQuoteAction(selectedId, {
         guestName: confirmGuestName.trim(),
-        guestPhone: confirmGuestPhone.trim(),
+        guestPhone: confirmGuestPhone.trim() || undefined,
         bookingSource: confirmBookingSource,
         invoiceTitle: selectedQuote.request.invoice?.required ? confirmInvoiceTitle.trim() : undefined,
         invoiceTaxId: selectedQuote.request.invoice?.required ? confirmInvoiceTaxId.trim() : undefined,
         extraBedTempRoomCodes: extraBedTempRoomCodes.length > 0 ? extraBedTempRoomCodes : undefined,
       });
-      setConfirmedReservationNo(reservationNo);
+      if (!result.success) {
+        setDetailError(result.message);
+        return;
+      }
+      setConfirmedReservationNo(result.reservationNo);
       setSelectedStatus("accepted");
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : "確認訂房失敗，請稍後再試");
     } finally {
       setIsConfirming(false);
+    }
+  }
+
+  /** 開始編輯報價內容——用目前已存的報價當初的輸入條件當表單初始值 */
+  function startEditQuote() {
+    if (!selectedQuote) return;
+    // 房型數量要帶「目前實際的房型配置」（selectedQuote.roomAllocation，
+    // 不管當初是系統依人數自動分配、還是報價時手動指定），不能只帶
+    // request.roomOverride——大多數報價都是系統自動分配、從來沒填過
+    // roomOverride，那個欄位平常就是 undefined，如果只帶這個，編輯
+    // 表單一打開房型數量全部都會變成 0，跟這張報價單實際用到的房型
+    // 完全對不起來。
+    const allocation = selectedQuote.roomAllocation;
+    setEditRequest({
+      ...selectedQuote.request,
+      roomOverride: allocation
+        ? {
+            fourPersonSuiteCount: allocation.fourPersonSuiteCount,
+            fourPersonDowngradeCount: allocation.fourPersonDowngradeCount,
+            doubleSuiteCount: allocation.doubleSuiteCount,
+            doublePlainCount: allocation.doublePlainCount,
+          }
+        : selectedQuote.request.roomOverride,
+    });
+    setRecalculateError(null);
+    setIsEditingQuote(true);
+  }
+
+  function cancelEditQuote() {
+    setIsEditingQuote(false);
+    setEditRequest(null);
+    setRecalculateError(null);
+  }
+
+  function updateEditRequestField<K extends keyof StayRequest>(key: K, value: StayRequest[K]) {
+    setEditRequest((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  function updateEditRoomOverride(field: keyof NonNullable<StayRequest["roomOverride"]>, value: number) {
+    setEditRequest((prev) => (prev ? { ...prev, roomOverride: { ...prev.roomOverride, [field]: value } } : prev));
+  }
+
+  function updateEditAddOn(field: keyof NonNullable<StayRequest["addOns"]>, value: boolean) {
+    setEditRequest((prev) => (prev ? { ...prev, addOns: { ...prev.addOns, [field]: value } } : prev));
+  }
+
+  /**
+   * 重新試算並直接覆蓋這張報價單的快照。金額一律用重新算出來的結果，
+   * 不是「先顯示、按確認訂房才存」——這樣不管客人是現在就確認訂房、
+   * 還是又過幾天才來確認，都是用改過的最新內容，不會因為忘記存檔
+   * 而確認到舊的報價。
+   */
+  async function handleRecalculate() {
+    if (!selectedId || !editRequest) return;
+    setIsRecalculating(true);
+    setRecalculateError(null);
+    try {
+      const newQuote = await calculateQuoteAction(editRequest);
+      if (newQuote.minimumGuestsWarning || newQuote.roomConfigWarning || newQuote.capacityWarning) {
+        setRecalculateError(
+          newQuote.minimumGuestsWarning || newQuote.roomConfigWarning || newQuote.capacityWarning || "重新試算失敗"
+        );
+        return;
+      }
+      const result = await updateQuoteSnapshotAction(selectedId, editRequest, newQuote);
+      if (!result.success) {
+        setRecalculateError(result.message ?? "更新報價內容失敗，請稍後再試");
+        return;
+      }
+      setSelectedQuote(newQuote);
+      setIsEditingQuote(false);
+      setEditRequest(null);
+    } catch (err) {
+      setRecalculateError(err instanceof Error ? err.message : "重新試算失敗，請稍後再試");
+    } finally {
+      setIsRecalculating(false);
     }
   }
 
@@ -324,42 +439,55 @@ export function QuotesSearch() {
           </h1>
         </header>
 
-        <form onSubmit={handleSearch} className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1">
-            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-              入住日期（最常用，直接選日期查最快）
-            </span>
-            <input
-              type="date"
-              value={checkInDate}
-              onChange={(e) => setCheckInDate(e.target.value)}
-              className="w-full border-b bg-transparent py-1.5 text-sm outline-none"
-              style={{ borderColor: colors.line, color: colors.ink }}
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-              客人姓名／電話／報價單編號（選填，可以跟上面日期一起縮小範圍）
-            </span>
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full border-b bg-transparent py-1.5 text-sm outline-none"
-              style={{ borderColor: colors.line, color: colors.ink }}
-            />
-          </label>
-
-          <button
-            type="submit"
-            disabled={isSearching}
-            className="w-full py-2 text-xs tracking-wide disabled:opacity-50"
-            style={{ backgroundColor: colors.pine, color: colors.pineText }}
-          >
-            {isSearching ? "查詢中" : "確定"}
+        <div className="mb-2 flex items-center justify-between">
+          <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            ← 上個月
           </button>
-        </form>
+          <span className="text-sm font-semibold">
+            {calendarYear} 年 {calendarMonth} 月
+          </span>
+          <button type="button" onClick={goToNextMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+            下個月 →
+          </button>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1 text-center text-[10px]" style={{ color: colors.muted }}>
+          {["日", "一", "二", "三", "四", "五", "六"].map((w) => (
+            <div key={w} className="py-1">
+              {w}
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {Array.from({ length: firstWeekdayOfMonth(calendarYear, calendarMonth) }).map((_, i) => (
+            <div key={`blank-${i}`} />
+          ))}
+          {Array.from({ length: daysInCalendarMonth(calendarYear, calendarMonth) }, (_, i) => i + 1).map((day) => {
+            const dateStr = formatYMD(calendarYear, calendarMonth, day);
+            const isSelected = checkInDate === dateStr;
+            return (
+              <button
+                key={day}
+                type="button"
+                onClick={() => handleSelectDate(dateStr)}
+                disabled={isSearching}
+                className="flex aspect-square items-center justify-center rounded-sm border text-xs transition-colors disabled:opacity-50"
+                style={
+                  isSelected
+                    ? { backgroundColor: colors.pine, borderColor: colors.pine, color: colors.pineText }
+                    : { borderColor: colors.line, color: colors.ink, backgroundColor: "transparent" }
+                }
+              >
+                {day}
+              </button>
+            );
+          })}
+        </div>
+        {isSearching && (
+          <p className="mt-2 text-center text-xs" style={{ color: colors.muted }}>
+            查詢中…
+          </p>
+        )}
 
         {!selectedId && (
           <div className="mt-4">
@@ -511,6 +639,296 @@ export function QuotesSearch() {
                   </p>
                 </div>
 
+                {!isConfirmed && !isEditingQuote && (
+                  <button
+                    type="button"
+                    onClick={startEditQuote}
+                    className="mt-2 text-xs"
+                    style={{ color: colors.blue }}
+                  >
+                    編輯報價內容（例如入住人數有變動）
+                  </button>
+                )}
+
+                {!isConfirmed && isEditingQuote && editRequest && (
+                  <div className="mt-2 flex flex-col gap-3 border p-4 text-xs" style={{ borderColor: colors.line }}>
+                    <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                      改完欄位後按「重新試算」，會用新的內容重新計算金額並直接更新這張報價單，不用重新走一次完整報價流程。
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          入住日期
+                        </span>
+                        <input
+                          type="date"
+                          value={editRequest.checkIn}
+                          onChange={(e) => updateEditRequestField("checkIn", e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          退房日期
+                        </span>
+                        <input
+                          type="date"
+                          value={editRequest.checkOut}
+                          onChange={(e) => updateEditRequestField("checkOut", e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          大人
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editRequest.adults}
+                          onChange={(e) => updateEditRequestField("adults", Number(e.target.value))}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          小孩
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editRequest.children}
+                          onChange={(e) => updateEditRequestField("children", Number(e.target.value))}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          嬰幼兒
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editRequest.infants ?? 0}
+                          onChange={(e) => updateEditRequestField("infants", Number(e.target.value))}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px]">
+                          寵物
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={editRequest.pets ?? 0}
+                          onChange={(e) => updateEditRequestField("pets", Number(e.target.value))}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
+                    </div>
+
+                    <div>
+                      <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                        房型數量（留空或 0 表示系統自動依人數分配，只此清綠沒有雙人套房／雅房，陌隱/水景璞堤沒有降規四人套房）
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            四人套房
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.roomOverride?.fourPersonSuiteCount ?? 0}
+                            onChange={(e) => updateEditRoomOverride("fourPersonSuiteCount", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            降規四人套房
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.roomOverride?.fourPersonDowngradeCount ?? 0}
+                            onChange={(e) => updateEditRoomOverride("fourPersonDowngradeCount", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            雙人套房
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.roomOverride?.doubleSuiteCount ?? 0}
+                            onChange={(e) => updateEditRoomOverride("doubleSuiteCount", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            雙人雅房
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.roomOverride?.doublePlainCount ?? 0}
+                            onChange={(e) => updateEditRoomOverride("doublePlainCount", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
+                        額外服務
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            加固定床
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.extraBedFixedQty ?? 0}
+                            onChange={(e) => updateEditRequestField("extraBedFixedQty", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            加臨時床
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.extraBedTempQty ?? 0}
+                            onChange={(e) => updateEditRequestField("extraBedTempQty", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            加開房間
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.extraRoomQty ?? 0}
+                            onChange={(e) => updateEditRequestField("extraRoomQty", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            訪客人數
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={editRequest.visitorQty ?? 0}
+                            onChange={(e) => updateEditRequestField("visitorQty", Number(e.target.value))}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-4">
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editRequest.addOns?.bbq ?? false}
+                            onChange={(e) => updateEditAddOn("bbq", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">烤肉</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editRequest.addOns?.foodTruck ?? false}
+                            onChange={(e) => updateEditAddOn("foodTruck", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">餐車</span>
+                        </label>
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={editRequest.addOns?.earlyCheckin ?? false}
+                            onChange={(e) => updateEditAddOn("earlyCheckin", e.target.checked)}
+                            className="h-3.5 w-3.5"
+                            style={{ accentColor: colors.pine }}
+                          />
+                          <span className="text-xs">提前入住</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <label className="flex flex-col gap-1">
+                      <span style={{ color: colors.muted }} className="text-[11px]">
+                        優惠折扣（金額，直接從總費用扣除）
+                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={editRequest.discountAmount ?? 0}
+                        onChange={(e) => updateEditRequestField("discountAmount", Number(e.target.value))}
+                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                        style={{ borderColor: colors.line, color: colors.ink }}
+                      />
+                    </label>
+
+                    {recalculateError && (
+                      <p role="alert" className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                        {recalculateError}
+                      </p>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={cancelEditQuote}
+                        disabled={isRecalculating}
+                        className="flex-1 border py-2 text-xs tracking-wide disabled:opacity-50"
+                        style={{ borderColor: colors.line, color: colors.ink }}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRecalculate}
+                        disabled={isRecalculating}
+                        className="flex-1 py-2 text-xs tracking-wide disabled:opacity-50"
+                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                      >
+                        {isRecalculating ? "試算中…" : "重新試算並更新"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {isConfirmed ? (
                   confirmedReservationNo && (
                     <p
@@ -545,7 +963,7 @@ export function QuotesSearch() {
                         </label>
                         <label className="flex flex-col gap-1">
                           <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                            客人電話
+                            客人電話（選填）
                           </span>
                           <input
                             type="tel"

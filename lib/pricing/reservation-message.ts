@@ -9,10 +9,21 @@
  * 配置順序、人數格式都不一樣），照實際要傳給客人的範例格式寫的，
  * 不是憑空套用報價單的格式。
  *
- * 呼叫前必須確認 detail.payments 裡有一筆 paymentKind='deposit' 且
- * status='paid' 的記錄——這個函式假設訂金已經收到，如果實際上還沒收
- * 到，呼叫端應該先擋下來，不要讓這個函式產生「已收到訂金匯款」這種
- * 跟事實不符的內容。
+ * 呼叫前必須確認 detail.paymentStatus 是「已匯訂金」或「已匯尾款」
+ * ——這個函式假設訂金已經收到，如果實際上還沒收到，呼叫端應該先
+ * 擋下來，不要讓這個函式產生「已收到訂金匯款」這種跟事實不符的
+ * 內容。
+ *
+ * ⚠️ 判斷「訂金收了沒」是看 reservations.payment_status（管理者在
+ * 編輯訂單畫面手動維護的整體付款狀況），不是看 payments 表裡個別
+ * 訂金記錄的 status 欄位——這兩個原本是各自獨立的機制：payments表
+ * 是訂房當下自動建立的應收款記錄（狀態預設 pending，另外有「標記
+ * 已收款」的流程才會改成 paid），payment_status 則是後來另外加上、
+ * 給管理者更彈性直接維護的整體標籤（沒收訂金/退還訂金這幾種狀態，
+ * payments 表原本的 pending/paid 兩種根本表達不出來）。如果只看
+ * payments 表的 status，管理者透過編輯訂單改了 payment_status，
+ * 這裡卻檢查不到、誤判成「還沒收訂金」——這是原本的寫法，已經
+ * 修正過。
  */
 
 import type { ReservationDetail } from "./queries";
@@ -86,11 +97,20 @@ function confirmationRoomAllocationLines(allocation: ReservationDetail["roomAllo
 }
 
 export function buildReservationConfirmationMessage(detail: ReservationDetail): string {
-  const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit" && p.status === "paid");
-  if (!depositPayment || !depositPayment.paidAt) {
+  const isDepositReceived = detail.paymentStatus === "deposit_paid" || detail.paymentStatus === "balance_paid";
+  if (!isDepositReceived) {
     throw new Error("這筆訂單的訂金還沒標記為已收款，不能產生訂房確認單內容");
   }
+
+  // 訂金金額、收到日期還是盡量從 payments 表撈——那張表通常還是有這筆
+  // 訂金記錄（訂房當下自動建立），只是 status／paidAt 不一定跟
+  // payment_status 同步更新過；找不到的話優雅降級，金額退回用
+  // 0（理論上不該發生，訂房當下一定會建立這筆記錄），收到日期留空
+  // 就不顯示日期，不強制假造一個日期。
+  const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
   const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
+  const depositAmount = depositPayment?.amount ?? 0;
+  const depositPaidAtText = depositPayment?.paidAt ? ` (收到日期：${formatMonthDay(depositPayment.paidAt)})` : "";
 
   const nights = daysBetween(detail.checkIn, detail.checkOut);
   const balanceDueDays = balancePayment?.dueDate ? daysBetween(balancePayment.dueDate, detail.checkIn) : 7;
@@ -118,7 +138,7 @@ export function buildReservationConfirmationMessage(detail: ReservationDetail): 
   lines.push(" 帳務明細");
   lines.push(BOX_TOP);
   lines.push(`  住宿總金額：$${detail.finalTotal.toLocaleString()} 元`);
-  lines.push(`• 訂金已付：$${depositPayment.amount.toLocaleString()} 元 (收到日期：${formatMonthDay(depositPayment.paidAt)})`);
+  lines.push(`• 訂金已付：$${depositAmount.toLocaleString()} 元${depositPaidAtText}`);
   if (balancePayment) {
     lines.push(`• 剩餘尾款：$${balancePayment.amount.toLocaleString()} 元`);
     lines.push(`  請於入住前${balanceDueDays}天匯尾款。`);

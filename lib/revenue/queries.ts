@@ -4,27 +4,24 @@
  * 跟其他查詢層一樣用 service role client（見
  * lib/supabase/service-role.ts 的說明）。
  *
- * 兩個統計指標的歸屬月份，刻意用不同規則，這裡先說清楚避免之後
- * 誤會成 bug：
- *
- * - 營收：整筆訂單的金額歸屬到「入住日期」所在的月份。這是最常見
- *   的做法（訂單成立、客人實際開始入住的那個月），不會把一筆訂單
- *   的金額拆到跨月份的好幾個月裡。
- * - 住房天數／住房率：用「晚數」實際落在哪個月份去算，跨月的訂房
- *   （例如 12/30 入住、1/2 退房）晚數會正確拆到 12 月跟 1 月——因為
- *   住房率描述的是「這個月裡，這間民宿有多少天實際被佔用」，一定
- *   要照實際晚數落在哪個月份算，不能整筆算進入住月份，不然入住月
- *   會虛高、退房那個月看起來完全沒營業。
+ * 營收／住房天數的歸屬月份，都是照「實際晚數落在哪個月份」比例分配
+ * ——這是沿用民宿原本 Google 試算表的做法（試算表裡本來就有「跨月
+ * 歸屬A月天數／A月歸屬金額／B月歸屬年月／B月歸屬金額」這幾個欄位，
+ * 就是做這件事）。例如一筆訂單兩晚在 12 月、一晚在 1 月，總金額會
+ * 按 2:1 比例拆到兩個月份，不會整筆算進入住月份，避免入住月虛高、
+ * 退房月看起來完全沒營業。
  *
  * 「已取消」訂單的營收/住房天數處理方式（重要）：
  * - 一般已取消的訂單：完全不計入營收、也不計入住房天數（客人沒有
  *   真的入住，房間這段期間也還是空的）。
  * - 已取消、但付款狀況是「沒收訂金」的訂單：訂金雖然客人沒入住，
  *   但民宿實際上收下了這筆錢當作取消費用，這筆錢還是要算進營收——
- *   只是「金額」用的是這筆訂單訂金的實收金額（從 payments 表查該
- *   訂單 payment_kind='deposit' 的記錄加總），不是訂單的
- *   final_total（客人根本沒付那麼多）。住房天數依然不計入（房間
- *   還是空的，沒有實際被佔用）。
+ *   金額用這筆訂單訂金的實收金額（從 payments 表查該訂單
+ *   payment_kind='deposit' 的記錄加總），不是訂單的 final_total
+ *   （客人根本沒付那麼多）。這筆錢刻意不比例分配到各月份、整筆算在
+ *   入住月份——因為訂金是取消費用，跟「這幾晚各自值多少錢」沒有
+ *   對應關係，沒有比例分配的意義。住房天數依然不計入（房間還是
+ *   空的，沒有實際被佔用）。
  */
 
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
@@ -47,6 +44,13 @@ function nightsInMonth(checkIn: string, checkOut: string, year: number, month: n
 
   const nights = Math.round((overlapEnd - overlapStart) / (1000 * 60 * 60 * 24));
   return Math.max(0, nights);
+}
+
+/** 訂單整體總晚數（不分年月，純粹算 checkIn 到 checkOut 中間隔幾晚） */
+function totalNights(checkIn: string, checkOut: string): number {
+  const stayStart = new Date(`${checkIn}T00:00:00Z`).getTime();
+  const stayEnd = new Date(`${checkOut}T00:00:00Z`).getTime();
+  return Math.max(0, Math.round((stayEnd - stayStart) / (1000 * 60 * 60 * 24)));
 }
 
 /** 某年是不是閏年，用來算全年天數（366／365），二月沒有 29 號的話 JS Date 會自動進位到 3/1 */
@@ -143,37 +147,36 @@ export async function getYearlyRevenueStats(year: number): Promise<YearlyRevenue
     const isCancelled = row.status === "cancelled";
     const isForfeited = isCancelled && row.payment_status === "deposit_forfeited";
 
-    // 這筆訂單這次要算進營收的金額：一般訂單算整筆 final_total；
-    // 已取消但沒收訂金的訂單，只算訂金實收金額；一般已取消的訂單
-    // 完全不算（revenueAmount 維持 0）
-    let revenueAmount = 0;
-    if (!isCancelled) {
-      revenueAmount = Number(row.final_total ?? 0);
-    } else if (isForfeited) {
-      revenueAmount = forfeitedDepositByReservation.get(row.id as string) ?? 0;
-    }
-
-    if (revenueAmount > 0) {
-      // 營收歸屬到入住月份（只有入住日期本身落在這一年才算，避免
-      // 去年入住、今年退房的訂單把整筆金額也算進今年）
-      const checkInDate = new Date(`${checkIn}T00:00:00Z`);
-      if (checkInDate.getUTCFullYear() === year) {
-        const checkInMonth = checkInDate.getUTCMonth() + 1;
-        const entry = statsMap.get(`${propertyCode}|${checkInMonth}`);
-        if (entry) entry.revenue += revenueAmount;
-      }
-    }
-
-    // 住房晚數只有「沒有取消」的訂單才算——已取消的訂單不管付款
-    // 狀況如何，房間那段期間終究是空的，不算實際住房天數。晚數依
-    // 實際落在哪個月份分別累加，跨月的訂房會正確拆開。
-    if (!isCancelled) {
-      for (let m = 1; m <= 12; m++) {
-        const nights = nightsInMonth(checkIn, checkOut, year, m);
-        if (nights > 0) {
-          const entry = statsMap.get(`${propertyCode}|${m}`);
-          if (entry) entry.nightsBooked += nights;
+    if (isForfeited) {
+      // 沒收訂金：整筆算在入住月份，不比例分配（見檔案開頭的說明）
+      const depositAmount = forfeitedDepositByReservation.get(row.id as string) ?? 0;
+      if (depositAmount > 0) {
+        const checkInDate = new Date(`${checkIn}T00:00:00Z`);
+        if (checkInDate.getUTCFullYear() === year) {
+          const checkInMonth = checkInDate.getUTCMonth() + 1;
+          const entry = statsMap.get(`${propertyCode}|${checkInMonth}`);
+          if (entry) entry.revenue += depositAmount;
         }
+      }
+      continue;
+    }
+
+    if (isCancelled) {
+      // 一般已取消：不計入營收、也不計入住房天數
+      continue;
+    }
+
+    // 正常訂單：營收跟住房晚數都按「實際晚數落在哪個月份」比例分配
+    const finalTotal = Number(row.final_total ?? 0);
+    const nights = totalNights(checkIn, checkOut);
+    for (let m = 1; m <= 12; m++) {
+      const nightsThisMonth = nightsInMonth(checkIn, checkOut, year, m);
+      if (nightsThisMonth <= 0) continue;
+      const entry = statsMap.get(`${propertyCode}|${m}`);
+      if (!entry) continue;
+      entry.nightsBooked += nightsThisMonth;
+      if (nights > 0) {
+        entry.revenue += (finalTotal * nightsThisMonth) / nights;
       }
     }
   }
@@ -182,6 +185,12 @@ export async function getYearlyRevenueStats(year: number): Promise<YearlyRevenue
   for (const entry of statsMap.values()) {
     const daysInThisMonth = new Date(year, entry.month, 0).getDate();
     entry.occupancyRate = daysInThisMonth > 0 ? entry.nightsBooked / daysInThisMonth : 0;
+  }
+
+  // 金額四捨五入到整數——比例分配算出來的小數（例如 $38,800 分3晚
+  // 中的1晚 = $12,933.33...）沒有意義，畫面顯示整數比較乾淨
+  for (const entry of statsMap.values()) {
+    entry.revenue = Math.round(entry.revenue);
   }
 
   const monthlyByProperty = Array.from(statsMap.values()).sort(
@@ -195,10 +204,10 @@ export async function getYearlyRevenueStats(year: number): Promise<YearlyRevenue
   });
 
   const totalRevenue = monthlyTotalRevenue.reduce((sum, m) => sum + m.revenue, 0);
-  const totalNights = monthlyByProperty.reduce((sum, e) => sum + e.nightsBooked, 0);
+  const totalNightsBooked = monthlyByProperty.reduce((sum, e) => sum + e.nightsBooked, 0);
   const daysInYear = isLeapYear(year) ? 366 : 365;
   const totalAvailableNights = PROPERTIES.length * daysInYear;
-  const totalOccupancyRate = totalAvailableNights > 0 ? totalNights / totalAvailableNights : 0;
+  const totalOccupancyRate = totalAvailableNights > 0 ? totalNightsBooked / totalAvailableNights : 0;
 
   return { year, totalRevenue, totalOccupancyRate, monthlyTotalRevenue, monthlyByProperty };
 }

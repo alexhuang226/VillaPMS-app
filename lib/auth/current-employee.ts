@@ -1,14 +1,23 @@
 import { createServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
 /**
  * 查目前登入者對應的員工職稱（管理員／管家／房務員），給 server
  * component 用來決定要不要顯示某些功能（例如首頁導覽、房務排班的
- * 月份範圍限制）。跟 middleware.ts 的角色查詢邏輯是分開寫的兩份——
- * middleware 用 request cookies，這裡用 next/headers 的 cookies()，
- * 執行環境不一樣沒辦法直接共用同一個函式，但查詢邏輯本身刻意寫成
- * 一樣的（都是查 employees.position where user_id = 目前登入者的 id）。
+ * 月份範圍限制）。
+ *
+ * ⚠️ 效能優化：proxy.ts 在每個請求進來時，本來就已經查過一次同一個
+ * 資訊（用來判斷這個角色能不能存取這個路徑），並且把結果寫進
+ * x-employee-position／x-employee-short-name 這兩個 request header
+ * 往下傳。這裡優先直接讀這兩個 header，讀得到的話完全不用再連一次
+ * Supabase——避免同一個請求裡查兩次一模一樣的資料庫資料。
+ *
+ * 只有在 header 真的不存在時（理論上不該發生，除非 proxy.ts 的
+ * matcher 設定被改到不涵蓋這個路徑，或本機開發環境某些情況下
+ * middleware 沒有正常執行過），才 fallback 回自己重新查一次，確保
+ * 這個函式在任何情況下都還是能正確運作，不會因為拿不到 header 就
+ * 整個掛掉。
  *
  * 沒登入、查不到對應員工資料，都回傳 null（呼叫端要自己決定 null
  * 代表什麼權限，目前的用法是「當作不是房務員」，也就是預設看得到
@@ -16,6 +25,16 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
  * 不到自己平常在用的功能）。
  */
 export async function getCurrentEmployeePosition(): Promise<string | null> {
+  const headerStore = await headers();
+  const headerPosition = headerStore.get("x-employee-position");
+  if (headerPosition !== null) {
+    return headerPosition || null;
+  }
+
+  return getCurrentEmployeePositionUncached();
+}
+
+async function getCurrentEmployeePositionUncached(): Promise<string | null> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anonKey) return null;
@@ -53,7 +72,8 @@ export async function getCurrentEmployeePosition(): Promise<string | null> {
  * 用。跟上面 getCurrentEmployeePosition() 是分開的兩個函式，不是
  * 把舊函式改回傳更多欄位——避免動到其他已經在用
  * getCurrentEmployeePosition() 那幾個頁面（只需要職稱，不需要簡稱）
- * 的呼叫方式。
+ * 的呼叫方式。一樣優先讀 proxy.ts 寫入的 request header，見上面
+ * getCurrentEmployeePosition() 的效能優化說明。
  */
 export interface CurrentEmployeeInfo {
   position: string | null;
@@ -61,6 +81,17 @@ export interface CurrentEmployeeInfo {
 }
 
 export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
+  const headerStore = await headers();
+  const headerPosition = headerStore.get("x-employee-position");
+  const headerShortName = headerStore.get("x-employee-short-name");
+  if (headerPosition !== null) {
+    return { position: headerPosition || null, shortName: headerShortName || null };
+  }
+
+  return getCurrentEmployeeInfoUncached();
+}
+
+async function getCurrentEmployeeInfoUncached(): Promise<CurrentEmployeeInfo> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anonKey) return { position: null, shortName: null };

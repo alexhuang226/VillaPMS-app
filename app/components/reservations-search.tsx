@@ -1759,7 +1759,7 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                       </div>
                     )}
 
-                    {detail.payments.length > 0 && (
+                    {!isHousekeepingManager && detail.payments.length > 0 && (
                       <>
                         <p className="mt-4 border-t pt-3 text-xs font-bold" style={{ borderColor: colors.line, color: colors.ink }}>
                           付款狀態
@@ -1781,28 +1781,36 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                     )}
 
                     {/* 訂金已收款才能產生「已收到訂金匯款」的確認內容，避免
-                        在還沒收到錢的狀況下傳出跟事實不符的訊息給客人 */}
-                    {detail.payments.some((p) => p.paymentKind === "deposit" && p.status === "paid") && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={handleCopyConfirmation}
-                          className="mt-4 w-full border py-2.5 text-xs tracking-wide transition-colors"
-                          style={
-                            copied
-                              ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                              : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                          }
-                        >
-                          {copied ? "已複製 ✓" : "複製訂房確認內容"}
-                        </button>
-                        {copyError && (
-                          <p className="mt-2 text-[11px]" style={{ color: colors.alert }}>
-                            {copyError}
-                          </p>
-                        )}
-                      </>
-                    )}
+                        在還沒收到錢的狀況下傳出跟事實不符的訊息給客人——
+                        判斷依據是 reservations.payment_status（管理者在
+                        編輯訂單畫面維護的整體付款狀況），不是 payments 表
+                        個別記錄的 status，原因見 lib/pricing/
+                        reservation-message.ts 開頭的說明：這兩個欄位原本
+                        是各自獨立的機制，只看 payments 表會誤判成「還沒
+                        收訂金」。管家看不到金額相關資訊，這個按鈕也一併
+                        隱藏。 */}
+                    {!isHousekeepingManager &&
+                      (detail.paymentStatus === "deposit_paid" || detail.paymentStatus === "balance_paid") && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleCopyConfirmation}
+                            className="mt-4 w-full border py-2.5 text-xs tracking-wide transition-colors"
+                            style={
+                              copied
+                                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                                : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                            }
+                          >
+                            {copied ? "已複製 ✓" : "複製訂房確認內容"}
+                          </button>
+                          {copyError && (
+                            <p className="mt-2 text-[11px]" style={{ color: colors.alert }}>
+                              {copyError}
+                            </p>
+                          )}
+                        </>
+                      )}
                   </>
                 )}
               </div>
