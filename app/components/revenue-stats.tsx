@@ -189,6 +189,15 @@ export function RevenueStats() {
                 {Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
                   const rows = stats.monthlyByProperty.filter((e) => e.month === monthNum);
                   const monthHasData = rows.some((r) => r.revenue > 0 || r.nightsBooked > 0);
+                  // 這個月三間民宿合計——住房率不是三間直接加總，是
+                  // 「三間合計訂房晚數 / (3 間 × 這個月天數)」，跟
+                  // getYearlyRevenueStats() 算全年住房率的邏輯一致，
+                  // 只是把範圍從全年縮小成這個月
+                  const monthTotalRevenue = rows.reduce((sum, r) => sum + r.revenue, 0);
+                  const monthTotalNights = rows.reduce((sum, r) => sum + r.nightsBooked, 0);
+                  const daysInThisMonth = new Date(stats.year, monthNum, 0).getDate();
+                  const monthOccupancyRate =
+                    rows.length > 0 && daysInThisMonth > 0 ? monthTotalNights / (rows.length * daysInThisMonth) : 0;
                   return (
                     <div key={monthNum} className="border p-3" style={{ borderColor: colors.line, opacity: monthHasData ? 1 : 0.5 }}>
                       <p className={`${display.className} text-base italic`}>{monthNum} 月</p>
@@ -210,6 +219,12 @@ export function RevenueStats() {
                               <td className="py-0.5 text-right tabular-nums">{formatPercent(r.occupancyRate)}</td>
                             </tr>
                           ))}
+                          <tr className="border-t font-bold" style={{ borderColor: colors.line, color: colors.pine }}>
+                            <td className="py-0.5">合計</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalRevenue)}</td>
+                            <td className="py-0.5 text-right tabular-nums">{monthTotalNights} 天</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatPercent(monthOccupancyRate)}</td>
+                          </tr>
                         </tbody>
                       </table>
                     </div>

@@ -75,7 +75,13 @@ interface AssignmentWithPrep {
   prep: UpcomingPrepInfo | null;
 }
 
-export function TodaySchedule({ isHousekeepingStaff = false }: { isHousekeepingStaff?: boolean }) {
+export function TodaySchedule({
+  isHousekeepingStaff = false,
+  currentEmployeeId = null,
+}: {
+  isHousekeepingStaff?: boolean;
+  currentEmployeeId?: string | null;
+}) {
   const [today, setToday] = useState<string>("");
   const [rows, setRows] = useState<AssignmentWithPrep[] | null>(null);
   const [unassigned, setUnassigned] = useState<CheckOutCoverage[]>([]);
@@ -110,8 +116,15 @@ export function TodaySchedule({ isHousekeepingStaff = false }: { isHousekeepingS
           return { assignment, prep };
         })
       );
-      setRows(withPrep);
-      setUnassigned(coverage.filter((c) => c.checkOut === todayStr && !c.hasAssignment));
+      // 房務員登入時，只留自己的排班——不能讓他們看到其他房務人員
+      // 今天被排到哪裡。「未指派」（完全沒人被排）對單一房務員來說
+      // 不算「他自己的班表」，一併不顯示，理由跟 monthly-schedule.tsx
+      // 的 selectedDayUnassigned 一致。
+      const ownRows = isHousekeepingStaff
+        ? withPrep.filter((row) => row.assignment.employeeId === currentEmployeeId)
+        : withPrep;
+      setRows(ownRows);
+      setUnassigned(isHousekeepingStaff ? [] : coverage.filter((c) => c.checkOut === todayStr && !c.hasAssignment));
       setEmployees(employeeList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "讀取失敗，請稍後再試");

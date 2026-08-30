@@ -110,13 +110,14 @@ export async function proxy(request: NextRequest) {
     try {
       const serviceClient = createServiceRoleClient();
       const { data: employeeRow } = await (serviceClient.from("employees") as any)
-        .select("position, short_name")
+        .select("id, position, short_name")
         .eq("user_id", user.id)
         .maybeSingle();
+      const employeeId = (employeeRow?.id as string | undefined) ?? "";
       const position = (employeeRow?.position as string | undefined) ?? "";
       const shortName = (employeeRow?.short_name as string | undefined) ?? "";
 
-      // 把查到的職稱/簡稱寫進 request header，往下傳給實際的頁面，
+      // 把查到的職稱/簡稱/員工id寫進 request header，往下傳給實際的頁面，
       // 避免頁面自己再查一次——見上面檔案開頭的效能優化說明。
       // ⚠️ 這裡重建 supabaseResponse 時，要把「原本 supabaseResponse
       // 上可能已經有的 cookie」複製過去——上面 supabase.auth.getUser()
@@ -126,6 +127,7 @@ export async function proxy(request: NextRequest) {
       // 去，會把剛刷新好的 session cookie 弄丟，導致使用者的登入
       // session 沒辦法正常延續。
       const requestHeaders = new Headers(request.headers);
+      requestHeaders.set("x-employee-id", employeeId);
       requestHeaders.set("x-employee-position", position);
       requestHeaders.set("x-employee-short-name", shortName);
       const responseWithHeaders = NextResponse.next({ request: { headers: requestHeaders } });

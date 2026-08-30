@@ -122,7 +122,13 @@ function EmployeeMultiSelect({
   );
 }
 
-export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepingStaff?: boolean }) {
+export function MonthlySchedule({
+  isHousekeepingStaff = false,
+  currentEmployeeId = null,
+}: {
+  isHousekeepingStaff?: boolean;
+  currentEmployeeId?: string | null;
+}) {
   const [year, setYear] = useState<number | null>(null);
   const [month, setMonth] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<StaffAssignment[]>([]);
@@ -135,7 +141,14 @@ export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepin
 
   // 只看某一間民宿／某一位房務人員的排班狀況——null 代表不篩選
   const [propertyScheduleFilter, setPropertyScheduleFilter] = useState<string | null>(null);
-  const [staffScheduleFilter, setStaffScheduleFilter] = useState<string | null>(null);
+  // 房務員登入時，強制鎖定成只看自己的排班——不能等使用者自己選
+  // 「全部人員」以外的選項才篩選，房務員本來就看不到這個下拉選單
+  // （見下面 {!isHousekeepingStaff && (...)}），所以這裡改用固定的
+  // 初始值，讓房務員一進來就只看得到自己的班表，不會不小心看到其他
+  // 人的排班內容。
+  const [staffScheduleFilter, setStaffScheduleFilter] = useState<string | null>(
+    isHousekeepingStaff ? currentEmployeeId : null
+  );
 
   // 針對未分配訂單快速指派（支援複選）
   const [assigningReservationId, setAssigningReservationId] = useState<string | null>(null);
@@ -434,8 +447,22 @@ export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepin
     const dateStr = formatYMD(year, month, day);
     const map = new Map<string, DayPropertyStatus>();
 
+    // 篩選了特定房務人員的話，這裡要在「要不要把這間民宿放進地圖」
+    // 這一步就先擋掉，不能等到後面才修正 isAssigned——不然沒有這位
+    // 房務人員記錄的民宿還是會先被放進地圖裡、照樣顯示在畫面上，只
+    // 是「已指派」狀態被改成 false，而不是真的完全不顯示。這正是
+    // 之前「篩選某位房務人員後，其他民宿沒有他的記錄也會顯示出來」
+    // 這個問題的成因。
+    function isThisStaffAssignedHere(propertyId: string): boolean {
+      if (!staffScheduleFilter) return true;
+      return assignments.some(
+        (a) => a.workDate === dateStr && a.propertyId === propertyId && a.employeeId === staffScheduleFilter
+      );
+    }
+
     for (const c of coverage.filter((c) => c.checkOut === dateStr)) {
       if (propertyScheduleFilter && c.propertyId !== propertyScheduleFilter) continue;
+      if (!isThisStaffAssignedHere(c.propertyId)) continue;
       map.set(c.propertyId, {
         propertyId: c.propertyId,
         shortLabel: PROPERTY_SHORT_LABELS[c.propertyCode] ?? c.propertyName,
@@ -446,6 +473,7 @@ export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepin
     for (const a of assignments.filter((a) => a.workDate === dateStr && a.propertyId)) {
       const pid = a.propertyId as string;
       if (propertyScheduleFilter && pid !== propertyScheduleFilter) continue;
+      if (staffScheduleFilter && a.employeeId !== staffScheduleFilter) continue;
       if (!map.has(pid)) {
         map.set(pid, {
           propertyId: pid,
@@ -456,27 +484,27 @@ export function MonthlySchedule({ isHousekeepingStaff = false }: { isHousekeepin
       }
     }
 
-    // 篩選了特定房務人員的話，「已指派」的意思要改成「這個人有沒有
-    // 被排到」，不是「隨便誰有沒有被排到」
-    if (staffScheduleFilter) {
-      for (const status of map.values()) {
-        status.isAssigned = assignments.some(
-          (a) => a.workDate === dateStr && a.propertyId === status.propertyId && a.employeeId === staffScheduleFilter
-        );
-      }
-    }
-
     return Array.from(map.values());
   }
 
   const selectedDayAssignments = selectedDate
-    ? assignments.filter((a) => a.workDate === selectedDate && (!propertyScheduleFilter || a.propertyId === propertyScheduleFilter))
-    : [];
-  const selectedDayUnassigned = selectedDate
-    ? coverage.filter(
-        (c) => c.checkOut === selectedDate && !c.hasAssignment && (!propertyScheduleFilter || c.propertyId === propertyScheduleFilter)
+    ? assignments.filter(
+        (a) =>
+          a.workDate === selectedDate &&
+          (!propertyScheduleFilter || a.propertyId === propertyScheduleFilter) &&
+          (!staffScheduleFilter || a.employeeId === staffScheduleFilter)
       )
     : [];
+  // 篩選了特定房務人員時，「未指派」清單不顯示——未指派代表「完全
+  // 沒有人被排」，對這位篩選中的房務員來說本來就不是「他自己的
+  // 班表」，房務員只能看自己班表時看到這個反而沒有意義、也不是
+  // 他能處理的事
+  const selectedDayUnassigned =
+    selectedDate && !staffScheduleFilter
+      ? coverage.filter(
+          (c) => c.checkOut === selectedDate && !c.hasAssignment && (!propertyScheduleFilter || c.propertyId === propertyScheduleFilter)
+        )
+      : [];
 
   /** 這筆排班的（民宿＋日期）當天是不是真的有訂單退房——不是的話要
    * 標注清楚，避免被誤會成「這天有客人退房」 */

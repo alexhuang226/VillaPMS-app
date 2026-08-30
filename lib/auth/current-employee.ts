@@ -76,6 +76,7 @@ async function getCurrentEmployeePositionUncached(): Promise<string | null> {
  * getCurrentEmployeePosition() 的效能優化說明。
  */
 export interface CurrentEmployeeInfo {
+  id: string | null;
   position: string | null;
   shortName: string | null;
 }
@@ -84,8 +85,9 @@ export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
   const headerStore = await headers();
   const headerPosition = headerStore.get("x-employee-position");
   const headerShortName = headerStore.get("x-employee-short-name");
+  const headerId = headerStore.get("x-employee-id");
   if (headerPosition !== null) {
-    return { position: headerPosition || null, shortName: headerShortName || null };
+    return { id: headerId || null, position: headerPosition || null, shortName: headerShortName || null };
   }
 
   return getCurrentEmployeeInfoUncached();
@@ -94,7 +96,7 @@ export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
 async function getCurrentEmployeeInfoUncached(): Promise<CurrentEmployeeInfo> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) return { position: null, shortName: null };
+  if (!url || !anonKey) return { id: null, position: null, shortName: null };
 
   try {
     const cookieStore = await cookies();
@@ -112,18 +114,19 @@ async function getCurrentEmployeeInfoUncached(): Promise<CurrentEmployeeInfo> {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return { position: null, shortName: null };
+    if (!user) return { id: null, position: null, shortName: null };
 
     const serviceClient = createServiceRoleClient();
     const { data } = await (serviceClient.from("employees") as any)
-      .select("position, short_name")
+      .select("id, position, short_name")
       .eq("user_id", user.id)
       .maybeSingle();
     return {
+      id: (data?.id as string) ?? null,
       position: (data?.position as string) ?? null,
       shortName: (data?.short_name as string) ?? null,
     };
   } catch {
-    return { position: null, shortName: null };
+    return { id: null, position: null, shortName: null };
   }
 }

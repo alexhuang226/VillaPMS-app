@@ -61,9 +61,9 @@ const PROPERTIES = [
   // PROPERTY_SHORT_LABELS）用同一套簡稱，日曆色塊欄位窄，全名塞
   // 不下——即使只跨 1 天的訂單也要看得出是哪間民宿，不能乾脆不顯示
   // 文字，只顯示顏色的話還要另外去對照圖例，不夠直覺。
-  { code: "zhici", label: "只此清綠", shortLabel: "清綠", color: "#5C7A4A" },
+  { code: "zhici", label: "只此清綠", shortLabel: "只此", color: "#5C7A4A" },
   { code: "moyin", label: "陌隱", shortLabel: "陌隱", color: colors.gold },
-  { code: "shuijing", label: "水景璞堤", shortLabel: "璞堤", color: colors.blue },
+  { code: "shuijing", label: "水景璞堤", shortLabel: "水景", color: colors.blue },
 ];
 
 /** 訂單狀態——只留這三種給人選/顯示，資料庫的 enum 本身還有
