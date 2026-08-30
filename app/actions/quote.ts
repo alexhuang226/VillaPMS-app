@@ -43,6 +43,7 @@ import {
   getReservationNoByQuoteId,
   getReservationByQuoteId,
   getSingleOrganizationId,
+  getQuoteCheckInDatesInRange,
   listRecentQuotes,
 } from "@/lib/pricing/queries";
 import type { ExtraBedRoomOption, QuoteSummary } from "@/lib/pricing/queries";
@@ -200,19 +201,20 @@ export async function searchQuotesAction(params?: { search?: string; checkInDate
   return listRecentQuotes(params);
 }
 
+/** 這個月哪些日期已經有報價單，給月曆填色用——見
+ * lib/pricing/queries.ts getQuoteCheckInDatesInRange 的說明 */
+export async function getQuoteCheckInDatesInRangeAction(startDate: string, endDateExclusive: string): Promise<string[]> {
+  return getQuoteCheckInDatesInRange(startDate, endDateExclusive);
+}
+
 /**
- * 清除「今天以前建立、還沒確認訂房」的報價記錄，減少報價記錄的
- * 累積量。
+ * 清除「入住日期在今天以前」的報價記錄，減少報價記錄的累積量。
  *
- * 刻意只刪 status != 'accepted' 的報價，已經確認訂房的報價不會被
- * 刪掉——因為 reservations.source_quote_id 會參照到這筆報價，雖然
- * 資料庫設計是刪除時該欄位自動變 null（不會連 reservations 一起砍），
- * 但已確認訂房的報價本身是重要的business記錄（客人當初實際看到、
- * 同意的金額），刪掉可惜也沒必要，只清理「問過價、後來沒下文」的
- * 那些。
- */
-/**
- * 清除「今天以前建立」的報價記錄，減少報價記錄的累積量。
+ * 用的是入住日期，不是報價單建立日期——一張報價單就算是很久以前
+ * 建立的，只要入住日期還沒過，客人都還有可能回來確認訂房，不該被
+ * 清掉；反過來，入住日期已經過去的報價單，不管當初是今天才建立
+ * 還是很久以前建立，都已經沒有意義了（房間已經住過或這段日期已經
+ * 過去），可以安心清除。
  *
  * 不管有沒有確認訂房，一律刪除——報價一旦轉成訂房記錄，之後就以
  * reservations 為主要依據，舊的報價記錄本身不重要了。
@@ -221,15 +223,11 @@ export async function searchQuotesAction(params?: { search?: string; checkInDate
  * 影響。
  */
 export async function clearOldQuotesAction(): Promise<{ deletedCount: number }> {
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
   const supabase = createServiceRoleClient();
-  const { data, error } = await supabase
-    .from("quotes")
-    .delete()
-    .lt("created_at", todayStart.toISOString())
-    .select("id");
+  const { data, error } = await supabase.from("quotes").delete().lt("check_in", todayStr).select("id");
 
   if (error) {
     throw new Error(`清除報價記錄失敗：${error.message}`);
@@ -242,6 +240,7 @@ export async function getSavedQuoteAction(quoteId: string): Promise<{
   quote: PackageQuote;
   request: StayRequest;
   status: string;
+  createdAt: string;
 } | null> {
   const saved = await getQuoteSnapshot(quoteId);
   if (!saved) return null;
@@ -249,6 +248,7 @@ export async function getSavedQuoteAction(quoteId: string): Promise<{
     quote: saved.quote as unknown as PackageQuote,
     request: saved.request as unknown as StayRequest,
     status: saved.status,
+    createdAt: saved.createdAt,
   };
 }
 
@@ -337,15 +337,21 @@ export type BookingSource = "line_official" | "airbnb" | "walk_in" | "phone" | "
 
 export interface ConfirmReservationDetails {
   guestName: string;
-  /**
-   * 電話號碼，選填——有些客人（尤其熟客、朋友介紹）不一定願意留
-   * 電話，不應該因為沒有電話就卡住整個確認訂房流程。findOrCreateGuest
-   * 本來就支援電話留空時直接新建一筆客人資料，這裡只是把「一定要
-   * 填」的限制拿掉，底層邏輯不用改。
-   */
-  guestPhone?: string;
   /** 訂房來源，記在 reservations.booking_source */
   bookingSource: BookingSource;
+  /**
+   * 整體付款狀況——實務上職員按「確認轉為訂房記錄」的當下，客人
+   * 通常訂金已經付了（不然不會走到這一步），這裡讓職員當場記錄
+   * 實際狀況，不用另外再去訂單詳情頁面補改一次；預設值由呼叫端
+   * （quotes-search.tsx）決定，這裡不假設。
+   */
+  paymentStatus: string;
+  /**
+   * 實際收到的訂金金額——預設會帶入報價單當初算出的訂金，但允許
+   * 跟報價不同（例如客人多付/少付、議價調整），這裡用的是職員
+   * 確認的實際金額，不是報價單凍結的數字。
+   */
+  depositAmount: number;
   /** 只有報價當初勾選「需要開立發票」時才需要填 */
   invoiceTitle?: string;
   invoiceTaxId?: string;
@@ -416,7 +422,10 @@ export async function confirmReservationFromQuoteAction(
   }
 
   try {
-    const guestId = await findOrCreateGuest({ name: details.guestName, phone: details.guestPhone ?? "" });
+    // 電話欄位已經從確認訂房流程拿掉——實務上都是用 LINE 官方帳號
+    // 聯絡客人，不特別留電話號碼。findOrCreateGuest 本來就支援電話
+    // 留空時直接新建一筆客人資料，這裡固定傳空字串。
+    const guestId = await findOrCreateGuest({ name: details.guestName, phone: "" });
     const reservationNo = generateDocNo("R");
     const organizationId = await getSingleOrganizationId();
     const supabase = createServiceRoleClient();
@@ -430,6 +439,7 @@ export async function confirmReservationFromQuoteAction(
         reservation_no: reservationNo,
         booking_source: details.bookingSource,
         status: "confirmed",
+        payment_status: details.paymentStatus,
         check_in: request.checkIn,
         check_out: request.checkOut,
         adults: request.adults,
@@ -549,16 +559,32 @@ export async function confirmReservationFromQuoteAction(
       }
     }
 
-    // 訂金應收款
+    // 訂金應收款——用職員這次確認的實際金額/狀態，不是報價單當初
+    // 凍結的數字（quote.deposit）。整體付款狀況(payment_status)
+    // 對應到訂金/尾款各自該有的狀態，這裡跟 lib/pricing/queries.ts
+    // updateReservationPaymentStatus() 用同一套對照表，確保「剛
+    // 確認的訂單」跟「事後在訂單詳情頁面改付款狀況」算出來的結果
+    // 一致，不會有兩套邏輯各自維護、之後改一邊忘記改另一邊的問題。
+    const paymentStatusMap: Record<string, { deposit: "pending" | "paid" | "void" | "refunded"; balance: "pending" | "paid" | "void" | "refunded" }> = {
+      pending_deposit: { deposit: "pending", balance: "pending" },
+      deposit_paid: { deposit: "paid", balance: "pending" },
+      balance_paid: { deposit: "paid", balance: "paid" },
+      deposit_refunded: { deposit: "refunded", balance: "void" },
+      deposit_forfeited: { deposit: "paid", balance: "void" },
+    };
+    const paymentTarget = paymentStatusMap[details.paymentStatus] ?? { deposit: "pending" as const, balance: "pending" as const };
+    const now = new Date().toISOString();
+
     const { error: paymentError } = await (supabase.from("payments") as any).insert({
       organization_id: organizationId,
       reservation_id: reservationId,
       payment_kind: "deposit",
       direction: "receivable",
-      amount: quote.deposit,
+      amount: details.depositAmount,
       currency: "TWD",
       due_date: new Date().toISOString().slice(0, 10),
-      status: "pending",
+      status: paymentTarget.deposit,
+      paid_at: paymentTarget.deposit === "paid" ? now : null,
     });
     if (paymentError) {
       return { success: false, message: `建立訂金應收款失敗：${paymentError.message}` };
@@ -567,20 +593,25 @@ export async function confirmReservationFromQuoteAction(
     // 尾款應收款：到期日用報價單當初顯示的「入住前 N 天」（一般是 7
     // 天）往前推算。這筆記錄是「日曆訂單查詢」判斷尾款有沒有收的
     // 依據——沒有這筆 pending 記錄，日曆頁面就沒辦法標示「尾款未收」。
+    // 金額用總金額扣掉「這次職員確認的實際訂金」重算，不是用
+    // quote.balanceDue（報價當時算的尾款）——如果訂金金額有被職員
+    // 調整過，尾款也要跟著對，不然兩個數字加起來會兜不回總金額。
     const balanceDueDaysBeforeCheckIn = quote.messageContext?.balanceDueDaysBeforeCheckIn ?? 7;
     const checkInDate = new Date(`${request.checkIn}T00:00:00`);
     checkInDate.setDate(checkInDate.getDate() - balanceDueDaysBeforeCheckIn);
     const balanceDueDate = checkInDate.toISOString().slice(0, 10);
+    const balanceAmount = quote.packageTotal - details.depositAmount;
 
     const { error: balancePaymentError } = await (supabase.from("payments") as any).insert({
       organization_id: organizationId,
       reservation_id: reservationId,
       payment_kind: "balance",
       direction: "receivable",
-      amount: quote.balanceDue,
+      amount: balanceAmount,
       currency: "TWD",
       due_date: balanceDueDate,
-      status: "pending",
+      status: paymentTarget.balance,
+      paid_at: paymentTarget.balance === "paid" ? now : null,
     });
     if (balancePaymentError) {
       return { success: false, message: `建立尾款應收款失敗：${balancePaymentError.message}` };

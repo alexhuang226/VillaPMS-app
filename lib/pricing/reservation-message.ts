@@ -146,6 +146,12 @@ export function buildReservationConfirmationMessage(detail: ReservationDetail): 
   lines.push(BOX_BOTTOM);
   lines.push(SEPARATOR);
 
+  lines.push("【重要提醒】");
+  lines.push("1. 退改政策：如需延期或取消，需於入住日前 30 天通知，以保障雙方權益。");
+  lines.push("2. 人數變更：在入住前 1 周根據最終入住人數結算尾款（未達基本人數仍以低消計費），我們將為您們配置合適的備品與床位。");
+  lines.push("3. 在入住前一週收到尾款後會發送【入住提醒】；入住當天會發送【入住須知】及【設備使用說明】。");
+  lines.push(SEPARATOR);
+
   if (detail.propertyAddress) lines.push(` 民宿地址：${detail.propertyAddress}`);
   if (detail.parkingInfo) lines.push(` 停車資訊：${detail.parkingInfo}`);
   if (detail.mapUrl) lines.push(` 導航連結：${detail.mapUrl}`);

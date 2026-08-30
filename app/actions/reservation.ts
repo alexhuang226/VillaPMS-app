@@ -75,18 +75,50 @@ export async function getCalendarReservationsAction(year: number, month: number)
 }
 
 /**
+ * 跟上面 getCalendarReservationsAction 查的是同一張表，差別是直接
+ * 接受明確的日期區間，不是限定「一整個月」——月曆畫面補在跨月那一
+ * 週前後、屬於上個月/下個月的格子，也要顯示真實的訂房狀況（不是
+ * 空白格），需要查的範圍比「這個月」再寬一點點（最多前後各 6 天，
+ * 一週最多補到 6 天）。呼叫端自己算好要查的起訖日期傳進來。
+ */
+export async function getCalendarReservationsForRangeAction(
+  startDate: string,
+  endDateExclusive: string
+): Promise<CalendarReservation[]> {
+  return getReservationsForMonthCalendar(startDate, endDateExclusive);
+}
+
+/**
  * 組出客人已付訂金後要傳給客人的訂房確認單文字。
  * 只有訂金已經標記為已收款（markPaymentPaidAction）才能用——沒收到
  * 訂金卻產生「已收到訂金匯款」的訊息會誤導客人，所以直接在這裡查
  * 一次最新的訂單詳細內容，用實際的付款狀態產生內容，不接受呼叫端
  * 自己組好的資料（避免畫面上顯示的跟資料庫實際狀態不同步）。
  */
-export async function buildReservationConfirmationMessageAction(reservationId: string): Promise<string> {
-  const detail = await getReservationDetail(reservationId);
-  if (!detail) {
-    throw new Error("找不到這筆訂單");
+/**
+ * 這個函式的回傳值刻意用「結果物件」而不是回傳字串／直接 throw——
+ * 理由見 app/actions/quote.ts 的 ConfirmReservationResult 說明：
+ * Next.js 正式環境下，Server Action 用 throw 拋出的錯誤訊息會被
+ * 自動抹除，只留一段看不懂的 React 錯誤代碼（Minified React error
+ * #441），本機開發環境不會出現這個問題，只有部署到正式環境才會
+ * 發生。這個函式原本就是用 throw（找不到訂單、訂金還沒收款兩種
+ * 情況），是踩到同一個問題的另一個例子——複製訂房確認內容這個按鈕
+ * 在正式環境點下去，一樣只會看到看不懂的錯誤代碼，看不到真正的
+ * 中文錯誤訊息。
+ */
+export type BuildConfirmationMessageResult = { success: true; text: string } | { success: false; message: string };
+
+export async function buildReservationConfirmationMessageAction(reservationId: string): Promise<BuildConfirmationMessageResult> {
+  try {
+    const detail = await getReservationDetail(reservationId);
+    if (!detail) {
+      return { success: false, message: "找不到這筆訂單" };
+    }
+    const text = buildReservationConfirmationMessage(detail);
+    return { success: true, text };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : "產生訂房確認內容失敗，請稍後再試" };
   }
-  return buildReservationConfirmationMessage(detail);
 }
 
 /**

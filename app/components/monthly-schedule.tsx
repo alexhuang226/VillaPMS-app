@@ -17,16 +17,16 @@
  * 會特別標注「非退房日」，避免誤會成當天有客人退房。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
   createStaffAssignmentAction,
   deleteStaffAssignmentAction,
-  getCheckOutCoverageAction,
+  getCheckOutCoverageForRangeAction,
   getUpcomingPrepInfoAction,
   listActiveEmployeesAction,
-  listStaffAssignmentsForMonthAction,
+  listStaffAssignmentsForRangeAction,
 } from "@/app/actions/schedule";
 import type { CheckOutCoverage, Employee, StaffAssignment, UpcomingPrepInfo } from "@/lib/schedule/queries";
 
@@ -81,6 +81,50 @@ function formatYMD(year: number, month: number, day: number): string {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+interface CalendarCell {
+  year: number;
+  month: number;
+  day: number;
+  /** 是不是目前顯示的這個月——false 代表是補在前後、跨月的日子 */
+  isCurrentMonth: boolean;
+}
+
+/** (year, month) 往前/往後推 delta 個月，月份會正確跨年進位/借位 */
+function shiftMonth(year: number, month: number, delta: number): { year: number; month: number } {
+  const total = year * 12 + (month - 1) + delta;
+  return { year: Math.floor(total / 12), month: (((total % 12) + 12) % 12) + 1 };
+}
+
+/** 這個月的月曆格子實際涵蓋的完整日期範圍（含前後補的跨月天數）——
+ * 用 JS Date 的自動進位/借位處理月份邊界，比手動算「上個月有幾天」
+ * 更不容易出錯。跟 reservations-search.tsx 的同一個函式邏輯一致，
+ * 兩邊執行環境不同沒辦法直接共用同一份程式碼。 */
+function getGridDateRange(year: number, month: number): { startDate: string; endDateExclusive: string } {
+  const leadingBlanks = firstWeekdayOfMonth(year, month);
+  const daysInMonth = getDaysInMonth(year, month);
+  const weeksCount = Math.ceil((leadingBlanks + daysInMonth) / 7);
+  const totalGridDays = weeksCount * 7;
+
+  const gridStart = new Date(Date.UTC(year, month - 1, 1 - leadingBlanks));
+  const gridEndExclusive = new Date(Date.UTC(year, month - 1, 1 - leadingBlanks + totalGridDays));
+
+  return {
+    startDate: gridStart.toISOString().slice(0, 10),
+    endDateExclusive: gridEndExclusive.toISOString().slice(0, 10),
+  };
+}
+
+/** 單純這個月本身的日期範圍（不含跨月補的天數）——本月出勤統計要用
+ * 這個，不能用上面 getGridDateRange() 那個含跨月天數的版本，理由見
+ * monthlyStaffStats 的說明 */
+function getGridMonthOnlyRange(year: number, month: number): { startDate: string; endDateExclusive: string } {
+  const next = shiftMonth(year, month, 1);
+  return {
+    startDate: formatYMD(year, month, 1),
+    endDateExclusive: formatYMD(next.year, next.month, 1),
+  };
+}
+
 /** 複選房務人員用的藥丸按鈕群組，指派未分配訂單、新增排班兩個地方共用 */
 function EmployeeMultiSelect({
   employees,
@@ -125,15 +169,30 @@ function EmployeeMultiSelect({
 export function MonthlySchedule({
   isHousekeepingStaff = false,
   currentEmployeeId = null,
+  initialAssignments = null,
+  initialCoverage = null,
+  initialEmployees = null,
+  initialYear = null,
+  initialMonth = null,
 }: {
   isHousekeepingStaff?: boolean;
   currentEmployeeId?: string | null;
+  /** 由 page.tsx（server component）先在伺服器端把「這個月」的排班
+   * 資料查好，當初始 props 傳進來，避免點進頁面時還要等 client
+   * component 掛載後才另外發請求查資料——理由跟 reservations-search.tsx
+   * 的同一種優化一致 */
+  initialAssignments?: StaffAssignment[] | null;
+  initialCoverage?: CheckOutCoverage[] | null;
+  initialEmployees?: Employee[] | null;
+  initialYear?: number | null;
+  initialMonth?: number | null;
 }) {
-  const [year, setYear] = useState<number | null>(null);
-  const [month, setMonth] = useState<number | null>(null);
-  const [assignments, setAssignments] = useState<StaffAssignment[]>([]);
-  const [coverage, setCoverage] = useState<CheckOutCoverage[]>([]);
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const now = new Date();
+  const [year, setYear] = useState<number | null>(initialYear ?? now.getFullYear());
+  const [month, setMonth] = useState<number | null>(initialMonth ?? now.getMonth() + 1);
+  const [assignments, setAssignments] = useState<StaffAssignment[]>(initialAssignments ?? []);
+  const [coverage, setCoverage] = useState<CheckOutCoverage[]>(initialCoverage ?? []);
+  const [employees, setEmployees] = useState<Employee[]>(initialEmployees ?? []);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -180,14 +239,18 @@ export function MonthlySchedule({
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const now = new Date();
-    setYear(now.getFullYear());
-    setMonth(now.getMonth() + 1);
-  }, []);
+  const skippedInitialLoadRef = useRef(false);
 
   useEffect(() => {
     if (year === null || month === null) return;
+    // Server component 已經先查好符合目前年/月的初始資料的話，第一次
+    // 執行時跳過，理由跟 reservations-search.tsx 的同一種優化一致
+    if (!skippedInitialLoadRef.current) {
+      skippedInitialLoadRef.current = true;
+      if (initialAssignments !== null && initialYear === year && initialMonth === month) {
+        return;
+      }
+    }
     loadMonth(year, month);
   }, [year, month]);
 
@@ -229,9 +292,10 @@ export function MonthlySchedule({
     setError(null);
     setSelectedDate(null);
     try {
+      const { startDate, endDateExclusive } = getGridDateRange(y, m);
       const [assignmentData, coverageData, employeeList] = await Promise.all([
-        listStaffAssignmentsForMonthAction(y, m),
-        getCheckOutCoverageAction(y, m),
+        listStaffAssignmentsForRangeAction(startDate, endDateExclusive),
+        getCheckOutCoverageForRangeAction(startDate, endDateExclusive),
         listActiveEmployeesAction(),
       ]);
       setAssignments(assignmentData);
@@ -421,14 +485,24 @@ export function MonthlySchedule({
   const leadingBlanks = year !== null && month !== null ? firstWeekdayOfMonth(year, month) : 0;
   const totalCells = leadingBlanks + daysInMonth;
   const weeksCount = Math.ceil(totalCells / 7) || 0;
-  const calendarCells: (number | null)[] = Array.from({ length: weeksCount * 7 }, (_, i) => {
-    const day = i - leadingBlanks + 1;
-    return day >= 1 && day <= daysInMonth ? day : null;
+  // 月曆格子前後補的跨月天數，現在也算出真實的（年/月/日），不再是
+  // 空白格——一併顯示上個月/下個月那幾天的排班狀況
+  const calendarCells: CalendarCell[] = Array.from({ length: weeksCount * 7 }, (_, i) => {
+    const offset = i - leadingBlanks;
+    if (year === null || month === null) return { year: 0, month: 1, day: 1, isCurrentMonth: false };
+    if (offset < 0) {
+      const prev = shiftMonth(year, month, -1);
+      const prevDays = getDaysInMonth(prev.year, prev.month);
+      return { year: prev.year, month: prev.month, day: prevDays + offset + 1, isCurrentMonth: false };
+    }
+    if (offset >= daysInMonth) {
+      const next = shiftMonth(year, month, 1);
+      return { year: next.year, month: next.month, day: offset - daysInMonth + 1, isCurrentMonth: false };
+    }
+    return { year, month, day: offset + 1, isCurrentMonth: true };
   });
 
-  function unassignedForDay(day: number): CheckOutCoverage[] {
-    if (year === null || month === null) return [];
-    const dateStr = formatYMD(year, month, day);
+  function unassignedForDay(dateStr: string): CheckOutCoverage[] {
     return coverage.filter(
       (c) => c.checkOut === dateStr && !c.hasAssignment && (!propertyScheduleFilter || c.propertyId === propertyScheduleFilter)
     );
@@ -442,9 +516,7 @@ export function MonthlySchedule({
     hasBbq: boolean;
     isAssigned: boolean;
   }
-  function propertyStatusesForDay(day: number): DayPropertyStatus[] {
-    if (year === null || month === null) return [];
-    const dateStr = formatYMD(year, month, day);
+  function propertyStatusesForDay(dateStr: string): DayPropertyStatus[] {
     const map = new Map<string, DayPropertyStatus>();
 
     // 篩選了特定房務人員的話，這裡要在「要不要把這間民宿放進地圖」
@@ -548,7 +620,14 @@ export function MonthlySchedule({
   }
   const monthlyStaffStats: PropertyStaffStats[] = (() => {
     const groups: PropertyStaffStats[] = [];
+    if (year === null || month === null) return groups;
+    // 這裡一定要限定在「這個月」實際範圍內，不能用 assignments 整包
+    // 直接算——assignments 現在包含月曆格子前後補的跨月天數（見
+    // getGridDateRange 的說明），這個統計是核對薪水用的，多算了
+    // 隔壁月份的班會導致薪水核對出錯，一定要排除掉。
+    const { startDate, endDateExclusive } = getGridMonthOnlyRange(year, month);
     for (const a of assignments) {
+      if (a.workDate < startDate || a.workDate >= endDateExclusive) continue;
       if (propertyScheduleFilter && a.propertyId !== propertyScheduleFilter) continue;
       if (staffScheduleFilter && a.employeeId !== staffScheduleFilter) continue;
       const key = a.propertyId ?? null;
@@ -688,14 +767,13 @@ export function MonthlySchedule({
             </div>
 
             <div className="mt-1 grid grid-cols-7 gap-1">
-              {calendarCells.map((day, i) => {
-                if (day === null) return <div key={i} />;
-                const dateStr = formatYMD(year, month, day);
-                const dayUnassigned = unassignedForDay(day);
-                const propertyStatuses = propertyStatusesForDay(day);
+              {calendarCells.map((cell, i) => {
+                const dateStr = formatYMD(cell.year, cell.month, cell.day);
+                const dayUnassigned = unassignedForDay(dateStr);
+                const propertyStatuses = propertyStatusesForDay(dateStr);
                 const isSelected = selectedDate === dateStr;
                 const now = new Date();
-                const isToday = year === now.getFullYear() && month === now.getMonth() + 1 && day === now.getDate();
+                const isToday = cell.year === now.getFullYear() && cell.month === now.getMonth() + 1 && cell.day === now.getDate();
                 return (
                   <button
                     key={i}
@@ -710,14 +788,15 @@ export function MonthlySchedule({
                     style={{
                       borderColor: dayUnassigned.length > 0 ? colors.alert : isSelected ? colors.pine : colors.line,
                       backgroundColor: isSelected ? colors.pineSoft : "transparent",
-                      color: colors.ink,
+                      color: cell.isCurrentMonth ? colors.ink : colors.muted,
+                      opacity: cell.isCurrentMonth ? 1 : 0.5,
                     }}
                   >
                     <span
                       className="flex h-4 w-4 items-center justify-center rounded-full"
                       style={isToday ? { backgroundColor: colors.pine, color: "#FFFFFF" } : undefined}
                     >
-                      {day}
+                      {cell.day}
                     </span>
                     {propertyStatuses.map((ps) => (
                       <div key={ps.propertyId} className="flex items-center gap-0.5 whitespace-nowrap">

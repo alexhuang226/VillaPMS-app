@@ -371,6 +371,28 @@ function SectionMark({ index, title }: { index: string; title: string }) {
   );
 }
 
+/** 報價有效期限——套用一般 hotel 業界慣例，報價日期起算 14 天
+ * （兩週）。這裡的報價日期就是「今天」，因為這份報價正在被建立。
+ * 用本地時區的年/月/日組字串，不要用 toISOString()（那是 UTC，
+ * 台灣時間接近午夜前後那幾個小時會算出前一天的日期，跟畫面上其他
+ * 地方一貫的本地時區日期處理方式不一致）。 */
+const QUOTE_VALIDITY_DAYS = 14;
+function todayYMD(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+function addDaysToYMD(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+/** 'YYYY-MM-DD' → '2026/08/29'，標題右上角空間有限，用比 formatDateWithWeekday
+ * （帶星期幾文字）更精簡的格式 */
+function formatSlashDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-");
+  return `${y}/${m}/${d}`;
+}
+
 /** 報價收據用的段落標題：icon + 標題文字，跟複製文字版的 emoji 對應，
  * 讓螢幕/圖片版跟複製文字版看起來是「同一份東西」的兩種呈現方式 */
 function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) {
@@ -821,17 +843,40 @@ export function QuoteForm() {
               className="mt-6 overflow-hidden"
               style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}
             >
-              {/* 標題：民宿名稱在上（大字），「包棟報價單」在下（16px） */}
-              <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+              {/* 標題：民宿名稱在上（大字），「包棟報價單」在下（16px）；
+                  報價日期/有效期限用絕對定位疊在「包棟報價單」右邊，
+                  不用 flex 排版——flex 會讓標題文字整塊跟著往左偏，
+                  沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
+                  正常排版的寬度計算，標題才能繼續用 text-center 對
+                  整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
+              <div className="relative px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
                     PROPERTY_OPTIONS.find((opt) => opt.value === quote.request.propertyCode)?.label
                   }私人會所`}
                 </p>
-                <p className="mt-1 tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
-                  包棟報價單
-                </p>
+                {/* 「包棟報價單」外面包一層 relative 容器（block 元素，
+                    佔滿整個標題區塊寬度）——報價日期/有效期限用
+                    absolute + top:0/right:0 貼齊這個容器的右上角，
+                    「上緣」精準對齊「包棟報價單」文字本身（不管民宿
+                    名稱多長、標題整體變多高都不受影響），「右邊」貼
+                    齊標題區塊本身的右邊界，不會超出卡片範圍。
+                    「包棟報價單」文字繼續吃外層 text-center，視覺上
+                    還是維持在整個標題區塊置中，不受旁邊這個絕對定位
+                    元素影響。 */}
+                <div className="relative mt-1">
+                  <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
+                    包棟報價單
+                  </p>
+                  <div
+                    className="absolute right-0 top-0 text-right text-[10px] leading-relaxed"
+                    style={{ color: colors.pineSoft }}
+                  >
+                    <p>報價日期：{formatSlashDate(todayYMD())}</p>
+                    <p>有效期限：{formatSlashDate(addDaysToYMD(todayYMD(), QUOTE_VALIDITY_DAYS))}</p>
+                  </div>
+                </div>
               </div>
 
               {/* 內容區：明確給 padding，轉圖片時這個縮排會一起被截進去 */}

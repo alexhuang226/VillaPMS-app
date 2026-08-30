@@ -70,6 +70,28 @@ export async function getCheckOutCoverageAction(year: number, month: number): Pr
   return getCheckOutCoverage(monthStart, monthEndExclusive);
 }
 
+/**
+ * 跟上面兩個 xxxAction(year, month) 查的是同一批資料，差別是直接
+ * 接受明確的日期區間，不是限定「一整個月」——月曆畫面補在跨月那
+ * 一週前後、屬於上個月/下個月的格子，也要顯示真實的排班/退房狀況
+ * （不是空白格），需要查的範圍比「這個月」再寬一點點（最多前後
+ * 各 6 天）。呼叫端自己算好要查的起訖日期傳進來，理由/算法見
+ * monthly-schedule.tsx 的 getGridDateRange()。
+ */
+export async function listStaffAssignmentsForRangeAction(
+  startDate: string,
+  endDateExclusive: string
+): Promise<StaffAssignment[]> {
+  return listStaffAssignmentsForMonth(startDate, endDateExclusive);
+}
+
+export async function getCheckOutCoverageForRangeAction(
+  startDate: string,
+  endDateExclusive: string
+): Promise<CheckOutCoverage[]> {
+  return getCheckOutCoverage(startDate, endDateExclusive);
+}
+
 export async function getUpcomingPrepInfoAction(
   propertyId: string,
   onOrAfterDate: string

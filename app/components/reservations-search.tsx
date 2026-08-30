@@ -23,7 +23,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
@@ -197,6 +197,38 @@ function addOneDayToYMD(dateStr: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** (year, month) 往前/往後推 delta 個月，月份會正確跨年進位/借位 */
+function shiftMonth(year: number, month: number, delta: number): { year: number; month: number } {
+  const total = year * 12 + (month - 1) + delta;
+  return { year: Math.floor(total / 12), month: (((total % 12) + 12) % 12) + 1 };
+}
+
+/** 這個月的月曆格子實際涵蓋的完整日期範圍（含前後補的跨月天數）——
+ * 用 JS Date 的自動進位/借位處理月份邊界，比手動算「上個月有幾天」
+ * 更不容易出錯 */
+function getGridDateRange(year: number, month: number): { startDate: string; endDateExclusive: string } {
+  const leadingBlanks = firstWeekdayOfMonth(year, month);
+  const daysInMonth = getDaysInMonth(year, month);
+  const weeksCount = Math.ceil((leadingBlanks + daysInMonth) / 7);
+  const totalGridDays = weeksCount * 7;
+
+  const gridStart = new Date(Date.UTC(year, month - 1, 1 - leadingBlanks));
+  const gridEndExclusive = new Date(Date.UTC(year, month - 1, 1 - leadingBlanks + totalGridDays));
+
+  return {
+    startDate: gridStart.toISOString().slice(0, 10),
+    endDateExclusive: gridEndExclusive.toISOString().slice(0, 10),
+  };
+}
+
+/** 查「這個月月曆格子」實際涵蓋範圍（含跨月補的天數）的訂單資料，
+ * 4 個地方共用（初次載入、換月份、新增/編輯/刪除訂單後重新整理），
+ * 避免各自重複算 getGridDateRange 再各自呼叫一次 action */
+async function fetchCalendarRange(year: number, month: number): Promise<CalendarReservation[]> {
+  const { startDate, endDateExclusive } = getGridDateRange(year, month);
+  return getCalendarReservationsForRangeAction(startDate, endDateExclusive);
+}
+
 interface WeekBarSegment {
   reservation: CalendarReservation;
   startCol: number; // 1-7，這筆訂單在這一週最早出現的欄位
@@ -209,12 +241,15 @@ interface WeekBarSegment {
  * 算出某個民宿在「這一週」裡，每一筆訂單的色塊要畫在第幾欄到第幾欄。
  * week 是這一週 7 天的日期數字（該月範圍外的格子是 null）。
  */
-function computeWeekSegments(
-  week: (number | null)[],
-  year: number,
-  month: number,
-  propertyReservations: CalendarReservation[]
-): WeekBarSegment[] {
+interface CalendarCell {
+  year: number;
+  month: number;
+  day: number;
+  /** 是不是目前顯示的這個月——false 代表是補在前後、跨月的日子 */
+  isCurrentMonth: boolean;
+}
+
+function computeWeekSegments(week: CalendarCell[], propertyReservations: CalendarReservation[]): WeekBarSegment[] {
   const segments: WeekBarSegment[] = [];
 
   for (const res of propertyReservations) {
@@ -222,9 +257,8 @@ function computeWeekSegments(
     let endCol = -1;
 
     for (let col = 0; col < 7; col++) {
-      const day = week[col];
-      if (day === null) continue;
-      const dateStr = formatYMD(year, month, day);
+      const cell = week[col];
+      const dateStr = formatYMD(cell.year, cell.month, cell.day);
       const activeThisDay = res.checkIn <= dateStr && dateStr < res.checkOut;
       if (activeThisDay) {
         if (startCol === -1) startCol = col + 1;
@@ -234,10 +268,10 @@ function computeWeekSegments(
 
     if (startCol === -1) continue; // 這週完全沒有這筆訂單的入住天數
 
-    const startDay = week[startCol - 1] as number;
-    const endDay = week[endCol - 1] as number;
-    const isActualStart = formatYMD(year, month, startDay) === res.checkIn;
-    const isActualEnd = addOneDayToYMD(formatYMD(year, month, endDay)) === res.checkOut;
+    const startCell = week[startCol - 1];
+    const endCell = week[endCol - 1];
+    const isActualStart = formatYMD(startCell.year, startCell.month, startCell.day) === res.checkIn;
+    const isActualEnd = addOneDayToYMD(formatYMD(endCell.year, endCell.month, endCell.day)) === res.checkOut;
 
     segments.push({ reservation: res, startCol, endCol, isActualStart, isActualEnd });
   }
@@ -266,10 +300,30 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function ReservationsSearch({ isHousekeepingManager = false }: { isHousekeepingManager?: boolean }) {
-  const [year, setYear] = useState<number | null>(null);
-  const [month, setMonth] = useState<number | null>(null);
-  const [reservations, setReservations] = useState<CalendarReservation[]>([]);
+export function ReservationsSearch({
+  isHousekeepingManager = false,
+  initialReservations = null,
+  initialYear = null,
+  initialMonth = null,
+}: {
+  isHousekeepingManager?: boolean;
+  /** 由 page.tsx（server component）先在伺服器端把「這個月」的日曆
+   * 資料查好、直接當 props 傳進來——避免使用者從首頁點進這個頁面時，
+   * 要等這個 client component 先掛載、再另外發一次請求去查資料，才
+   * 看得到內容，中間會有明顯的空白等待時間。有帶初始資料的話，第一
+   * 次的資料就直接用這個，不用再自己重新查一次。 */
+  initialReservations?: CalendarReservation[] | null;
+  initialYear?: number | null;
+  initialMonth?: number | null;
+}) {
+  const now = new Date();
+  // 年/月直接用初始值（優先用 server component 傳進來的、沒有的話用
+  // 現在的年月）當 useState 的初始值，不要另外開一個 useEffect 在
+  // 掛載後才用 setState 賦值——那樣會多一次不必要的 render，讓後面
+  // 依賴年/月的資料查詢 effect 也跟著晚一輪才能開始執行。
+  const [year, setYear] = useState<number | null>(initialYear ?? now.getFullYear());
+  const [month, setMonth] = useState<number | null>(initialMonth ?? now.getMonth() + 1);
+  const [reservations, setReservations] = useState<CalendarReservation[]>(initialReservations ?? []);
   // 只看某一間民宿的訂房狀況——null 代表全部民宿都顯示
   const [propertyFilter, setPropertyFilter] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -320,19 +374,28 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
   // 年/月留到 mount 後才設定成「今天」，避免 SSR 跟 client 算出的
   // 「今天」不一樣造成 hydration 不一致的警告/閃爍（跟 quote-form.tsx
   // 入住日期預設值的處理方式一樣）。
-  useEffect(() => {
-    const now = new Date();
-    setYear(now.getFullYear());
-    setMonth(now.getMonth() + 1);
-  }, []);
+  const skippedInitialFetchRef = useRef(false);
 
   useEffect(() => {
     if (year === null || month === null) return;
+
+    // Server component（page.tsx）如果已經先查好「剛好符合目前這個
+    // 年/月」的初始資料，第一次執行這個 effect 的時候不用再重複查
+    // 一次——reservations 這個 state 一開始就是用 initialReservations
+    // 當初始值，這裡只是避免多發一次一模一樣的請求。之後只要使用者
+    // 换月份、年/月改變了，effect 還是會正常重新查詢，不受這個影響。
+    if (!skippedInitialFetchRef.current) {
+      skippedInitialFetchRef.current = true;
+      if (initialReservations !== null && initialYear === year && initialMonth === month) {
+        return;
+      }
+    }
+
     let cancelled = false;
 
     setIsLoading(true);
     setError(null);
-    getCalendarReservationsAction(year, month)
+    fetchCalendarRange(year, month)
       .then((rows) => {
         if (!cancelled) setReservations(rows);
       })
@@ -450,7 +513,7 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
       setShowCreateForm(false);
       // 建立成功後重新查一次目前這個月的日曆，讓新訂單馬上顯示出來
       if (year !== null && month !== null) {
-        const rows = await getCalendarReservationsAction(year, month);
+        const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
       }
     } catch (err) {
@@ -522,7 +585,7 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
       // 付款狀況會影響月曆上的圖示（例如尾款未收的 ⚠ 提示），改完要
       // 重新查一次目前這個月的日曆，不然月曆畫面不會馬上反映最新狀態
       if (year !== null && month !== null) {
-        const rows = await getCalendarReservationsAction(year, month);
+        const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
       }
     } catch (err) {
@@ -543,7 +606,7 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
       setShowDeleteConfirm(false);
       // 刪除成功後重新查一次目前這個月的日曆，讓訂單馬上從列表消失
       if (year !== null && month !== null) {
-        const rows = await getCalendarReservationsAction(year, month);
+        const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
       }
     } catch (err) {
@@ -664,8 +727,12 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
     if (!selectedId) return;
     setCopyError(null);
     try {
-      const text = await buildReservationConfirmationMessageAction(selectedId);
-      await navigator.clipboard.writeText(text);
+      const result = await buildReservationConfirmationMessageAction(selectedId);
+      if (!result.success) {
+        setCopyError(result.message);
+        return;
+      }
+      await navigator.clipboard.writeText(result.text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -735,16 +802,30 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
 
   const daysInMonth = year !== null && month !== null ? getDaysInMonth(year, month) : 0;
 
-  // 月曆格子：前面補上這個月第一天之前的空格，讓日期對齊正確的星期欄位
+  // 月曆格子：前面補上這個月第一天之前的空格，讓日期對齊正確的星期
+  // 欄位——現在這些補位不再是空白，是真的算出上個月/下個月對應的
+  // 日期，一起顯示跨月那一週前後月份的訂房狀況
   const leadingBlanks = year !== null && month !== null ? firstWeekdayOfMonth(year, month) : 0;
   const totalCells = leadingBlanks + daysInMonth;
   const weeksCount = Math.ceil(totalCells / 7) || 0;
-  const calendarCells: (number | null)[] = Array.from({ length: weeksCount * 7 }, (_, i) => {
-    const day = i - leadingBlanks + 1;
-    return day >= 1 && day <= daysInMonth ? day : null;
+  const calendarCells: CalendarCell[] = Array.from({ length: weeksCount * 7 }, (_, i) => {
+    const offset = i - leadingBlanks; // 0-indexed，落在這個月範圍內的話對應 day = offset+1
+    if (year === null || month === null) return { year: 0, month: 1, day: 1, isCurrentMonth: false };
+    if (offset < 0) {
+      // 補在最前面的、屬於上個月的日子
+      const prev = shiftMonth(year, month, -1);
+      const prevDays = getDaysInMonth(prev.year, prev.month);
+      return { year: prev.year, month: prev.month, day: prevDays + offset + 1, isCurrentMonth: false };
+    }
+    if (offset >= daysInMonth) {
+      // 補在最後面的、屬於下個月的日子
+      const next = shiftMonth(year, month, 1);
+      return { year: next.year, month: next.month, day: offset - daysInMonth + 1, isCurrentMonth: false };
+    }
+    return { year, month, day: offset + 1, isCurrentMonth: true };
   });
   // 切成一週一列（7 個一組），每一列各自算色塊要畫在哪幾欄
-  const weeks: (number | null)[][] = Array.from({ length: weeksCount }, (_, w) => calendarCells.slice(w * 7, w * 7 + 7));
+  const weeks: CalendarCell[][] = Array.from({ length: weeksCount }, (_, w) => calendarCells.slice(w * 7, w * 7 + 7));
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
@@ -1281,13 +1362,10 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
               {weeks.map((week, weekIndex) => (
                 <div key={weekIndex}>
                   <div className="grid grid-cols-7 gap-1">
-                    {week.map((day, i) => {
+                    {week.map((cell, i) => {
                       const now = new Date();
                       const isToday =
-                        day !== null &&
-                        year === now.getFullYear() &&
-                        month === now.getMonth() + 1 &&
-                        day === now.getDate();
+                        cell.year === now.getFullYear() && cell.month === now.getMonth() + 1 && cell.day === now.getDate();
                       return (
                         <div key={i} className="flex justify-center">
                           <span
@@ -1295,10 +1373,10 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                             style={
                               isToday
                                 ? { backgroundColor: colors.pine, color: "#FFFFFF" }
-                                : { color: day ? colors.ink : "transparent" }
+                                : { color: cell.isCurrentMonth ? colors.ink : colors.muted, opacity: cell.isCurrentMonth ? 1 : 0.5 }
                             }
                           >
-                            {day ?? "·"}
+                            {cell.day}
                           </span>
                         </div>
                       );
@@ -1307,7 +1385,7 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                   <div className="mt-1 flex flex-col gap-[3px]">
                     {(propertyFilter ? PROPERTIES.filter((p) => p.code === propertyFilter) : PROPERTIES).map((property) => {
                       const propertyReservations = reservations.filter((r) => r.propertyCode === property.code);
-                      const segments = computeWeekSegments(week, year, month, propertyReservations);
+                      const segments = computeWeekSegments(week, propertyReservations);
                       return (
                         <div
                           key={property.code}
@@ -1953,10 +2031,21 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                           )}
 
                           {/* 隱藏的訂房確認單卡片，只用來截圖產生分享用的圖片，
-                              畫面上不會顯示（fixed + 移到螢幕外），跟
-                              quote-form.tsx 的報價收據轉圖片用同一套
+                              畫面上不會顯示。⚠️ 這裡刻意不用
+                              position: fixed——iOS Safari 對於「螢幕外的
+                              fixed 元素」的版面計算/渲染有很多已知的
+                              相容性問題（WebKit bug tracker 上有大量
+                              相關回報），實際發生過的症狀就是截出來的
+                              圖片最上方的標題不見了。改用
+                              position: absolute 放在一個高度是 0、
+                              overflow:hidden 的外層容器裡——元素還是
+                              留在正常的版面配置流程中（量測尺寸才會
+                              準確），視覺上完全不影響頁面，同時避開
+                              fixed 定位在 iOS 上的已知問題。跟
+                              quote-form.tsx/quotes-search.tsx 用同一套
                               html-to-image 技術，維持風格一致 */}
-                          <div style={{ position: "fixed", top: 0, left: "-9999px" }}>
+                          <div style={{ height: 0, overflow: "hidden" }}>
+                          <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
                             <div
                               ref={confirmationCardRef}
                               className={body.className}
@@ -2019,19 +2108,17 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                                   ━━━━━━━━━━━━━━
                                 </p>
                                 <p className="font-bold">【重要提醒】</p>
-                                <p className="mt-1">1. 入住前 7 天匯尾款前, 將依最終確認人數，按照 [平旺日/假日] 之計費標準重新核算。</p>
-                                <p>2. 若結算人數低於基本人數將視房型開放對應間數；達全額人數則開放全棟房數。</p>
-                                <p>3. 入住一個月內，恕不接受日期變更或取消。</p>
-                                <p>4. 在入住前一週會發送【入住提醒】；當天會發送【入住須知】及【設備使用說明】。</p>
-                                <p>5. 室內全面禁菸；22:00 後請降低音量維護鄰里安寧。</p>
+                                <p className="mt-1">1. 退改政策：如需延期或取消，需於入住日前 30 天通知，以保障雙方權益。</p>
+                                <p>2. 人數變更：在入住前 1 周根據最終入住人數結算尾款（未達基本人數仍以低消計費），我們將為您們配置合適的備品與床位。</p>
+                                <p>3. 在入住前一週收到尾款後會發送【入住提醒】；入住當天會發送【入住須知】及【設備使用說明】。</p>
                                 <p className="mt-2" style={{ color: colors.muted }}>
                                   ━━━━━━━━━━━━━━
                                 </p>
                                 {detail.propertyAddress && <p className="mt-2">📍 民宿地址：{detail.propertyAddress}</p>}
                                 {detail.parkingInfo && <p>🅿️ 停車資訊：{detail.parkingInfo}</p>}
-                                {detail.mapUrl && <p>🗺️ 導航連結：{detail.mapUrl}</p>}
                               </div>
                             </div>
+                          </div>
                           </div>
                         </>
                       )}

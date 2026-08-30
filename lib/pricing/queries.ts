@@ -393,6 +393,26 @@ export interface QuoteSummary {
  *   裡面用 JS 過濾——現階段三間民宿的量不大，這樣做最簡單，量大到
  *   需要伺服器端搜尋分頁時再改寫。
  */
+/**
+ * 給報價記錄查詢頁面的月曆用——查這個月哪些日期已經有報價單（不分
+ * 狀態，草稿/已送出/已確認都算，讓職員一眼就看得出哪幾天已經有人
+ * 問過），畫面上會把這些日期的格子填色。只查日期欄位，不查整筆
+ * 報價內容，比 listRecentQuotes 精簡很多。
+ */
+export async function getQuoteCheckInDatesInRange(startDate: string, endDateExclusive: string): Promise<string[]> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("quotes")
+    .select("check_in")
+    .gte("check_in", startDate)
+    .lt("check_in", endDateExclusive);
+
+  if (error) {
+    throw new Error(`查詢報價日期失敗：${error.message}`);
+  }
+  return Array.from(new Set(((data ?? []) as any[]).map((row) => row.check_in as string)));
+}
+
 export async function listRecentQuotes(params?: { search?: string; checkInDate?: string }): Promise<QuoteSummary[]> {
   const supabase = createServiceRoleClient();
 
@@ -461,12 +481,13 @@ export async function getQuoteSnapshot(quoteId: string): Promise<{
   status: string;
   propertyId: string;
   guestId: string;
+  createdAt: string;
 } | null> {
   const supabase = createServiceRoleClient();
 
   const { data, error } = await supabase
     .from("quotes")
-    .select("quote_snapshot, request_snapshot, status, property_id, guest_id")
+    .select("quote_snapshot, request_snapshot, status, property_id, guest_id, created_at")
     .eq("id", quoteId)
     .maybeSingle();
 
@@ -483,6 +504,7 @@ export async function getQuoteSnapshot(quoteId: string): Promise<{
     status: row.status as string,
     propertyId: row.property_id as string,
     guestId: row.guest_id as string,
+    createdAt: row.created_at as string,
   };
 }
 

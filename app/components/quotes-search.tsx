@@ -19,7 +19,7 @@
  * 共用元件。
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
@@ -27,6 +27,7 @@ import {
   clearOldQuotesAction,
   confirmReservationFromQuoteAction,
   getExtraBedRoomOptionsAction,
+  getQuoteCheckInDatesInRangeAction,
   getReservationForQuoteAction,
   getSavedQuoteAction,
   searchQuotesAction,
@@ -87,6 +88,14 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "已取消",
 };
 
+/** 確認訂房時的付款狀況選項——預設「已收訂金」，實務上職員按這個
+ * 按鈕的當下，客人通常都已經付了訂金（不然不會走到這一步確認）*/
+const CONFIRM_PAYMENT_STATUS_LABEL: Record<string, string> = {
+  deposit_paid: "已收訂金",
+  balance_paid: "已收全額（含尾款）",
+  pending_deposit: "尚未收款",
+};
+
 const BOOKING_SOURCE_OPTIONS: { value: BookingSource; label: string }[] = [
   { value: "line_official", label: "LINE官方" },
   { value: "airbnb", label: "Airbnb" },
@@ -133,6 +142,8 @@ export function QuotesSearch() {
   const now = new Date();
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
+  /** 這個月哪些日期已經有報價單，月曆格子要填色標示 */
+  const [quoteDates, setQuoteDates] = useState<Set<string>>(new Set());
   const [checkInDate, setCheckInDate] = useState("");
   const [results, setResults] = useState<QuoteSummary[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
@@ -140,6 +151,7 @@ export function QuotesSearch() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<string | null>(null);
+  const [selectedQuoteCreatedAt, setSelectedQuoteCreatedAt] = useState<string | null>(null);
   const [selectedQuote, setSelectedQuote] = useState<PackageQuote | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -154,8 +166,9 @@ export function QuotesSearch() {
 
   // 這些都是「確認訂房」這個階段才收集的資料，報價階段沒有問過
   const [confirmGuestName, setConfirmGuestName] = useState("");
-  const [confirmGuestPhone, setConfirmGuestPhone] = useState("");
   const [confirmBookingSource, setConfirmBookingSource] = useState<BookingSource>("line_official");
+  const [confirmPaymentStatus, setConfirmPaymentStatus] = useState("deposit_paid");
+  const [confirmDepositAmount, setConfirmDepositAmount] = useState("");
   const [confirmInvoiceTitle, setConfirmInvoiceTitle] = useState("");
   const [confirmInvoiceTaxId, setConfirmInvoiceTaxId] = useState("");
   const [extraBedRoomOptions, setExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
@@ -180,6 +193,27 @@ export function QuotesSearch() {
   const [clearResultMessage, setClearResultMessage] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
 
+  // 這個月哪些日期有報價單，換月份時重新查一次，月曆格子要填色標示
+  useEffect(() => {
+    let cancelled = false;
+    const monthStart = `${calendarYear}-${String(calendarMonth).padStart(2, "0")}-01`;
+    const nextMonthDate = new Date(calendarYear, calendarMonth, 1);
+    const nextMonthStart = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}-01`;
+
+    getQuoteCheckInDatesInRangeAction(monthStart, nextMonthStart)
+      .then((dates) => {
+        if (!cancelled) setQuoteDates(new Set(dates));
+      })
+      .catch(() => {
+        // 填色只是輔助顯示，查詢失敗不影響月曆其他功能，安靜失敗就好，
+        // 不用額外跳錯誤訊息干擾使用者
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [calendarYear, calendarMonth]);
+
   async function handleClearOldQuotes() {
     setIsClearing(true);
     setClearError(null);
@@ -187,7 +221,7 @@ export function QuotesSearch() {
 
     try {
       const { deletedCount } = await clearOldQuotesAction();
-      setClearResultMessage(`已清除 ${deletedCount} 筆今天以前的報價記錄`);
+      setClearResultMessage(`已清除 ${deletedCount} 筆入住日期已過的報價記錄`);
       setShowClearConfirm(false);
       // 如果目前畫面上有查詢結果，順便重新查一次，避免列表裡還顯示
       // 剛剛已經被刪掉的記錄
@@ -197,6 +231,13 @@ export function QuotesSearch() {
         });
         setResults(rows);
       }
+      // 清除掉的報價單，月曆填色也要跟著更新，不然會顯示已經不存在
+      // 的報價單日期
+      const monthStart = `${calendarYear}-${String(calendarMonth).padStart(2, "0")}-01`;
+      const nextMonthDate = new Date(calendarYear, calendarMonth, 1);
+      const nextMonthStart = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}-01`;
+      const dates = await getQuoteCheckInDatesInRangeAction(monthStart, nextMonthStart);
+      setQuoteDates(new Set(dates));
     } catch (err) {
       setClearError(err instanceof Error ? err.message : "清除失敗，請稍後再試");
     } finally {
@@ -253,12 +294,12 @@ export function QuotesSearch() {
     setSelectedId(row.id);
     setSelectedStatus(row.status);
     setSelectedQuote(null);
+    setSelectedQuoteCreatedAt(null);
     setDetailError(null);
     setConfirmedReservationNo(null);
     setCopied(false);
     setShowFullReceipt(false);
     setConfirmGuestName("");
-    setConfirmGuestPhone("");
     setConfirmBookingSource("line_official");
     setConfirmInvoiceTitle("");
     setConfirmInvoiceTaxId("");
@@ -274,6 +315,9 @@ export function QuotesSearch() {
       }
       setSelectedQuote(saved.quote);
       setSelectedStatus(saved.status);
+      setSelectedQuoteCreatedAt(saved.createdAt);
+      setConfirmPaymentStatus("deposit_paid");
+      setConfirmDepositAmount(String(saved.quote.deposit));
 
       if (saved.status === "accepted") {
         // 已經確認過訂房了，查出實際的訂房編號＋完整訂單詳情顯示給
@@ -312,6 +356,11 @@ export function QuotesSearch() {
       setDetailError("請先填寫客人姓名再確認訂房");
       return;
     }
+    const depositAmountNum = Number(confirmDepositAmount);
+    if (confirmPaymentStatus !== "pending_deposit" && (!confirmDepositAmount.trim() || Number.isNaN(depositAmountNum))) {
+      setDetailError("請填寫實際收到的訂金金額");
+      return;
+    }
     const extraBedTempQty = selectedQuote.request.extraBedTempQty ?? 0;
     if (extraBedTempQty > 0 && selectedExtraBedRoomIds.length === 0) {
       setDetailError("這張報價有加臨時床，請先勾選要放在哪個房號");
@@ -328,8 +377,9 @@ export function QuotesSearch() {
 
       const result = await confirmReservationFromQuoteAction(selectedId, {
         guestName: confirmGuestName.trim(),
-        guestPhone: confirmGuestPhone.trim() || undefined,
         bookingSource: confirmBookingSource,
+        paymentStatus: confirmPaymentStatus,
+        depositAmount: confirmPaymentStatus === "pending_deposit" ? 0 : depositAmountNum,
         invoiceTitle: selectedQuote.request.invoice?.required ? confirmInvoiceTitle.trim() : undefined,
         invoiceTaxId: selectedQuote.request.invoice?.required ? confirmInvoiceTaxId.trim() : undefined,
         extraBedTempRoomCodes: extraBedTempRoomCodes.length > 0 ? extraBedTempRoomCodes : undefined,
@@ -419,6 +469,7 @@ export function QuotesSearch() {
         return;
       }
       setSelectedQuote(newQuote);
+      setConfirmDepositAmount(String(newQuote.deposit));
       setIsEditingQuote(false);
       setEditRequest(null);
     } catch (err) {
@@ -448,8 +499,12 @@ export function QuotesSearch() {
   async function handleCopyConfirmation() {
     if (!confirmedReservationId) return;
     try {
-      const text = await buildReservationConfirmationMessageAction(confirmedReservationId);
-      await navigator.clipboard.writeText(text);
+      const result = await buildReservationConfirmationMessageAction(confirmedReservationId);
+      if (!result.success) {
+        setDetailError(result.message);
+        return;
+      }
+      await navigator.clipboard.writeText(result.text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -468,6 +523,19 @@ export function QuotesSearch() {
     );
     return `${nights + 1}天${nights}夜`;
   }
+
+  /** 報價有效期限——套用一般 hotel 業界慣例，報價日期起算 14 天
+   * （兩週）。isoTimestamp 是資料庫 created_at 那種帶時間的完整
+   * 時間戳記，這裡只取日期部分往後推算。用本地時區的年/月/日組
+   * 字串，不要用 toISOString()（那是 UTC，台灣時間換算回 UTC
+   * 可能往前跨一天，算出來的日期會早一天，跟畫面上其他地方一貫的
+   * 本地時區日期處理方式不一致）。 */
+  function addDaysToIsoDate(isoTimestamp: string, days: number): string {
+    const d = new Date(`${isoTimestamp.slice(0, 10)}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+  const QUOTE_VALIDITY_DAYS = 14;
 
   async function handleShareConfirmationImage() {
     if (!confirmationCardRef.current || !confirmedDetail) return;
@@ -540,7 +608,7 @@ export function QuotesSearch() {
             ) : (
               <div className="border-l-2 pl-3" style={{ borderColor: colors.alert }}>
                 <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
-                  確定要刪除今天以前的所有報價記錄嗎？不管有沒有確認訂房都會刪除（已確認訂房的正式記錄本身不受影響，只是報價單本身查不到了），此動作無法復原。
+                  確定要刪除入住日期已經過去的所有報價記錄嗎？（不是看報價單建立日期，是看入住日期）不管有沒有確認訂房都會刪除（已確認訂房的正式記錄本身不受影響，只是報價單本身查不到了），此動作無法復原。
                 </p>
                 <div className="mt-2 flex gap-2">
                   <button
@@ -602,6 +670,7 @@ export function QuotesSearch() {
           {Array.from({ length: daysInCalendarMonth(calendarYear, calendarMonth) }, (_, i) => i + 1).map((day) => {
             const dateStr = formatYMD(calendarYear, calendarMonth, day);
             const isSelected = checkInDate === dateStr;
+            const hasQuote = quoteDates.has(dateStr);
             return (
               <button
                 key={day}
@@ -612,7 +681,9 @@ export function QuotesSearch() {
                 style={
                   isSelected
                     ? { backgroundColor: colors.pine, borderColor: colors.pine, color: colors.pineText }
-                    : { borderColor: colors.line, color: colors.ink, backgroundColor: "transparent" }
+                    : hasQuote
+                      ? { backgroundColor: colors.pineSoft, borderColor: colors.pineSoft, color: colors.ink }
+                      : { borderColor: colors.line, color: colors.ink, backgroundColor: "transparent" }
                 }
               >
                 {day}
@@ -1032,40 +1103,28 @@ export function QuotesSearch() {
                   )
                 ) : (
                   <>
-                    {/* 確認訂房前才收集的資料：姓名/電話/訂房來源/發票/
+                    {/* 確認訂房前才收集的資料：姓名/訂房來源/付款狀況/發票/
                         加臨時床房號，直接接在摘要卡片下面，不用先滑過
-                        一整份完整報價內容才看得到 */}
+                        一整份完整報價內容才看得到。電話欄位拿掉了——
+                        實務上都是用 LINE 官方帳號聯絡客人，不特別留
+                        電話號碼。 */}
                     <div className="mt-5 flex flex-col gap-4">
                       <p className="text-xs font-bold" style={{ color: colors.blue }}>
                         客人確認訂房後填寫
                       </p>
 
-                      <div className="grid grid-cols-2 gap-4">
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                            客人姓名
-                          </span>
-                          <input
-                            type="text"
-                            value={confirmGuestName}
-                            onChange={(e) => setConfirmGuestName(e.target.value)}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                            客人電話（選填）
-                          </span>
-                          <input
-                            type="tel"
-                            value={confirmGuestPhone}
-                            onChange={(e) => setConfirmGuestPhone(e.target.value)}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                      </div>
+                      <label className="flex flex-col gap-1">
+                        <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                          客人姓名
+                        </span>
+                        <input
+                          type="text"
+                          value={confirmGuestName}
+                          onChange={(e) => setConfirmGuestName(e.target.value)}
+                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        />
+                      </label>
 
                       <label className="flex flex-col gap-1">
                         <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
@@ -1084,6 +1143,41 @@ export function QuotesSearch() {
                           ))}
                         </select>
                       </label>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                            付款狀況
+                          </span>
+                          <select
+                            value={confirmPaymentStatus}
+                            onChange={(e) => setConfirmPaymentStatus(e.target.value)}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          >
+                            {Object.entries(CONFIRM_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {confirmPaymentStatus !== "pending_deposit" && (
+                          <label className="flex flex-col gap-1">
+                            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                              實收訂金金額
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              value={confirmDepositAmount}
+                              onChange={(e) => setConfirmDepositAmount(e.target.value)}
+                              className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                              style={{ borderColor: colors.line, color: colors.ink }}
+                            />
+                          </label>
+                        )}
+                      </div>
 
                       {selectedQuote.request.invoice?.required && (
                         <div className="grid grid-cols-2 gap-4">
@@ -1198,8 +1292,19 @@ export function QuotesSearch() {
                       </p>
                     )}
 
-                    {/* 隱藏的訂房確認單卡片，只用來截圖產生分享用的圖片 */}
-                    <div style={{ position: "fixed", top: 0, left: "-9999px" }}>
+                    {/* 隱藏的訂房確認單卡片，只用來截圖產生分享用的圖片。
+                        ⚠️ 這裡刻意不用 position: fixed——iOS Safari
+                        對於「螢幕外的 fixed 元素」的版面計算/渲染有
+                        很多已知的相容性問題（WebKit 的 bug tracker 上
+                        有大量相關回報），實際發生過的症狀就是截出來的
+                        圖片最上方的標題不見了。改用 position: absolute
+                        放在一個高度是 0、overflow:hidden 的外層容器
+                        裡——這樣元素還是留在正常的版面配置流程中（量
+                        測尺寸才會準確），但視覺上完全不會影響頁面、
+                        使用者也看不到，同時避開 fixed 定位在 iOS 上的
+                        已知問題。 */}
+                    <div style={{ height: 0, overflow: "hidden" }}>
+                      <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
                       <div
                         ref={confirmationCardRef}
                         className={body.className}
@@ -1228,24 +1333,55 @@ export function QuotesSearch() {
                             {confirmedDetail.pets ? ` ${confirmedDetail.pets}寵` : ""}
                           </p>
                           <p>
-                            • 使用房數：
-                            {confirmedDetail.roomAllocation.fourPersonSuiteCount +
-                              confirmedDetail.roomAllocation.fourPersonDowngradeCount +
-                              confirmedDetail.roomAllocation.doubleSuiteCount +
-                              confirmedDetail.roomAllocation.doublePlainCount}{" "}
-                            間房
+                            • 房型配置：
                           </p>
+                          {roomAllocationSummaryItems(confirmedDetail.roomAllocation).map((item, i) => (
+                            <p key={i} className="pl-3">
+                              └ {item.text}
+                            </p>
+                          ))}
                           <p className="mt-2" style={{ color: colors.muted }}>
                             ━━━━━━━━━━━━━━
                           </p>
-                          <p className="mt-2 font-bold">💰 帳務明細</p>
-                          <p className="mt-1">• 住宿總額：${confirmedDetail.finalTotal.toLocaleString()}元</p>
+                          <p className="mt-2 font-bold">💰 費用明細</p>
+                          {selectedQuote ? (
+                            <>
+                              {accommodationDayGroups(selectedQuote).map((group, gi) => (
+                                <div key={`day-${gi}`}>
+                                  {group.dateLabel && (
+                                    <p className="mt-1" style={{ color: colors.ink }}>
+                                      {group.dateLabel}
+                                    </p>
+                                  )}
+                                  {group.items.map((item, i) => (
+                                    <p key={i} className={group.dateLabel ? "pl-3" : undefined}>
+                                      • {item.roomLabel}：${item.unitPrice.toLocaleString()}×{item.qty} = $
+                                      {item.lineTotal.toLocaleString()}
+                                    </p>
+                                  ))}
+                                </div>
+                              ))}
+                              {addOnFeeBreakdown(selectedQuote).map((item, i) => (
+                                <p key={`fee-${i}`}>
+                                  • {item.label}：${item.amount.toLocaleString()}
+                                </p>
+                              ))}
+                              {selectedQuote.discountAmount > 0 && (
+                                <p>• 優惠折扣：－${selectedQuote.discountAmount.toLocaleString()}</p>
+                              )}
+                              {selectedQuote.invoiceTaxAmount > 0 && (
+                                <p>• 發票稅金(8%)：${selectedQuote.invoiceTaxAmount.toLocaleString()}</p>
+                              )}
+                            </>
+                          ) : (
+                            <p className="mt-1">• 住宿總額：${confirmedDetail.finalTotal.toLocaleString()}元</p>
+                          )}
                           {(() => {
                             const depositPayment = confirmedDetail.payments.find((p) => p.paymentKind === "deposit");
                             const balancePayment = confirmedDetail.payments.find((p) => p.paymentKind === "balance");
                             return (
                               <>
-                                <p>
+                                <p className="mt-1">
                                   • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
                                   {depositPayment?.paidAt
                                     ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})`
@@ -1264,18 +1400,16 @@ export function QuotesSearch() {
                             ━━━━━━━━━━━━━━
                           </p>
                           <p className="font-bold">【重要提醒】</p>
-                          <p className="mt-1">1. 入住前 7 天匯尾款前, 將依最終確認人數，按照 [平旺日/假日] 之計費標準重新核算。</p>
-                          <p>2. 若結算人數低於基本人數將視房型開放對應間數；達全額人數則開放全棟房數。</p>
-                          <p>3. 入住一個月內，恕不接受日期變更或取消。</p>
-                          <p>4. 在入住前一週會發送【入住提醒】；當天會發送【入住須知】及【設備使用說明】。</p>
-                          <p>5. 室內全面禁菸；22:00 後請降低音量維護鄰里安寧。</p>
+                          <p className="mt-1">1. 退改政策：如需延期或取消，需於入住日前 30 天通知，以保障雙方權益。</p>
+                          <p>2. 人數變更：在入住前 1 周根據最終入住人數結算尾款（未達基本人數仍以低消計費），我們將為您們配置合適的備品與床位。</p>
+                          <p>3. 在入住前一週收到尾款後會發送【入住提醒】；入住當天會發送【入住須知】及【設備使用說明】。</p>
                           <p className="mt-2" style={{ color: colors.muted }}>
                             ━━━━━━━━━━━━━━
                           </p>
                           {confirmedDetail.propertyAddress && <p className="mt-2">📍 民宿地址：{confirmedDetail.propertyAddress}</p>}
                           {confirmedDetail.parkingInfo && <p>🅿️ 停車資訊：{confirmedDetail.parkingInfo}</p>}
-                          {confirmedDetail.mapUrl && <p>🗺️ 導航連結：{confirmedDetail.mapUrl}</p>}
                         </div>
+                      </div>
                       </div>
                     </div>
                   </div>
@@ -1295,13 +1429,33 @@ export function QuotesSearch() {
                 {showFullReceipt && (
                   <>
                     <div className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+                      <div className="relative px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
                         <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                           {`${selectedQuote.messageContext.propertyName}私人會所`}
                         </p>
-                        <p className="mt-1 tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
-                          {isConfirmed ? "訂房確認單" : "包棟報價單"}
-                        </p>
+                        {/* 「包棟報價單/訂房確認單」外面包一層 relative 容器
+                            （block 元素，佔滿整個標題區塊寬度）——報價日期/
+                            有效期限用 absolute + top:0/right:0 貼齊這個
+                            容器的右上角，「上緣」精準對齊這行文字本身
+                            （不管民宿名稱多長、標題整體變多高都不受
+                            影響），「右邊」貼齊標題區塊本身的右邊界，
+                            不會超出卡片範圍。這行文字繼續吃外層
+                            text-center，視覺上還是維持在整個標題區塊
+                            置中，不受旁邊這個絕對定位元素影響。 */}
+                        <div className="relative mt-1">
+                          <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
+                            {isConfirmed ? "訂房確認單" : "包棟報價單"}
+                          </p>
+                          {!isConfirmed && selectedQuoteCreatedAt && (
+                            <div
+                              className="absolute right-0 top-0 text-right text-[10px] leading-relaxed"
+                              style={{ color: colors.pineSoft }}
+                            >
+                              <p>報價日期：{formatSlashDate(selectedQuoteCreatedAt.slice(0, 10))}</p>
+                              <p>有效期限：{formatSlashDate(addDaysToIsoDate(selectedQuoteCreatedAt, QUOTE_VALIDITY_DAYS))}</p>
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       <div className="px-6 py-5" style={{ color: colors.ink }}>
