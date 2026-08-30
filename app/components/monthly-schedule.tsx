@@ -62,9 +62,9 @@ const PROPERTY_OPTIONS = [
 ];
 /** 月曆格子太窄放不下全名，用簡稱——民宿名稱後面還要接烤肉/指派狀態圖示 */
 const PROPERTY_SHORT_LABELS: Record<string, string> = {
-  zhici: "清綠",
+  zhici: "只此",
   moyin: "陌隱",
-  shuijing: "璞堤",
+  shuijing: "水景",
 };
 
 const WEEKDAY_HEADERS = ["日", "一", "二", "三", "四", "五", "六"];
@@ -694,6 +694,8 @@ export function MonthlySchedule({
                 const dayUnassigned = unassignedForDay(day);
                 const propertyStatuses = propertyStatusesForDay(day);
                 const isSelected = selectedDate === dateStr;
+                const now = new Date();
+                const isToday = year === now.getFullYear() && month === now.getMonth() + 1 && day === now.getDate();
                 return (
                   <button
                     key={i}
@@ -711,7 +713,12 @@ export function MonthlySchedule({
                       color: colors.ink,
                     }}
                   >
-                    <span>{day}</span>
+                    <span
+                      className="flex h-4 w-4 items-center justify-center rounded-full"
+                      style={isToday ? { backgroundColor: colors.pine, color: "#FFFFFF" } : undefined}
+                    >
+                      {day}
+                    </span>
                     {propertyStatuses.map((ps) => (
                       <div key={ps.propertyId} className="flex items-center gap-0.5 whitespace-nowrap">
                         <span>{ps.shortLabel}</span>

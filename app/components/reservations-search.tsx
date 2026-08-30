@@ -1281,11 +1281,28 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
               {weeks.map((week, weekIndex) => (
                 <div key={weekIndex}>
                   <div className="grid grid-cols-7 gap-1">
-                    {week.map((day, i) => (
-                      <div key={i} className="text-center text-[10px]" style={{ color: day ? colors.ink : "transparent" }}>
-                        {day ?? "·"}
-                      </div>
-                    ))}
+                    {week.map((day, i) => {
+                      const now = new Date();
+                      const isToday =
+                        day !== null &&
+                        year === now.getFullYear() &&
+                        month === now.getMonth() + 1 &&
+                        day === now.getDate();
+                      return (
+                        <div key={i} className="flex justify-center">
+                          <span
+                            className="flex h-4 w-4 items-center justify-center rounded-full text-[10px]"
+                            style={
+                              isToday
+                                ? { backgroundColor: colors.pine, color: "#FFFFFF" }
+                                : { color: day ? colors.ink : "transparent" }
+                            }
+                          >
+                            {day ?? "·"}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                   <div className="mt-1 flex flex-col gap-[3px]">
                     {(propertyFilter ? PROPERTIES.filter((p) => p.code === propertyFilter) : PROPERTIES).map((property) => {
