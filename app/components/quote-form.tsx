@@ -832,11 +832,6 @@ export function QuoteForm() {
                 <p className="mt-1 tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
                   包棟報價單
                 </p>
-                {savedQuoteNo && (
-                  <p className="mt-1 text-[11px] tracking-wide" style={{ color: colors.pineSoft }}>
-                    報價單編號：{savedQuoteNo}
-                  </p>
-                )}
               </div>
 
               {/* 內容區：明確給 padding，轉圖片時這個縮排會一起被截進去 */}

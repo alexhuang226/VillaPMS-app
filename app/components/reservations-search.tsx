@@ -20,7 +20,7 @@
  * 各自是獨立的小 grid，不會再有跨整月排版出錯的問題。）
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
@@ -283,6 +283,10 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
   const [copyError, setCopyError] = useState<string | null>(null);
   const [isUpdatingPaymentStatus, setIsUpdatingPaymentStatus] = useState(false);
   const [paymentStatusError, setPaymentStatusError] = useState<string | null>(null);
+  const [imageWorking, setImageWorking] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageNote, setImageNote] = useState<string | null>(null);
+  const confirmationCardRef = useRef<HTMLDivElement>(null);
 
   // 編輯模式：因應客人確認訂房後又變更人數或其他需求
   const [isEditing, setIsEditing] = useState(false);
@@ -515,6 +519,12 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
       await updateReservationPaymentStatusAction(selectedId, newStatus);
       const result = await getReservationDetailAction(selectedId);
       if (result) setDetail(result);
+      // 付款狀況會影響月曆上的圖示（例如尾款未收的 ⚠ 提示），改完要
+      // 重新查一次目前這個月的日曆，不然月曆畫面不會馬上反映最新狀態
+      if (year !== null && month !== null) {
+        const rows = await getCalendarReservationsAction(year, month);
+        setReservations(rows);
+      }
     } catch (err) {
       setPaymentStatusError(err instanceof Error ? err.message : "更新付款狀況失敗，請稍後再試");
     } finally {
@@ -663,6 +673,66 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
     }
   }
 
+  /** 'YYYY-MM-DD' → '2026/08/29'，訂房確認單圖片用，跟文字版
+   * （reservation-message.ts 的 formatDateWithWeekday）故意不共用
+   * ——那邊是私有函式沒有 export，這裡的格式也略有不同（不帶星期，
+   * 有 (15:00後)/(11:00前) 這種入住/退房時間提示） */
+  function formatSlashDate(dateStr: string): string {
+    const [y, m, d] = dateStr.split("-");
+    return `${y}/${m}/${d}`;
+  }
+
+  function nightsLabel(checkIn: string, checkOut: string): string {
+    const nights = Math.round(
+      (new Date(`${checkOut}T00:00:00`).getTime() - new Date(`${checkIn}T00:00:00`).getTime()) / (1000 * 60 * 60 * 24)
+    );
+    return `${nights + 1}天${nights}夜`;
+  }
+
+  async function handleShareConfirmationImage() {
+    if (!confirmationCardRef.current || !detail) return;
+    setImageWorking(true);
+    setImageError(null);
+
+    try {
+      if (typeof document !== "undefined" && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+      const node = confirmationCardRef.current;
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(node, {
+        pixelRatio: 2,
+        backgroundColor: colors.canvas,
+        width: node.scrollWidth,
+        height: node.scrollHeight,
+      });
+      if (!blob) throw new Error("圖片產生失敗，請再試一次");
+
+      const file = new File([blob], `${detail.propertyName}-訂房確認單.png`, { type: "image/png" });
+      const canShareFiles =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title: `${detail.propertyName} 訂房確認單` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        setImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
+    } finally {
+      setImageWorking(false);
+    }
+  }
+
   const daysInMonth = year !== null && month !== null ? getDaysInMonth(year, month) : 0;
 
   // 月曆格子：前面補上這個月第一天之前的空格，讓日期對齊正確的星期欄位
@@ -690,6 +760,28 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
             訂單管理
           </h1>
         </header>
+
+        {!isHousekeepingManager && (
+          <div className="mb-4 flex gap-2">
+            <Link
+              href="/quote"
+              className="flex-1 border py-2 text-center text-xs tracking-wide"
+              style={{ borderColor: colors.pine, color: colors.pine }}
+            >
+              📝 製作報價單
+            </Link>
+            {!showCreateForm && (
+              <button
+                type="button"
+                onClick={openCreateForm}
+                className="flex-1 border py-2 text-xs tracking-wide"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                ＋ 新增訂單
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="mb-4 flex flex-wrap justify-center gap-2">
           <button
@@ -723,17 +815,6 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
             );
           })}
         </div>
-
-        {!showCreateForm && !isHousekeepingManager && (
-          <button
-            type="button"
-            onClick={openCreateForm}
-            className="mb-4 w-full border py-2 text-xs tracking-wide"
-            style={{ borderColor: colors.line, color: colors.ink }}
-          >
-            ＋ 新增訂單（Airbnb 等平台訂房，跳過報價流程直接建立）
-          </button>
-        )}
 
         {createdReservationNo && (
           <p className="mb-4 border-l-2 pl-3 text-xs leading-relaxed" style={{ borderColor: colors.pine, color: colors.pine }}>
@@ -1681,6 +1762,60 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                   </div>
                 ) : (
                   <div className="mt-3 flex flex-col gap-1.5 text-xs">
+                    {!isHousekeepingManager && (
+                      <>
+                        <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                          付款狀況
+                        </p>
+                        <select
+                          value={detail.paymentStatus}
+                          onChange={(e) => handleChangePaymentStatus(e.target.value)}
+                          disabled={isUpdatingPaymentStatus}
+                          className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                        {detail.status === "cancelled" && detail.paymentStatus === "deposit_forfeited" && (
+                          <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.pine }}>
+                            ⚠️
+                            這筆訂單已取消、付款狀況是「沒收訂金」——訂金金額會照樣計入這個月的營收（用實際收到的訂金金額，不是訂單總金額），住房天數不會計入。
+                          </p>
+                        )}
+                        {isUpdatingPaymentStatus && (
+                          <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
+                            更新中…
+                          </p>
+                        )}
+                        {paymentStatusError && (
+                          <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
+                            {paymentStatusError}
+                          </p>
+                        )}
+
+                        {detail.payments.length > 0 && (
+                          <div className="mt-2 flex flex-col gap-1.5 text-xs">
+                            {detail.payments.map((p, i) => (
+                              <div key={i} className="flex items-baseline justify-between">
+                                <span style={{ color: colors.muted }}>
+                                  {PAYMENT_KIND_LABEL[p.paymentKind] ?? p.paymentKind}
+                                  {p.dueDate ? `（到期：${p.dueDate}）` : ""}
+                                </span>
+                                <span className="font-semibold" style={{ color: p.status === "paid" ? colors.pine : colors.alert }}>
+                                  NT$ {p.amount.toLocaleString()}　{PAYMENT_STATUS_LABEL[p.status] ?? p.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    <div className="mt-3 border-t pt-3" style={{ borderColor: colors.line }} />
                     <InfoRow label="訂單編號" value={detail.reservationNo} />
                     <InfoRow label="狀態" value={STATUS_LABEL[detail.status] ?? detail.status} />
                     <InfoRow label="入住日期" value={detail.checkIn} />
@@ -1749,58 +1884,6 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                       </div>
                     )}
 
-                    {!isHousekeepingManager && (
-                      <>
-                        <p className="mt-4 border-t pt-3 text-xs font-bold" style={{ borderColor: colors.line, color: colors.ink }}>
-                          付款狀況
-                        </p>
-                        <select
-                          value={detail.paymentStatus}
-                          onChange={(e) => handleChangePaymentStatus(e.target.value)}
-                          disabled={isUpdatingPaymentStatus}
-                          className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                        {detail.status === "cancelled" && detail.paymentStatus === "deposit_forfeited" && (
-                          <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.pine }}>
-                            ⚠️
-                            這筆訂單已取消、付款狀況是「沒收訂金」——訂金金額會照樣計入這個月的營收（用實際收到的訂金金額，不是訂單總金額），住房天數不會計入。
-                          </p>
-                        )}
-                        {isUpdatingPaymentStatus && (
-                          <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
-                            更新中…
-                          </p>
-                        )}
-                        {paymentStatusError && (
-                          <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
-                            {paymentStatusError}
-                          </p>
-                        )}
-
-                        {detail.payments.length > 0 && (
-                          <div className="mt-2 flex flex-col gap-1.5 text-xs">
-                            {detail.payments.map((p, i) => (
-                              <div key={i} className="flex items-baseline justify-between">
-                                <span style={{ color: colors.muted }}>
-                                  {PAYMENT_KIND_LABEL[p.paymentKind] ?? p.paymentKind}
-                                  {p.dueDate ? `（到期：${p.dueDate}）` : ""}
-                                </span>
-                                <span className="font-semibold" style={{ color: p.status === "paid" ? colors.pine : colors.alert }}>
-                                  NT$ {p.amount.toLocaleString()}　{PAYMENT_STATUS_LABEL[p.status] ?? p.status}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    )}
 
                     {/* 訂金已收款才能產生「已收到訂金匯款」的確認內容，避免
                         在還沒收到錢的狀況下傳出跟事實不符的訊息給客人——
@@ -1831,6 +1914,108 @@ export function ReservationsSearch({ isHousekeepingManager = false }: { isHousek
                               {copyError}
                             </p>
                           )}
+
+                          <button
+                            type="button"
+                            onClick={handleShareConfirmationImage}
+                            disabled={imageWorking}
+                            className="mt-2 w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
+                            style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
+                          >
+                            {imageWorking ? "圖片產生中…" : "🖼️ 轉成圖片"}
+                          </button>
+                          {imageError && (
+                            <p className="mt-2 text-[11px]" style={{ color: colors.alert }}>
+                              {imageError}
+                            </p>
+                          )}
+                          {imageNote && (
+                            <p className="mt-2 text-[11px]" style={{ color: colors.pine }}>
+                              {imageNote}
+                            </p>
+                          )}
+
+                          {/* 隱藏的訂房確認單卡片，只用來截圖產生分享用的圖片，
+                              畫面上不會顯示（fixed + 移到螢幕外），跟
+                              quote-form.tsx 的報價收據轉圖片用同一套
+                              html-to-image 技術，維持風格一致 */}
+                          <div style={{ position: "fixed", top: 0, left: "-9999px" }}>
+                            <div
+                              ref={confirmationCardRef}
+                              className={body.className}
+                              style={{ width: "375px", backgroundColor: colors.canvas }}
+                            >
+                              <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+                                <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
+                                  🏨 【{detail.propertyName}訂房確認單】
+                                </p>
+                              </div>
+                              <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
+                                <p style={{ color: colors.pine }}>
+                                  ✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~
+                                </p>
+                                <p className="mt-3" style={{ color: colors.muted }}>
+                                  ━━━━━━━━━━━━━━
+                                </p>
+                                <p className="mt-2 font-bold">📅 預訂資訊</p>
+                                <p className="mt-1">• 入住日期：{formatSlashDate(detail.checkIn)} (15:00後)</p>
+                                <p>• 退房日期：{formatSlashDate(detail.checkOut)} (11:00前)</p>
+                                <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
+                                <p>
+                                  • 入住人數：{detail.adults}大
+                                  {detail.children ? ` ${detail.children}小` : ""}
+                                  {detail.infants ? ` ${detail.infants}幼` : ""}
+                                  {detail.pets ? ` ${detail.pets}寵` : ""}
+                                </p>
+                                <p>
+                                  • 使用房數：
+                                  {detail.roomAllocation.fourPersonSuiteCount +
+                                    detail.roomAllocation.fourPersonDowngradeCount +
+                                    detail.roomAllocation.doubleSuiteCount +
+                                    detail.roomAllocation.doublePlainCount}{" "}
+                                  間房
+                                </p>
+                                <p className="mt-2" style={{ color: colors.muted }}>
+                                  ━━━━━━━━━━━━━━
+                                </p>
+                                <p className="mt-2 font-bold">💰 帳務明細</p>
+                                <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
+                                {(() => {
+                                  const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
+                                  const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
+                                  return (
+                                    <>
+                                      <p>
+                                        • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
+                                        {depositPayment?.paidAt ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})` : ""}
+                                      </p>
+                                      {balancePayment && (
+                                        <>
+                                          <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
+                                          <p>⚠️ 尾款請於入住前一星期匯款。</p>
+                                        </>
+                                      )}
+                                    </>
+                                  );
+                                })()}
+                                <p className="mt-2" style={{ color: colors.muted }}>
+                                  ━━━━━━━━━━━━━━
+                                </p>
+                                <p className="font-bold">【重要提醒】</p>
+                                <p className="mt-1">1. 入住前 7 天匯尾款前, 將依最終確認人數，按照 [平旺日/假日] 之計費標準重新核算。</p>
+                                <p>2. 若結算人數低於基本人數將視房型開放對應間數；達全額人數則開放全棟房數。</p>
+                                <p>3. 入住一個月內，恕不接受日期變更或取消。</p>
+                                <p>4. 在入住前一週會發送【入住提醒】；當天會發送【入住須知】及【設備使用說明】。</p>
+                                <p>5. 室內全面禁菸；22:00 後請降低音量維護鄰里安寧。</p>
+                                <p className="mt-2" style={{ color: colors.muted }}>
+                                  ━━━━━━━━━━━━━━
+                                </p>
+                                {detail.propertyAddress && <p className="mt-2">📍 民宿地址：{detail.propertyAddress}</p>}
+                                {detail.parkingInfo && <p>🅿️ 停車資訊：{detail.parkingInfo}</p>}
+                                {detail.mapUrl && <p>🗺️ 導航連結：{detail.mapUrl}</p>}
+                              </div>
+                            </div>
+                          </div>
                         </>
                       )}
                   </>

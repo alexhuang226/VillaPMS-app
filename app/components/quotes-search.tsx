@@ -19,7 +19,7 @@
  * 共用元件。
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
@@ -27,12 +27,13 @@ import {
   clearOldQuotesAction,
   confirmReservationFromQuoteAction,
   getExtraBedRoomOptionsAction,
-  getReservationNoForQuoteAction,
+  getReservationForQuoteAction,
   getSavedQuoteAction,
   searchQuotesAction,
   updateQuoteSnapshotAction,
 } from "@/app/actions/quote";
 import type { BookingSource } from "@/app/actions/quote";
+import { buildReservationConfirmationMessageAction, getReservationDetailAction } from "@/app/actions/reservation";
 import {
   accommodationDayGroups,
   addOnFeeBreakdown,
@@ -49,7 +50,7 @@ import {
   INFANT_NOTE,
   roomAllocationSummaryItems,
 } from "@/lib/pricing/quote-message";
-import type { ExtraBedRoomOption, QuoteSummary } from "@/lib/pricing/queries";
+import type { ExtraBedRoomOption, QuoteSummary, ReservationDetail } from "@/lib/pricing/queries";
 import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
@@ -162,6 +163,12 @@ export function QuotesSearch() {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmedReservationNo, setConfirmedReservationNo] = useState<string | null>(null);
+  const [confirmedReservationId, setConfirmedReservationId] = useState<string | null>(null);
+  const [confirmedDetail, setConfirmedDetail] = useState<ReservationDetail | null>(null);
+  const [imageWorking, setImageWorking] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageNote, setImageNote] = useState<string | null>(null);
+  const confirmationCardRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
   // 展開查看完整報價內容（複製/轉圖片用）——預設不顯示，避免每次
   // 點一筆報價都要滑過一大串內容才看得到確認訂房的按鈕
@@ -269,10 +276,16 @@ export function QuotesSearch() {
       setSelectedStatus(saved.status);
 
       if (saved.status === "accepted") {
-        // 已經確認過訂房了，查出實際的訂房編號顯示給使用者看，不用
-        // 再走一次確認流程
-        const reservationNo = await getReservationNoForQuoteAction(row.id);
-        setConfirmedReservationNo(reservationNo);
+        // 已經確認過訂房了，查出實際的訂房編號＋完整訂單詳情顯示給
+        // 使用者看，不用再走一次確認流程——訂單詳情是複製訂房確認
+        // 內容/轉圖片要用的
+        const reservation = await getReservationForQuoteAction(row.id);
+        if (reservation) {
+          setConfirmedReservationNo(reservation.reservationNo);
+          setConfirmedReservationId(reservation.id);
+          const detailResult = await getReservationDetailAction(reservation.id);
+          if (detailResult) setConfirmedDetail(detailResult);
+        }
       } else if ((saved.request.extraBedTempQty ?? 0) > 0) {
         // 如果這張報價有加臨時床，先把這間民宿「可以加床」的房號選項
         // 查出來，確認訂房時要指定放在哪個房號
@@ -326,7 +339,12 @@ export function QuotesSearch() {
         return;
       }
       setConfirmedReservationNo(result.reservationNo);
+      setConfirmedReservationId(result.reservationId);
       setSelectedStatus("accepted");
+      // 順便把完整訂單詳情查出來，複製確認內容/轉圖片要用到（訂金
+      // 收款日期、地址等資料在 PackageQuote 裡沒有，要另外查）
+      const detailResult = await getReservationDetailAction(result.reservationId);
+      if (detailResult) setConfirmedDetail(detailResult);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : "確認訂房失敗，請稍後再試");
     } finally {
@@ -422,6 +440,80 @@ export function QuotesSearch() {
     }
   }
 
+  /** 已確認訂房後複製「真正的訂房確認內容」（用實際訂單/收款資料
+   * 產生）——跟上面 handleCopy() 複製的報價文字是不同內容，之前
+   * isConfirmed 時也共用同一個按鈕跟 handleCopy()，複製出來的其實
+   * 還是報價當時的文字，內容跟按鈕文字「複製訂房確認內容」對不上，
+   * 這裡分開成獨立的函式/按鈕。 */
+  async function handleCopyConfirmation() {
+    if (!confirmedReservationId) return;
+    try {
+      const text = await buildReservationConfirmationMessageAction(confirmedReservationId);
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : "複製失敗，請稍後再試");
+    }
+  }
+
+  function formatSlashDate(dateStr: string): string {
+    const [y, m, d] = dateStr.split("-");
+    return `${y}/${m}/${d}`;
+  }
+
+  function nightsLabel(checkIn: string, checkOut: string): string {
+    const nights = Math.round(
+      (new Date(`${checkOut}T00:00:00`).getTime() - new Date(`${checkIn}T00:00:00`).getTime()) / (1000 * 60 * 60 * 24)
+    );
+    return `${nights + 1}天${nights}夜`;
+  }
+
+  async function handleShareConfirmationImage() {
+    if (!confirmationCardRef.current || !confirmedDetail) return;
+    setImageWorking(true);
+    setImageError(null);
+    setImageNote(null);
+
+    try {
+      if (typeof document !== "undefined" && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+      const node = confirmationCardRef.current;
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(node, {
+        pixelRatio: 2,
+        backgroundColor: colors.canvas,
+        width: node.scrollWidth,
+        height: node.scrollHeight,
+      });
+      if (!blob) throw new Error("圖片產生失敗，請再試一次");
+
+      const file = new File([blob], `${confirmedDetail.propertyName}-訂房確認單.png`, { type: "image/png" });
+      const canShareFiles =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title: `${confirmedDetail.propertyName} 訂房確認單` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        setImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
+    } finally {
+      setImageWorking(false);
+    }
+  }
+
   const isConfirmed = selectedStatus === "accepted" || Boolean(confirmedReservationNo);
 
   return (
@@ -438,6 +530,51 @@ export function QuotesSearch() {
             報價記錄查詢
           </h1>
         </header>
+
+        {!selectedId && (
+          <div className="mb-4">
+            {!showClearConfirm ? (
+              <button type="button" onClick={() => setShowClearConfirm(true)} className="text-xs" style={{ color: colors.alert }}>
+                清除報價記錄
+              </button>
+            ) : (
+              <div className="border-l-2 pl-3" style={{ borderColor: colors.alert }}>
+                <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                  確定要刪除今天以前的所有報價記錄嗎？不管有沒有確認訂房都會刪除（已確認訂房的正式記錄本身不受影響，只是報價單本身查不到了），此動作無法復原。
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirm(false)}
+                    className="border px-3 py-1 text-xs"
+                    style={{ borderColor: colors.line, color: colors.ink }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearOldQuotes}
+                    disabled={isClearing}
+                    className="px-3 py-1 text-xs disabled:opacity-50"
+                    style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
+                  >
+                    {isClearing ? "清除中…" : "確定清除"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {clearResultMessage && (
+              <p className="mt-2 text-xs" style={{ color: colors.pine }}>
+                ✓ {clearResultMessage}
+              </p>
+            )}
+            {clearError && (
+              <p className="mt-2 text-xs" style={{ color: colors.alert }}>
+                {clearError}
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="mb-2 flex items-center justify-between">
           <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
@@ -487,51 +624,6 @@ export function QuotesSearch() {
           <p className="mt-2 text-center text-xs" style={{ color: colors.muted }}>
             查詢中…
           </p>
-        )}
-
-        {!selectedId && (
-          <div className="mt-4">
-            {!showClearConfirm ? (
-              <button type="button" onClick={() => setShowClearConfirm(true)} className="text-xs" style={{ color: colors.alert }}>
-                清除報價記錄
-              </button>
-            ) : (
-              <div className="border-l-2 pl-3" style={{ borderColor: colors.alert }}>
-                <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
-                  確定要刪除今天以前的所有報價記錄嗎？不管有沒有確認訂房都會刪除（已確認訂房的正式記錄本身不受影響，只是報價單本身查不到了），此動作無法復原。
-                </p>
-                <div className="mt-2 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowClearConfirm(false)}
-                    className="border px-3 py-1 text-xs"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleClearOldQuotes}
-                    disabled={isClearing}
-                    className="px-3 py-1 text-xs disabled:opacity-50"
-                    style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
-                  >
-                    {isClearing ? "清除中…" : "確定清除"}
-                  </button>
-                </div>
-              </div>
-            )}
-            {clearResultMessage && (
-              <p className="mt-2 text-xs" style={{ color: colors.pine }}>
-                ✓ {clearResultMessage}
-              </p>
-            )}
-            {clearError && (
-              <p className="mt-2 text-xs" style={{ color: colors.alert }}>
-                {clearError}
-              </p>
-            )}
-          </div>
         )}
 
         {searchError && (
@@ -1069,6 +1161,126 @@ export function QuotesSearch() {
                   </>
                 )}
 
+                {/* 已確認訂房才會有這兩個按鈕：複製真正的訂房確認內容、
+                    轉成圖片分享給客人——放在「顯示完整報價內容」上面，
+                    不用先展開那一大串內容才找得到 */}
+                {isConfirmed && confirmedDetail && (
+                  <div className="mt-5 flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyConfirmation}
+                      className="w-full border py-2.5 text-xs tracking-wide transition-colors"
+                      style={
+                        copied
+                          ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                          : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                      }
+                    >
+                      {copied ? "已複製 ✓" : "複製訂房確認內容"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShareConfirmationImage}
+                      disabled={imageWorking}
+                      className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
+                      style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
+                    >
+                      {imageWorking ? "圖片產生中…" : "🖼️ 轉成圖片"}
+                    </button>
+                    {imageError && (
+                      <p className="text-[11px]" style={{ color: colors.alert }}>
+                        {imageError}
+                      </p>
+                    )}
+                    {imageNote && (
+                      <p className="text-[11px]" style={{ color: colors.pine }}>
+                        {imageNote}
+                      </p>
+                    )}
+
+                    {/* 隱藏的訂房確認單卡片，只用來截圖產生分享用的圖片 */}
+                    <div style={{ position: "fixed", top: 0, left: "-9999px" }}>
+                      <div
+                        ref={confirmationCardRef}
+                        className={body.className}
+                        style={{ width: "375px", backgroundColor: colors.canvas }}
+                      >
+                        <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+                          <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
+                            🏨 【{confirmedDetail.propertyName}訂房確認單】
+                          </p>
+                        </div>
+                        <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
+                          <p style={{ color: colors.pine }}>
+                            ✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~
+                          </p>
+                          <p className="mt-3" style={{ color: colors.muted }}>
+                            ━━━━━━━━━━━━━━
+                          </p>
+                          <p className="mt-2 font-bold">📅 預訂資訊</p>
+                          <p className="mt-1">• 入住日期：{formatSlashDate(confirmedDetail.checkIn)} (15:00後)</p>
+                          <p>• 退房日期：{formatSlashDate(confirmedDetail.checkOut)} (11:00前)</p>
+                          <p>• 預訂天數：{nightsLabel(confirmedDetail.checkIn, confirmedDetail.checkOut)}</p>
+                          <p>
+                            • 入住人數：{confirmedDetail.adults}大
+                            {confirmedDetail.children ? ` ${confirmedDetail.children}小` : ""}
+                            {confirmedDetail.infants ? ` ${confirmedDetail.infants}幼` : ""}
+                            {confirmedDetail.pets ? ` ${confirmedDetail.pets}寵` : ""}
+                          </p>
+                          <p>
+                            • 使用房數：
+                            {confirmedDetail.roomAllocation.fourPersonSuiteCount +
+                              confirmedDetail.roomAllocation.fourPersonDowngradeCount +
+                              confirmedDetail.roomAllocation.doubleSuiteCount +
+                              confirmedDetail.roomAllocation.doublePlainCount}{" "}
+                            間房
+                          </p>
+                          <p className="mt-2" style={{ color: colors.muted }}>
+                            ━━━━━━━━━━━━━━
+                          </p>
+                          <p className="mt-2 font-bold">💰 帳務明細</p>
+                          <p className="mt-1">• 住宿總額：${confirmedDetail.finalTotal.toLocaleString()}元</p>
+                          {(() => {
+                            const depositPayment = confirmedDetail.payments.find((p) => p.paymentKind === "deposit");
+                            const balancePayment = confirmedDetail.payments.find((p) => p.paymentKind === "balance");
+                            return (
+                              <>
+                                <p>
+                                  • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
+                                  {depositPayment?.paidAt
+                                    ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})`
+                                    : ""}
+                                </p>
+                                {balancePayment && (
+                                  <>
+                                    <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
+                                    <p>⚠️ 尾款請於入住前一星期匯款。</p>
+                                  </>
+                                )}
+                              </>
+                            );
+                          })()}
+                          <p className="mt-2" style={{ color: colors.muted }}>
+                            ━━━━━━━━━━━━━━
+                          </p>
+                          <p className="font-bold">【重要提醒】</p>
+                          <p className="mt-1">1. 入住前 7 天匯尾款前, 將依最終確認人數，按照 [平旺日/假日] 之計費標準重新核算。</p>
+                          <p>2. 若結算人數低於基本人數將視房型開放對應間數；達全額人數則開放全棟房數。</p>
+                          <p>3. 入住一個月內，恕不接受日期變更或取消。</p>
+                          <p>4. 在入住前一週會發送【入住提醒】；當天會發送【入住須知】及【設備使用說明】。</p>
+                          <p>5. 室內全面禁菸；22:00 後請降低音量維護鄰里安寧。</p>
+                          <p className="mt-2" style={{ color: colors.muted }}>
+                            ━━━━━━━━━━━━━━
+                          </p>
+                          {confirmedDetail.propertyAddress && <p className="mt-2">📍 民宿地址：{confirmedDetail.propertyAddress}</p>}
+                          {confirmedDetail.parkingInfo && <p>🅿️ 停車資訊：{confirmedDetail.parkingInfo}</p>}
+                          {confirmedDetail.mapUrl && <p>🗺️ 導航連結：{confirmedDetail.mapUrl}</p>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* 完整報價內容預設收起來，只有要複製文字/轉圖片分享給
                     客人的時候才需要展開 */}
                 <button
@@ -1231,18 +1443,20 @@ export function QuotesSearch() {
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      className="mt-5 w-full border py-2.5 text-xs tracking-wide transition-colors"
-                      style={
-                        copied
-                          ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                          : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                      }
-                    >
-                      {copied ? "已複製 ✓" : `複製${isConfirmed ? "訂房確認" : "報價"}內容`}
-                    </button>
+                    {!isConfirmed && (
+                      <button
+                        type="button"
+                        onClick={handleCopy}
+                        className="mt-5 w-full border py-2.5 text-xs tracking-wide transition-colors"
+                        style={
+                          copied
+                            ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                            : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                        }
+                      >
+                        {copied ? "已複製 ✓" : "複製報價內容"}
+                      </button>
+                    )}
                   </>
                 )}
               </>

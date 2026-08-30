@@ -527,6 +527,25 @@ export async function getReservationNoByQuoteId(quoteId: string): Promise<string
   return (data?.reservation_no as string) ?? null;
 }
 
+/** 跟上面 getReservationNoByQuoteId 查的是同一筆資料，這個另外多回傳
+ * id——複製訂房確認內容/轉圖片需要用 id 去查完整訂單詳情，只回傳
+ * reservation_no 不夠用。刻意寫成新函式，不直接改上面那個舊函式的
+ * 回傳型別，避免影響其他已經在用它、只需要 reservation_no 的地方。 */
+export async function getReservationByQuoteId(quoteId: string): Promise<{ id: string; reservationNo: string } | null> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("reservations")
+    .select("id, reservation_no")
+    .eq("source_quote_id", quoteId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`查詢訂房記錄失敗：${error.message}`);
+  }
+  if (!data) return null;
+  return { id: (data as any).id as string, reservationNo: (data as any).reservation_no as string };
+}
+
 /** 查詢訂單列表用的精簡摘要 */
 export interface ReservationSummary {
   id: string;
@@ -774,8 +793,14 @@ export async function listReceivables(): Promise<ReceivableSummary[]> {
     )
     .eq("status", "pending")
     .eq("direction", "receivable")
-    .lte("due_date", cutoffDateStr)
-    .order("due_date", { ascending: true, nullsFirst: false });
+    // due_date 在 10 天內「或者根本沒填」都算——沒填不代表不急，
+    // 用 .lte() 單獨篩選的話，SQL 對 NULL 的比較一律是 false，
+    // due_date 是 NULL 的付款記錄會被整個排除、永遠不會出現在應收
+    // 清單裡，不管它實際上有多急。歷史資料匯入那批（訂房記錄表
+    // 匯入時透過 SQL 直接寫入，沒有經過這裡的確認訂房流程）就是
+    // due_date 全部是 NULL 的例子，之前就是因為這樣才會查不到。
+    .or(`due_date.lte.${cutoffDateStr},due_date.is.null`)
+    .order("due_date", { ascending: true, nullsFirst: true });
 
   if (error) {
     throw new Error(`查詢應收款失敗：${error.message}`);
@@ -1009,6 +1034,31 @@ export async function updateReservation(reservationId: string, fields: Reservati
 
   if (error) {
     throw new Error(`更新訂單失敗：${error.message}`);
+  }
+
+  // 總金額改了，尾款金額要跟著重算（尾款 = 總金額 - 訂金），訂金
+  // 金額維持不動——訂金通常已經收了，不會因為事後改總金額而跟著變。
+  // 這裡不管總金額實際上有沒有真的改變都重新算一次，反正結果一樣，
+  // 比額外去判斷「這次有沒有改到 final_total」簡單、也不會有漏判的
+  // 風險。
+  const { data: depositRow, error: depositFetchError } = await supabase
+    .from("payments")
+    .select("amount")
+    .eq("reservation_id", reservationId)
+    .eq("payment_kind", "deposit")
+    .maybeSingle();
+  if (depositFetchError) {
+    throw new Error(`查詢訂金金額失敗：${depositFetchError.message}`);
+  }
+  const depositAmount = Number((depositRow as any)?.amount ?? 0);
+  const newBalanceAmount = fields.finalTotal - depositAmount;
+
+  const { error: balanceUpdateError } = await (supabase.from("payments") as any)
+    .update({ amount: newBalanceAmount })
+    .eq("reservation_id", reservationId)
+    .eq("payment_kind", "balance");
+  if (balanceUpdateError) {
+    throw new Error(`更新尾款金額失敗：${balanceUpdateError.message}`);
   }
 
   // 加購項目：不逐項比對哪個改了、哪個沒改（加床房號這種欄位改起來

@@ -41,6 +41,7 @@ import {
   getPropertyRoomCounts,
   getQuoteSnapshot,
   getReservationNoByQuoteId,
+  getReservationByQuoteId,
   getSingleOrganizationId,
   listRecentQuotes,
 } from "@/lib/pricing/queries";
@@ -313,6 +314,12 @@ export async function getExtraBedRoomOptionsAction(propertyCode: PropertyCode): 
 /** 這張報價單已經確認訂房的話，查出實際的訂房編號 */
 export async function getReservationNoForQuoteAction(quoteId: string): Promise<string | null> {
   return getReservationNoByQuoteId(quoteId);
+}
+
+/** 同上，但多回傳訂房 id——複製訂房確認內容/轉圖片要用 id 查完整
+ * 訂單詳情，見 lib/pricing/queries.ts getReservationByQuoteId 的說明 */
+export async function getReservationForQuoteAction(quoteId: string): Promise<{ id: string; reservationNo: string } | null> {
+  return getReservationByQuoteId(quoteId);
 }
 
 const ITEM_TYPE_BY_LABEL: Record<string, string> = {
