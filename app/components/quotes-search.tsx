@@ -20,12 +20,14 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
   calculateQuoteAction,
   clearOldQuotesAction,
   confirmReservationFromQuoteAction,
+  deleteQuoteAction,
   getExtraBedRoomOptionsAction,
   getQuoteCheckInDatesInRangeAction,
   getReservationForQuoteAction,
@@ -138,6 +140,349 @@ function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) 
   );
 }
 
+/** 'YYYY-MM-DD' → '2026/08/29'——確認單圖片用比 formatDateWithWeekday
+ * （帶星期幾文字）更精簡的格式，跟 ConfirmationImageCard 共用 */
+function formatSlashDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-");
+  return `${y}/${m}/${d}`;
+}
+
+function nightsLabel(checkIn: string, checkOut: string): string {
+  const nights = Math.round(
+    (new Date(`${checkOut}T00:00:00`).getTime() - new Date(`${checkIn}T00:00:00`).getTime()) / (1000 * 60 * 60 * 24)
+  );
+  return `${nights + 1}天${nights}夜`;
+}
+
+/** 報價有效期限——套用一般 hotel 業界慣例，報價日期起算 14 天
+ * （兩週）。isoTimestamp 是資料庫 created_at 那種帶時間的完整
+ * 時間戳記，這裡只取日期部分往後推算。用本地時區的年/月/日組
+ * 字串，不要用 toISOString()（那是 UTC，台灣時間換算回 UTC
+ * 可能往前跨一天，算出來的日期會早一天，跟畫面上其他地方一貫的
+ * 本地時區日期處理方式不一致）。 */
+function addDaysToIsoDate(isoTimestamp: string, days: number): string {
+  const d = new Date(`${isoTimestamp.slice(0, 10)}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+const QUOTE_VALIDITY_DAYS = 14;
+
+/**
+ * 訂房確認單截圖用的隱藏卡片——抽成獨立元件，因為詳情頁面本身的
+ * 「轉成圖片」按鈕，跟搜尋結果列表新增的「圖片」按鈕，都需要同一份
+ * 卡片內容，只是驅動的資料來源不同（前者用目前選取的報價，後者用
+ * 使用者點的那一列報價）。抽成元件、各自傳自己的 ref 進來，避免
+ * 同一份 100 多行的 JSX 複製兩份，以後要改內容才不用改兩個地方。
+ */
+function ConfirmationImageCard({
+  detail,
+  quote,
+  cardRef,
+}: {
+  detail: ReservationDetail;
+  quote: PackageQuote | null;
+  cardRef: RefObject<HTMLDivElement>;
+}) {
+  return (
+    <div style={{ height: 0, overflow: "hidden" }}>
+      <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
+        <div ref={cardRef} className={body.className} style={{ width: "375px", backgroundColor: colors.canvas }}>
+          <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+            <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
+              🏨 【{detail.propertyName}訂房確認單】
+            </p>
+          </div>
+          <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
+            <p style={{ color: colors.pine }}>✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~</p>
+            <p className="mt-3" style={{ color: colors.muted }}>
+              ━━━━━━━━━━━━━━
+            </p>
+            <p className="mt-2 font-bold">📅 預訂資訊</p>
+            <p className="mt-1">• 入住日期：{formatSlashDate(detail.checkIn)} (15:00後)</p>
+            <p>• 退房日期：{formatSlashDate(detail.checkOut)} (11:00前)</p>
+            <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
+            <p>
+              • 入住人數：{detail.adults}大
+              {detail.children ? ` ${detail.children}小` : ""}
+              {detail.infants ? ` ${detail.infants}幼` : ""}
+              {detail.pets ? ` ${detail.pets}寵` : ""}
+            </p>
+            <p>• 房型配置：</p>
+            {roomAllocationSummaryItems(detail.roomAllocation).map((item, i) => (
+              <p key={i} className="pl-3">
+                └ {item.text}
+              </p>
+            ))}
+            <p className="mt-2" style={{ color: colors.muted }}>
+              ━━━━━━━━━━━━━━
+            </p>
+            <p className="mt-2 font-bold">💰 費用明細</p>
+            {quote ? (
+              <>
+                {accommodationDayGroups(quote).map((group, gi) => (
+                  <div key={`day-${gi}`}>
+                    {group.dateLabel && (
+                      <p className="mt-1" style={{ color: colors.ink }}>
+                        {group.dateLabel}
+                      </p>
+                    )}
+                    {group.items.map((item, i) => (
+                      <p key={i} className={group.dateLabel ? "pl-3" : undefined}>
+                        • {item.roomLabel}：${item.unitPrice.toLocaleString()}×{item.qty} = $
+                        {item.lineTotal.toLocaleString()}
+                      </p>
+                    ))}
+                  </div>
+                ))}
+                {addOnFeeBreakdown(quote).map((item, i) => (
+                  <p key={`fee-${i}`}>
+                    • {item.label}：${item.amount.toLocaleString()}
+                  </p>
+                ))}
+                {quote.discountAmount > 0 && <p>• 優惠折扣：－${quote.discountAmount.toLocaleString()}</p>}
+                {quote.invoiceTaxAmount > 0 && <p>• 發票稅金(8%)：${quote.invoiceTaxAmount.toLocaleString()}</p>}
+              </>
+            ) : (
+              <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
+            )}
+            {(() => {
+              const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
+              const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
+              return (
+                <>
+                  <p className="mt-1">
+                    • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
+                    {depositPayment?.paidAt ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})` : ""}
+                  </p>
+                  {balancePayment && (
+                    <>
+                      <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
+                      <p>⚠️ 尾款請於入住前一星期匯款。</p>
+                    </>
+                  )}
+                </>
+              );
+            })()}
+            <p className="mt-2" style={{ color: colors.muted }}>
+              ━━━━━━━━━━━━━━
+            </p>
+            <p className="font-bold">【重要提醒】</p>
+            <p className="mt-1">1. 退改政策：如需延期或取消，需於入住日前 30 天通知，以保障雙方權益。</p>
+            <p>2. 人數變更：在入住前 1 周根據最終入住人數結算尾款（未達基本人數仍以低消計費），我們將為您們配置合適的備品與床位。</p>
+            <p>3. 在入住前一週收到尾款後會發送【入住提醒】；入住當天會發送【入住須知】及【設備使用說明】。</p>
+            <p className="mt-2" style={{ color: colors.muted }}>
+              ━━━━━━━━━━━━━━
+            </p>
+            {detail.propertyAddress && <p className="mt-2">📍 民宿地址：{detail.propertyAddress}</p>}
+            {detail.parkingInfo && <p>🅿️ 停車資訊：{detail.parkingInfo}</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 完整報價收據卡片——抽成獨立元件，理由跟 ConfirmationImageCard 一樣：
+ * 報價詳情頁面「顯示完整報價內容」的區塊，跟搜尋結果列表新增的
+ * 「報價圖片」按鈕，需要同一份卡片內容，只是驅動的資料來源不同。
+ * cardRef 是選填的——詳情頁面原本的用法只是單純顯示在畫面上，不需要
+ * 截圖，只有列表的隱藏卡片才需要傳 ref 進來。
+ */
+function QuoteReceiptCard({
+  quote,
+  createdAt,
+  isConfirmed,
+  cardRef,
+}: {
+  quote: PackageQuote;
+  createdAt: string | null;
+  isConfirmed: boolean;
+  cardRef?: RefObject<HTMLDivElement>;
+}) {
+  if (!quote.messageContext || !quote.roomAllocation) return null;
+  return (
+    <>
+                    <div ref={cardRef} className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
+                      <div className="relative px-6 pb-6 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
+                        <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
+                          {`${quote.messageContext.propertyName}私人會所`}
+                        </p>
+                        {/* 「包棟報價單/訂房確認單」外面包一層 relative 容器——
+                            報價日期/有效期限用 absolute + top:50%/
+                            translateY(-50%) 對齊這個容器的垂直中心。
+                            ⚠️ 這裡的 min-height 很關鍵：absolute 定位的
+                            子元素不會影響父層的高度計算，如果只給父層
+                            一行文字的自然高度，兩行的日期資訊會超出
+                            父層範圍，變成疊到父層外面——如果父層外面
+                            剛好是標題區塊自己的下邊界以外，日期資訊就
+                            會跑到深綠色背景外面、疊在下面米色的內容
+                            區塊上，變得幾乎看不見（之前發生過的
+                            「有效期限看不到」就是這樣來的）。這裡明確
+                            給 min-height，確保父層的高度一定容得下兩行
+                            文字，不管視覺上這行標題文字本身多高。 */}
+                        <div className="relative mt-1" style={{ minHeight: "24px" }}>
+                          <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
+                            {isConfirmed ? "訂房確認單" : "包棟報價單"}
+                          </p>
+                          {!isConfirmed && createdAt && (
+                            <div
+                              className="absolute right-0 top-1/2 text-right text-[8px] leading-tight"
+                              style={{ color: colors.pineSoft, transform: "translateY(-50%)" }}
+                            >
+                              <p>報價日期：{formatSlashDate(createdAt.slice(0, 10))}</p>
+                              <p>有效期限：{formatSlashDate(addDaysToIsoDate(createdAt, QUOTE_VALIDITY_DAYS))}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 上方 padding 特意比其他方向小很多——上面接的是
+                          深色標題區塊，已經有自己的 padding，兩個疊加
+                          會讓「預訂資訊」上方空白感覺太大 */}
+                      <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
+                        <ReceiptSectionHeader icon="📅" title="預訂資訊" />
+                        <div className="flex flex-col gap-1.5 text-xs">
+                          <InfoRow label="入住日期" value={formatDateWithWeekday(quote.request.checkIn)} />
+                          <InfoRow label="退房日期" value={formatDateWithWeekday(quote.request.checkOut)} />
+                          <InfoRow label="預訂天數" value={daysNightsLabel(quote.nights)} />
+                          <InfoRow label="入住人數" value={guestSummary(quote)} />
+                          {roomAllocationSummaryItems(quote.roomAllocation).map((item, i) => (
+                            <InfoRow key={`room-${i}`} label={i === 0 ? "房型配置" : ""} value={item.text} />
+                          ))}
+                          {addOnSummaryItems(quote).map((item, i) => (
+                            <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
+                          ))}
+                        </div>
+
+                        <ReceiptSectionHeader icon="💰" title="費用明細" />
+                        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs" style={{ color: colors.muted }}>
+                          {accommodationDayGroups(quote).map((group, gi) => (
+                            <div key={`day-${gi}`} className="contents">
+                              {group.dateLabel && (
+                                <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
+                                  {group.dateLabel}
+                                </p>
+                              )}
+                              {group.items.map((item, i) => (
+                                <div key={i} className="contents">
+                                  <span className={group.dateLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+                                  <span className="text-right tabular-nums">
+                                    NT${item.unitPrice.toLocaleString()}×{item.qty}
+                                  </span>
+                                  <span>=</span>
+                                  <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                          {addOnFeeBreakdown(quote).map((item, i) => (
+                            <div key={`fee-${i}`} className="contents">
+                              <span>{item.label}</span>
+                              <span />
+                              <span />
+                              <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
+                            </div>
+                          ))}
+                          {quote.discountAmount > 0 && (
+                            <div className="contents">
+                              <span>優惠折扣</span>
+                              <span />
+                              <span />
+                              <span className="text-right tabular-nums">－NT${quote.discountAmount.toLocaleString()}</span>
+                            </div>
+                          )}
+                          {quote.invoiceTaxAmount > 0 && (
+                            <div className="contents">
+                              <span>發票稅金(8%)</span>
+                              <span />
+                              <span />
+                              <span className="text-right tabular-nums">NT${quote.invoiceTaxAmount.toLocaleString()}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
+                          <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                            包棟總費用
+                          </p>
+                          <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
+                            NT$ {quote.packageTotal.toLocaleString()}
+                          </p>
+                          <div className="mt-3 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                            <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                              訂金
+                            </span>
+                            <span style={{ color: colors.ink }} className="text-sm font-semibold">
+                              NT$ {quote.deposit.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-baseline justify-between">
+                            <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                              尾款(入住前 1 週匯款)
+                            </span>
+                            <span style={{ color: colors.ink }} className="text-sm font-semibold">
+                              NT$ {quote.balanceDue.toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        {quote.messageContext.bank && (
+                          <>
+                            <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
+                            <div className="flex flex-col gap-2 text-sm font-semibold">
+                              <InfoRow label="銀行" value={quote.messageContext.bank.name} />
+                              <InfoRow label="分行" value={quote.messageContext.bank.branch} />
+                              <InfoRow label="帳號" value={quote.messageContext.bank.accountNumber} />
+                              <InfoRow label="戶名" value={quote.messageContext.bank.accountName} />
+                            </div>
+                            <p className="mt-2 text-xs font-semibold leading-relaxed" style={{ color: colors.alert }}>
+                              ⚠️ {BANK_TRANSFER_NOTE}
+                            </p>
+                          </>
+                        )}
+
+                        <ReceiptSectionHeader icon="📝" title="預訂須知" />
+                        <div className="flex flex-col gap-3 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                          {baseGuestsReminderItems(quote).length > 0 && (
+                            <div>
+                              <p>
+                                {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
+                              </p>
+                              {baseGuestsReminderItems(quote).map((item, i) => (
+                                <p key={i}>
+                                  ・{item.label}({item.note})：{item.required} 人
+                                </p>
+                              ))}
+                              <p>{INFANT_NOTE}</p>
+                            </div>
+                          )}
+                          {BOOKING_POLICY_NOTES.map((note, i) => {
+                            const highlight = "入住前 30 天";
+                            const parts = note.split(highlight);
+                            return (
+                              <p key={i}>
+                                {BOOKING_POLICY_ICONS[i]}
+                                {parts.length === 2 ? (
+                                  <>
+                                    {parts[0]}
+                                    <strong style={{ color: colors.alert }}>{highlight}</strong>
+                                    {parts[1]}
+                                  </>
+                                ) : (
+                                  note
+                                )}
+                              </p>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+    </>
+  );
+}
+
 export function QuotesSearch() {
   const now = new Date();
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
@@ -193,6 +538,42 @@ export function QuotesSearch() {
   const [clearResultMessage, setClearResultMessage] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
 
+  // 刪除單一報價單用
+  const [showDeleteQuoteConfirm, setShowDeleteQuoteConfirm] = useState(false);
+  const [isDeletingQuote, setIsDeletingQuote] = useState(false);
+  const [deleteQuoteError, setDeleteQuoteError] = useState<string | null>(null);
+  /** 搜尋結果列表直接刪除用——不用先點進詳細內容。存的是目前正在
+   * 顯示刪除確認的那一列報價單 id，null 代表沒有任何一列在確認中 */
+  const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
+
+  // 搜尋結果列表直接複製內容/轉圖片用——一樣不用先點進詳細內容
+  const [copyingRowId, setCopyingRowId] = useState<string | null>(null);
+  const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+  const [rowCopyError, setRowCopyError] = useState<string | null>(null);
+  /** 錯誤訊息屬於哪一列，避免一列複製失敗，錯誤卻顯示在其他列下面 */
+  const [rowCopyErrorId, setRowCopyErrorId] = useState<string | null>(null);
+  const [imagingRowId, setImagingRowId] = useState<string | null>(null);
+  const [rowImageError, setRowImageError] = useState<string | null>(null);
+  const [rowImageNote, setRowImageNote] = useState<string | null>(null);
+  const [rowImageMessageId, setRowImageMessageId] = useState<string | null>(null);
+  /** 目前正在轉圖片的那一列的訂單詳情/報價內容——驅動下面單獨的
+   * ConfirmationImageCard 隱藏卡片。跟詳情頁面自己的 confirmedDetail/
+   * selectedQuote 是分開的兩組狀態，故意不共用，避免使用者同時在
+   * 詳情頁面操作、又點列表的轉圖片按鈕時，兩邊的圖片內容互相干擾。 */
+  const [rowImageDetail, setRowImageDetail] = useState<ReservationDetail | null>(null);
+  const [rowImageQuote, setRowImageQuote] = useState<PackageQuote | null>(null);
+  const rowImageCardRef = useRef<HTMLDivElement>(null);
+  // 搜尋結果列表「報價圖片」用（還沒確認訂房的報價，圖片內容是完整
+  // 報價收據，不是訂房確認單）——跟上面的訂房確認單圖片是分開的兩組
+  // 狀態，因為卡片內容/版型完全不同（QuoteReceiptCard vs
+  // ConfirmationImageCard）
+  const [imagingQuoteRowId, setImagingQuoteRowId] = useState<string | null>(null);
+  const [rowQuoteImageError, setRowQuoteImageError] = useState<string | null>(null);
+  const [rowQuoteImageNote, setRowQuoteImageNote] = useState<string | null>(null);
+  const [rowQuoteImageMessageId, setRowQuoteImageMessageId] = useState<string | null>(null);
+  const [rowQuoteImageData, setRowQuoteImageData] = useState<{ quote: PackageQuote; createdAt: string } | null>(null);
+  const rowQuoteImageCardRef = useRef<HTMLDivElement>(null);
+
   // 這個月哪些日期有報價單，換月份時重新查一次，月曆格子要填色標示
   useEffect(() => {
     let cancelled = false;
@@ -242,6 +623,227 @@ export function QuotesSearch() {
       setClearError(err instanceof Error ? err.message : "清除失敗，請稍後再試");
     } finally {
       setIsClearing(false);
+    }
+  }
+
+  /** 搜尋結果列表直接複製內容——不用先點進詳細內容。已確認訂房的
+   * 報價複製真正的訂房確認內容，還沒確認的複製報價內容，邏輯跟
+   * handleSelect() 載入詳細內容時判斷 saved.status 是否為 accepted
+   * 一致。 */
+  async function handleCopyForRow(row: QuoteSummary) {
+    setCopyingRowId(row.id);
+    setRowCopyError(null);
+    setRowCopyErrorId(null);
+    try {
+      let text: string;
+      if (row.status === "accepted") {
+        const reservation = await getReservationForQuoteAction(row.id);
+        if (!reservation) {
+          setRowCopyError("找不到對應的訂房記錄");
+          setRowCopyErrorId(row.id);
+          return;
+        }
+        const result = await buildReservationConfirmationMessageAction(reservation.id);
+        if (!result.success) {
+          setRowCopyError(result.message);
+          setRowCopyErrorId(row.id);
+          return;
+        }
+        text = result.text;
+      } else {
+        const saved = await getSavedQuoteAction(row.id);
+        if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
+          setRowCopyError("找不到這張報價單的完整內容");
+          setRowCopyErrorId(row.id);
+          return;
+        }
+        text = buildQuoteMessage(saved.quote);
+      }
+      await navigator.clipboard.writeText(text);
+      setCopiedRowId(row.id);
+      setTimeout(() => setCopiedRowId(null), 2000);
+    } catch (err) {
+      setRowCopyError(err instanceof Error ? err.message : "複製失敗，請稍後再試");
+      setRowCopyErrorId(row.id);
+    } finally {
+      setCopyingRowId(null);
+    }
+  }
+
+  /** 搜尋結果列表直接產生「報價圖片」——給還沒確認訂房的報價用，
+   * 圖片內容是完整報價收據（QuoteReceiptCard），跟已確認訂房的
+   * 「訂房確認單」圖片（handleImageForRow）是兩種不同版型，各自
+   * 對應各自的按鈕。 */
+  async function handleQuoteImageForRow(row: QuoteSummary) {
+    setImagingQuoteRowId(row.id);
+    setRowQuoteImageError(null);
+    setRowQuoteImageNote(null);
+    setRowQuoteImageMessageId(null);
+    try {
+      const saved = await getSavedQuoteAction(row.id);
+      if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
+        setRowQuoteImageError("找不到這張報價單的完整內容");
+        setRowQuoteImageMessageId(row.id);
+        return;
+      }
+      setRowQuoteImageData({ quote: saved.quote, createdAt: saved.createdAt });
+
+      // 等 React 把上面的 state 實際畫進 DOM，理由跟 handleImageForRow
+      // 的說明一致
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      if (typeof document !== "undefined" && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+
+      const node = rowQuoteImageCardRef.current;
+      if (!node) throw new Error("圖片產生失敗，請再試一次");
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(node, {
+        pixelRatio: 2,
+        backgroundColor: colors.canvas,
+        width: node.scrollWidth,
+        height: node.scrollHeight,
+      });
+      if (!blob) throw new Error("圖片產生失敗，請再試一次");
+
+      const file = new File([blob], `${row.propertyName}-報價單.png`, { type: "image/png" });
+      const canShareFiles =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title: `${row.propertyName} 報價單` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        setRowQuoteImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
+        setRowQuoteImageMessageId(row.id);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setRowQuoteImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
+      setRowQuoteImageMessageId(row.id);
+    } finally {
+      setImagingQuoteRowId(null);
+      setRowQuoteImageData(null);
+    }
+  }
+
+  /** 搜尋結果列表直接轉圖片——只有已確認訂房的報價才有這個按鈕
+   * （理由跟詳情頁面的「轉成圖片」按鈕一致：圖片內容是訂房確認單，
+   * 需要實際收款資料，還沒確認訂房的報價沒有這些資料）。 */
+  async function handleImageForRow(row: QuoteSummary) {
+    setImagingRowId(row.id);
+    setRowImageError(null);
+    setRowImageNote(null);
+    setRowImageMessageId(null);
+    try {
+      const reservation = await getReservationForQuoteAction(row.id);
+      if (!reservation) {
+        setRowImageError("找不到對應的訂房記錄");
+        setRowImageMessageId(row.id);
+        return;
+      }
+      const [detail, saved] = await Promise.all([getReservationDetailAction(reservation.id), getSavedQuoteAction(row.id)]);
+      if (!detail) {
+        setRowImageError("找不到訂單詳情");
+        setRowImageMessageId(row.id);
+        return;
+      }
+      setRowImageDetail(detail);
+      setRowImageQuote(saved?.quote ?? null);
+
+      // 等 React 把上面兩個 state 實際畫進 DOM，隱藏卡片才會顯示這一列
+      // 的內容，不是舊資料——用兩次 requestAnimationFrame 確保瀏覽器
+      // 已經完成一次繪製，這是常見、可靠的「等 state 更新反映到畫面上」
+      // 寫法，比用固定的 setTimeout 延遲更準確。
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      if (typeof document !== "undefined" && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+
+      const node = rowImageCardRef.current;
+      if (!node) throw new Error("圖片產生失敗，請再試一次");
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(node, {
+        pixelRatio: 2,
+        backgroundColor: colors.canvas,
+        width: node.scrollWidth,
+        height: node.scrollHeight,
+      });
+      if (!blob) throw new Error("圖片產生失敗，請再試一次");
+
+      const file = new File([blob], `${detail.propertyName}-訂房確認單.png`, { type: "image/png" });
+      const canShareFiles =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title: `${detail.propertyName} 訂房確認單` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        setRowImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
+        setRowImageMessageId(row.id);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setRowImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
+      setRowImageMessageId(row.id);
+    } finally {
+      setImagingRowId(null);
+      setRowImageDetail(null);
+      setRowImageQuote(null);
+    }
+  }
+
+  /** 刪除目前選取的這一張報價單，避免類似/重複的報價單越積越多 */
+  async function handleDeleteQuote(quoteId?: string) {
+    const targetId = quoteId ?? selectedId;
+    if (!targetId) return;
+    setIsDeletingQuote(true);
+    setDeleteQuoteError(null);
+
+    try {
+      const result = await deleteQuoteAction(targetId);
+      if (!result.success) {
+        setDeleteQuoteError(result.message);
+        return;
+      }
+      // 刪除成功，回到搜尋結果列表，重新查一次確保這筆記錄不會再
+      // 顯示出來
+      if (targetId === selectedId) {
+        setSelectedId(null);
+        setSelectedQuote(null);
+      }
+      setShowDeleteQuoteConfirm(false);
+      setDeletingRowId(null);
+      if (results) {
+        const rows = await searchQuotesAction({
+          checkInDate: checkInDate || undefined,
+        });
+        setResults(rows);
+      }
+      // 月曆填色也要跟著更新，理由跟 handleClearOldQuotes 一樣
+      const monthStart = `${calendarYear}-${String(calendarMonth).padStart(2, "0")}-01`;
+      const nextMonthDate = new Date(calendarYear, calendarMonth, 1);
+      const nextMonthStart = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}-01`;
+      const dates = await getQuoteCheckInDatesInRangeAction(monthStart, nextMonthStart);
+      setQuoteDates(new Set(dates));
+    } catch (err) {
+      setDeleteQuoteError(err instanceof Error ? err.message : "刪除失敗，請稍後再試");
+    } finally {
+      setIsDeletingQuote(false);
     }
   }
 
@@ -305,6 +907,8 @@ export function QuotesSearch() {
     setConfirmInvoiceTaxId("");
     setExtraBedRoomOptions([]);
     setSelectedExtraBedRoomIds([]);
+    setShowDeleteQuoteConfirm(false);
+    setDeleteQuoteError(null);
     setIsLoadingDetail(true);
 
     try {
@@ -512,31 +1116,6 @@ export function QuotesSearch() {
     }
   }
 
-  function formatSlashDate(dateStr: string): string {
-    const [y, m, d] = dateStr.split("-");
-    return `${y}/${m}/${d}`;
-  }
-
-  function nightsLabel(checkIn: string, checkOut: string): string {
-    const nights = Math.round(
-      (new Date(`${checkOut}T00:00:00`).getTime() - new Date(`${checkIn}T00:00:00`).getTime()) / (1000 * 60 * 60 * 24)
-    );
-    return `${nights + 1}天${nights}夜`;
-  }
-
-  /** 報價有效期限——套用一般 hotel 業界慣例，報價日期起算 14 天
-   * （兩週）。isoTimestamp 是資料庫 created_at 那種帶時間的完整
-   * 時間戳記，這裡只取日期部分往後推算。用本地時區的年/月/日組
-   * 字串，不要用 toISOString()（那是 UTC，台灣時間換算回 UTC
-   * 可能往前跨一天，算出來的日期會早一天，跟畫面上其他地方一貫的
-   * 本地時區日期處理方式不一致）。 */
-  function addDaysToIsoDate(isoTimestamp: string, days: number): string {
-    const d = new Date(`${isoTimestamp.slice(0, 10)}T00:00:00`);
-    d.setDate(d.getDate() + days);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  }
-  const QUOTE_VALIDITY_DAYS = 14;
-
   async function handleShareConfirmationImage() {
     if (!confirmationCardRef.current || !confirmedDetail) return;
     setImageWorking(true);
@@ -586,7 +1165,7 @@ export function QuotesSearch() {
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
-      <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
+      <div className="w-full" style={{ maxWidth: "30rem", color: colors.ink }}>
         <Link href="/" className="text-xs" style={{ color: colors.blue }}>
           ← 返回首頁
         </Link>
@@ -712,40 +1291,173 @@ export function QuotesSearch() {
         {results && results.length > 0 && !selectedId && (
           <div className="mt-6 flex flex-col gap-3">
             {results.map((row) => (
-              <button
-                key={row.id}
-                type="button"
-                onClick={() => handleSelect(row)}
-                className="border p-3 text-left text-xs transition-colors"
-                style={{ borderColor: colors.line, color: colors.ink }}
-              >
-                <div className="flex items-baseline justify-between">
-                  <span className="font-semibold">{row.propertyName}</span>
-                  <span style={{ color: colors.muted }}>{STATUS_LABEL[row.status] ?? row.status}</span>
-                </div>
-                <p className="mt-1" style={{ color: colors.muted }}>
-                  {row.checkIn} ～ {row.checkOut}
-                </p>
-                {row.roomSummary && (
+              <div key={row.id} className="border text-xs" style={{ borderColor: colors.line, color: colors.ink }}>
+                <button type="button" onClick={() => handleSelect(row)} className="w-full p-3 text-left">
+                  <div className="flex items-baseline justify-between">
+                    <span className="font-semibold">{row.propertyName}</span>
+                    <span style={{ color: colors.muted }}>{STATUS_LABEL[row.status] ?? row.status}</span>
+                  </div>
                   <p className="mt-1" style={{ color: colors.muted }}>
-                    {row.roomSummary}
+                    {row.checkIn} ～ {row.checkOut}
+                  </p>
+                  {row.roomSummary && (
+                    <p className="mt-1" style={{ color: colors.muted }}>
+                      {row.roomSummary}
+                    </p>
+                  )}
+                  <div className="mt-1 flex items-baseline justify-between">
+                    <span>
+                      {row.adults}大 {row.children}小
+                    </span>
+                    <span className="font-semibold">NT$ {row.totalAmount.toLocaleString()}</span>
+                  </div>
+                  <div className="mt-1 flex items-baseline justify-between" style={{ color: colors.muted }}>
+                    <span>
+                      {row.guestName || "（未填姓名）"}
+                      {row.guestPhone ? `　${row.guestPhone}` : ""}
+                    </span>
+                    <span>{row.quoteNo}</span>
+                  </div>
+                </button>
+
+                {/* 直接在列表這裡就能複製內容/轉圖片/刪除，不用先點進
+                    詳細內容——複製/轉圖片跟刪除一樣，用回傳值表達失敗，
+                    不用 throw（見 deleteQuoteAction 的說明） */}
+                <div className="flex gap-3 border-t px-3 py-2" style={{ borderColor: colors.line }}>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyForRow(row)}
+                    disabled={copyingRowId === row.id}
+                    className="text-[11px] disabled:opacity-50"
+                    style={{ color: colors.blue }}
+                  >
+                    {copyingRowId === row.id ? "複製中…" : copiedRowId === row.id ? "已複製 ✓" : "複製內容"}
+                  </button>
+                  {row.status === "accepted" ? (
+                    <button
+                      type="button"
+                      onClick={() => handleImageForRow(row)}
+                      disabled={imagingRowId === row.id}
+                      className="text-[11px] disabled:opacity-50"
+                      style={{ color: colors.blue }}
+                    >
+                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 圖片"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleQuoteImageForRow(row)}
+                      disabled={imagingQuoteRowId === row.id}
+                      className="text-[11px] disabled:opacity-50"
+                      style={{ color: colors.blue }}
+                    >
+                      {imagingQuoteRowId === row.id ? "圖片產生中…" : "🖼️ 報價圖片"}
+                    </button>
+                  )}
+                </div>
+                {rowCopyError && rowCopyErrorId === row.id && (
+                  <p role="alert" className="px-3 pb-2 text-[11px]" style={{ color: colors.alert }}>
+                    {rowCopyError}
                   </p>
                 )}
-                <div className="mt-1 flex items-baseline justify-between">
-                  <span>
-                    {row.adults}大 {row.children}小
-                  </span>
-                  <span className="font-semibold">NT$ {row.totalAmount.toLocaleString()}</span>
+                {(rowImageError || rowImageNote) && rowImageMessageId === row.id && (
+                  <p className="px-3 pb-2 text-[11px]" style={{ color: rowImageError ? colors.alert : colors.pine }}>
+                    {rowImageError || rowImageNote}
+                  </p>
+                )}
+                {(rowQuoteImageError || rowQuoteImageNote) && rowQuoteImageMessageId === row.id && (
+                  <p className="px-3 pb-2 text-[11px]" style={{ color: rowQuoteImageError ? colors.alert : colors.pine }}>
+                    {rowQuoteImageError || rowQuoteImageNote}
+                  </p>
+                )}
+
+                <div className="border-t px-3 py-2" style={{ borderColor: colors.line }}>
+                  {deletingRowId === row.id ? (
+                    <div>
+                      <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                        確定要刪除這張報價單嗎？無法復原。
+                        {row.status === "accepted" && (
+                          <>
+                            <br />
+                            這張報價已經確認轉為正式訂單——刪除報價單本身不會影響訂單，訂單記錄會繼續保留，只是之後沒辦法再從這裡查回當初的報價內容。
+                          </>
+                        )}
+                      </p>
+                      {deleteQuoteError && (
+                        <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
+                          {deleteQuoteError}
+                        </p>
+                      )}
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeletingRowId(null);
+                            setDeleteQuoteError(null);
+                          }}
+                          disabled={isDeletingQuote}
+                          className="border px-3 py-1 text-[11px] disabled:opacity-50"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteQuote(row.id)}
+                          disabled={isDeletingQuote}
+                          className="px-3 py-1 text-[11px] disabled:opacity-50"
+                          style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
+                        >
+                          {isDeletingQuote ? "刪除中…" : "確定刪除"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeletingRowId(row.id);
+                        setDeleteQuoteError(null);
+                      }}
+                      className="text-[11px]"
+                      style={{ color: colors.alert }}
+                    >
+                      刪除這張報價單
+                    </button>
+                  )}
                 </div>
-                <div className="mt-1 flex items-baseline justify-between" style={{ color: colors.muted }}>
-                  <span>
-                    {row.guestName || "（未填姓名）"}
-                    {row.guestPhone ? `　${row.guestPhone}` : ""}
-                  </span>
-                  <span>{row.quoteNo}</span>
-                </div>
-              </button>
+              </div>
             ))}
+          </div>
+        )}
+
+        {/* 隱藏的訂房確認單卡片，給搜尋結果列表的「圖片」按鈕用——
+            只有 rowImageDetail 有值（正在處理某一列的轉圖片）時才會
+            實際渲染內容，平常是空的。跟詳情頁面自己的
+            ConfirmationImageCard（用 confirmedDetail/confirmationCardRef）
+            是兩個獨立的實例，互不干擾。 */}
+        {rowImageDetail && (
+          <ConfirmationImageCard detail={rowImageDetail} quote={rowImageQuote} cardRef={rowImageCardRef} />
+        )}
+
+        {/* 隱藏的報價收據卡片，給搜尋結果列表的「報價圖片」按鈕用——
+            QuoteReceiptCard 本身沒有內建隱藏定位（它是從畫面上原本
+            就會顯示的「完整報價內容」抽出來的元件，那個用法本來就是
+            要讓使用者看到），這裡額外包一層跟 ConfirmationImageCard
+            一樣的隱藏定位處理，避免 iOS Safari 對 position:fixed 的
+            已知問題（見上面 quote-form.tsx 同款截圖卡片的說明）。 */}
+        {rowQuoteImageData && (
+          <div style={{ height: 0, overflow: "hidden" }}>
+            <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
+              <div className={body.className} style={{ width: "375px", backgroundColor: colors.canvas }}>
+                <QuoteReceiptCard
+                  quote={rowQuoteImageData.quote}
+                  createdAt={rowQuoteImageData.createdAt}
+                  isConfirmed={false}
+                  cardRef={rowQuoteImageCardRef}
+                />
+              </div>
+            </div>
           </div>
         )}
 
@@ -811,6 +1523,56 @@ export function QuotesSearch() {
                   >
                     編輯報價內容（例如入住人數有變動）
                   </button>
+                )}
+
+                {!isEditingQuote && !showDeleteQuoteConfirm && (
+                  <button
+                    type="button"
+                    onClick={() => setShowDeleteQuoteConfirm(true)}
+                    className="mt-2 block text-xs"
+                    style={{ color: colors.alert }}
+                  >
+                    刪除這張報價單
+                  </button>
+                )}
+
+                {showDeleteQuoteConfirm && (
+                  <div className="mt-2 border-l-2 pl-3" style={{ borderColor: colors.alert }}>
+                    <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
+                      確定要刪除這張報價單嗎？無法復原。
+                      {isConfirmed && (
+                        <>
+                          <br />
+                          這張報價已經確認轉為正式訂單——刪除報價單本身不會影響訂單，訂單記錄會繼續保留，只是之後沒辦法再從這裡查回當初的報價內容。
+                        </>
+                      )}
+                    </p>
+                    {deleteQuoteError && (
+                      <p role="alert" className="mt-2 text-xs" style={{ color: colors.alert }}>
+                        {deleteQuoteError}
+                      </p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowDeleteQuoteConfirm(false)}
+                        disabled={isDeletingQuote}
+                        className="border px-3 py-1.5 text-xs disabled:opacity-50"
+                        style={{ borderColor: colors.line, color: colors.ink }}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteQuote()}
+                        disabled={isDeletingQuote}
+                        className="px-3 py-1.5 text-xs disabled:opacity-50"
+                        style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
+                      >
+                        {isDeletingQuote ? "刪除中…" : "確定刪除"}
+                      </button>
+                    </div>
+                  </div>
                 )}
 
                 {!isConfirmed && isEditingQuote && editRequest && (
@@ -1303,115 +2065,7 @@ export function QuotesSearch() {
                         測尺寸才會準確），但視覺上完全不會影響頁面、
                         使用者也看不到，同時避開 fixed 定位在 iOS 上的
                         已知問題。 */}
-                    <div style={{ height: 0, overflow: "hidden" }}>
-                      <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
-                      <div
-                        ref={confirmationCardRef}
-                        className={body.className}
-                        style={{ width: "375px", backgroundColor: colors.canvas }}
-                      >
-                        <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
-                          <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
-                            🏨 【{confirmedDetail.propertyName}訂房確認單】
-                          </p>
-                        </div>
-                        <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
-                          <p style={{ color: colors.pine }}>
-                            ✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~
-                          </p>
-                          <p className="mt-3" style={{ color: colors.muted }}>
-                            ━━━━━━━━━━━━━━
-                          </p>
-                          <p className="mt-2 font-bold">📅 預訂資訊</p>
-                          <p className="mt-1">• 入住日期：{formatSlashDate(confirmedDetail.checkIn)} (15:00後)</p>
-                          <p>• 退房日期：{formatSlashDate(confirmedDetail.checkOut)} (11:00前)</p>
-                          <p>• 預訂天數：{nightsLabel(confirmedDetail.checkIn, confirmedDetail.checkOut)}</p>
-                          <p>
-                            • 入住人數：{confirmedDetail.adults}大
-                            {confirmedDetail.children ? ` ${confirmedDetail.children}小` : ""}
-                            {confirmedDetail.infants ? ` ${confirmedDetail.infants}幼` : ""}
-                            {confirmedDetail.pets ? ` ${confirmedDetail.pets}寵` : ""}
-                          </p>
-                          <p>
-                            • 房型配置：
-                          </p>
-                          {roomAllocationSummaryItems(confirmedDetail.roomAllocation).map((item, i) => (
-                            <p key={i} className="pl-3">
-                              └ {item.text}
-                            </p>
-                          ))}
-                          <p className="mt-2" style={{ color: colors.muted }}>
-                            ━━━━━━━━━━━━━━
-                          </p>
-                          <p className="mt-2 font-bold">💰 費用明細</p>
-                          {selectedQuote ? (
-                            <>
-                              {accommodationDayGroups(selectedQuote).map((group, gi) => (
-                                <div key={`day-${gi}`}>
-                                  {group.dateLabel && (
-                                    <p className="mt-1" style={{ color: colors.ink }}>
-                                      {group.dateLabel}
-                                    </p>
-                                  )}
-                                  {group.items.map((item, i) => (
-                                    <p key={i} className={group.dateLabel ? "pl-3" : undefined}>
-                                      • {item.roomLabel}：${item.unitPrice.toLocaleString()}×{item.qty} = $
-                                      {item.lineTotal.toLocaleString()}
-                                    </p>
-                                  ))}
-                                </div>
-                              ))}
-                              {addOnFeeBreakdown(selectedQuote).map((item, i) => (
-                                <p key={`fee-${i}`}>
-                                  • {item.label}：${item.amount.toLocaleString()}
-                                </p>
-                              ))}
-                              {selectedQuote.discountAmount > 0 && (
-                                <p>• 優惠折扣：－${selectedQuote.discountAmount.toLocaleString()}</p>
-                              )}
-                              {selectedQuote.invoiceTaxAmount > 0 && (
-                                <p>• 發票稅金(8%)：${selectedQuote.invoiceTaxAmount.toLocaleString()}</p>
-                              )}
-                            </>
-                          ) : (
-                            <p className="mt-1">• 住宿總額：${confirmedDetail.finalTotal.toLocaleString()}元</p>
-                          )}
-                          {(() => {
-                            const depositPayment = confirmedDetail.payments.find((p) => p.paymentKind === "deposit");
-                            const balancePayment = confirmedDetail.payments.find((p) => p.paymentKind === "balance");
-                            return (
-                              <>
-                                <p className="mt-1">
-                                  • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
-                                  {depositPayment?.paidAt
-                                    ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})`
-                                    : ""}
-                                </p>
-                                {balancePayment && (
-                                  <>
-                                    <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
-                                    <p>⚠️ 尾款請於入住前一星期匯款。</p>
-                                  </>
-                                )}
-                              </>
-                            );
-                          })()}
-                          <p className="mt-2" style={{ color: colors.muted }}>
-                            ━━━━━━━━━━━━━━
-                          </p>
-                          <p className="font-bold">【重要提醒】</p>
-                          <p className="mt-1">1. 退改政策：如需延期或取消，需於入住日前 30 天通知，以保障雙方權益。</p>
-                          <p>2. 人數變更：在入住前 1 周根據最終入住人數結算尾款（未達基本人數仍以低消計費），我們將為您們配置合適的備品與床位。</p>
-                          <p>3. 在入住前一週收到尾款後會發送【入住提醒】；入住當天會發送【入住須知】及【設備使用說明】。</p>
-                          <p className="mt-2" style={{ color: colors.muted }}>
-                            ━━━━━━━━━━━━━━
-                          </p>
-                          {confirmedDetail.propertyAddress && <p className="mt-2">📍 民宿地址：{confirmedDetail.propertyAddress}</p>}
-                          {confirmedDetail.parkingInfo && <p>🅿️ 停車資訊：{confirmedDetail.parkingInfo}</p>}
-                        </div>
-                      </div>
-                      </div>
-                    </div>
+                    <ConfirmationImageCard detail={confirmedDetail} quote={selectedQuote} cardRef={confirmationCardRef} />
                   </div>
                 )}
 
@@ -1428,174 +2082,7 @@ export function QuotesSearch() {
 
                 {showFullReceipt && (
                   <>
-                    <div className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="relative px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
-                        <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
-                          {`${selectedQuote.messageContext.propertyName}私人會所`}
-                        </p>
-                        {/* 「包棟報價單/訂房確認單」外面包一層 relative 容器
-                            （block 元素，佔滿整個標題區塊寬度）——報價日期/
-                            有效期限用 absolute + top:0/right:0 貼齊這個
-                            容器的右上角，「上緣」精準對齊這行文字本身
-                            （不管民宿名稱多長、標題整體變多高都不受
-                            影響），「右邊」貼齊標題區塊本身的右邊界，
-                            不會超出卡片範圍。這行文字繼續吃外層
-                            text-center，視覺上還是維持在整個標題區塊
-                            置中，不受旁邊這個絕對定位元素影響。 */}
-                        <div className="relative mt-1">
-                          <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
-                            {isConfirmed ? "訂房確認單" : "包棟報價單"}
-                          </p>
-                          {!isConfirmed && selectedQuoteCreatedAt && (
-                            <div
-                              className="absolute right-0 top-0 text-right text-[10px] leading-relaxed"
-                              style={{ color: colors.pineSoft }}
-                            >
-                              <p>報價日期：{formatSlashDate(selectedQuoteCreatedAt.slice(0, 10))}</p>
-                              <p>有效期限：{formatSlashDate(addDaysToIsoDate(selectedQuoteCreatedAt, QUOTE_VALIDITY_DAYS))}</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="px-6 py-5" style={{ color: colors.ink }}>
-                        <ReceiptSectionHeader icon="📅" title="預訂資訊" />
-                        <div className="flex flex-col gap-1.5 text-xs">
-                          <InfoRow label="入住日期" value={formatDateWithWeekday(selectedQuote.request.checkIn)} />
-                          <InfoRow label="退房日期" value={formatDateWithWeekday(selectedQuote.request.checkOut)} />
-                          <InfoRow label="預訂天數" value={daysNightsLabel(selectedQuote.nights)} />
-                          <InfoRow label="入住人數" value={guestSummary(selectedQuote)} />
-                          {roomAllocationSummaryItems(selectedQuote.roomAllocation).map((item, i) => (
-                            <InfoRow key={`room-${i}`} label={i === 0 ? "房型配置" : ""} value={item.text} />
-                          ))}
-                          {addOnSummaryItems(selectedQuote).map((item, i) => (
-                            <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
-                          ))}
-                        </div>
-
-                        <ReceiptSectionHeader icon="💰" title="費用明細" />
-                        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs" style={{ color: colors.muted }}>
-                          {accommodationDayGroups(selectedQuote).map((group, gi) => (
-                            <div key={`day-${gi}`} className="contents">
-                              {group.dateLabel && (
-                                <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
-                                  {group.dateLabel}
-                                </p>
-                              )}
-                              {group.items.map((item, i) => (
-                                <div key={i} className="contents">
-                                  <span className={group.dateLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
-                                  <span className="text-right tabular-nums">
-                                    NT${item.unitPrice.toLocaleString()}×{item.qty}
-                                  </span>
-                                  <span>=</span>
-                                  <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
-                                </div>
-                              ))}
-                            </div>
-                          ))}
-                          {addOnFeeBreakdown(selectedQuote).map((item, i) => (
-                            <div key={`fee-${i}`} className="contents">
-                              <span>{item.label}</span>
-                              <span />
-                              <span />
-                              <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
-                            </div>
-                          ))}
-                          {selectedQuote.discountAmount > 0 && (
-                            <div className="contents">
-                              <span>優惠折扣</span>
-                              <span />
-                              <span />
-                              <span className="text-right tabular-nums">－NT${selectedQuote.discountAmount.toLocaleString()}</span>
-                            </div>
-                          )}
-                          {selectedQuote.invoiceTaxAmount > 0 && (
-                            <div className="contents">
-                              <span>發票稅金(8%)</span>
-                              <span />
-                              <span />
-                              <span className="text-right tabular-nums">NT${selectedQuote.invoiceTaxAmount.toLocaleString()}</span>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
-                          <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                            包棟總費用
-                          </p>
-                          <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
-                            NT$ {selectedQuote.packageTotal.toLocaleString()}
-                          </p>
-                          <div className="mt-3 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
-                            <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                              訂金
-                            </span>
-                            <span style={{ color: colors.ink }} className="text-sm font-semibold">
-                              NT$ {selectedQuote.deposit.toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="mt-1 flex items-baseline justify-between">
-                            <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                              尾款(入住前 1 週匯款)
-                            </span>
-                            <span style={{ color: colors.ink }} className="text-sm font-semibold">
-                              NT$ {selectedQuote.balanceDue.toLocaleString()}
-                            </span>
-                          </div>
-                        </div>
-
-                        {selectedQuote.messageContext.bank && (
-                          <>
-                            <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
-                            <div className="flex flex-col gap-2 text-base font-semibold">
-                              <InfoRow label="銀行" value={selectedQuote.messageContext.bank.name} />
-                              <InfoRow label="分行" value={selectedQuote.messageContext.bank.branch} />
-                              <InfoRow label="帳號" value={selectedQuote.messageContext.bank.accountNumber} />
-                              <InfoRow label="戶名" value={selectedQuote.messageContext.bank.accountName} />
-                            </div>
-                            <p className="mt-2 text-xs font-semibold leading-relaxed" style={{ color: colors.alert }}>
-                              ⚠️ {BANK_TRANSFER_NOTE}
-                            </p>
-                          </>
-                        )}
-
-                        <ReceiptSectionHeader icon="📝" title="預訂須知" />
-                        <div className="flex flex-col gap-3 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
-                          {baseGuestsReminderItems(selectedQuote).length > 0 && (
-                            <div>
-                              <p>
-                                {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
-                              </p>
-                              {baseGuestsReminderItems(selectedQuote).map((item, i) => (
-                                <p key={i}>
-                                  ・{item.label}({item.note})：{item.required} 人
-                                </p>
-                              ))}
-                              <p>{INFANT_NOTE}</p>
-                            </div>
-                          )}
-                          {BOOKING_POLICY_NOTES.map((note, i) => {
-                            const highlight = "入住前 30 天";
-                            const parts = note.split(highlight);
-                            return (
-                              <p key={i}>
-                                {BOOKING_POLICY_ICONS[i]}
-                                {parts.length === 2 ? (
-                                  <>
-                                    {parts[0]}
-                                    <strong style={{ color: colors.alert }}>{highlight}</strong>
-                                    {parts[1]}
-                                  </>
-                                ) : (
-                                  note
-                                )}
-                              </p>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
+                    <QuoteReceiptCard quote={selectedQuote} createdAt={selectedQuoteCreatedAt} isConfirmed={isConfirmed} />
 
                     {!isConfirmed && (
                       <button

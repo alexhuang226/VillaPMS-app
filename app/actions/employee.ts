@@ -7,7 +7,7 @@ export async function listAllEmployeesAction(): Promise<EmployeeDetail[]> {
   return listAllEmployees();
 }
 
-export async function createEmployeeAction(fields: EmployeeFields): Promise<void> {
+export async function createEmployeeAction(fields: EmployeeFields): Promise<string> {
   return createEmployee(fields);
 }
 

@@ -169,6 +169,8 @@ function EmployeeMultiSelect({
 export function MonthlySchedule({
   isHousekeepingStaff = false,
   currentEmployeeId = null,
+  isPropertyRestricted = false,
+  allowedPropertyIds = [],
   initialAssignments = null,
   initialCoverage = null,
   initialEmployees = null,
@@ -177,6 +179,11 @@ export function MonthlySchedule({
 }: {
   isHousekeepingStaff?: boolean;
   currentEmployeeId?: string | null;
+  /** 只負責部分民宿的職稱（清潔員/洗衣公司）——這個角色看到的月曆
+   * 大幅簡化，每天只顯示 allowedPropertyIds 裡的民宿有沒有退房，
+   * 不顯示客人資料、房務人員指派狀況、本月出勤統計等其他內容 */
+  isPropertyRestricted?: boolean;
+  allowedPropertyIds?: string[];
   /** 由 page.tsx（server component）先在伺服器端把「這個月」的排班
    * 資料查好，當初始 props 傳進來，避免點進頁面時還要等 client
    * component 掛載後才另外發請求查資料——理由跟 reservations-search.tsx
@@ -650,6 +657,87 @@ export function MonthlySchedule({
   })();
 
   const monthBounds = getMonthBounds();
+
+  // 清潔員/洗衣公司這類只負責部分民宿的角色，月曆畫面大幅簡化——
+  // 不顯示房務人員指派狀況、本月出勤統計等內容，每一天只標示自己
+  // 負責的民宿有沒有退房。獨立寫一個 return，理由跟
+  // today-schedule.tsx 的同一種處理一致。
+  if (isPropertyRestricted) {
+    return (
+      <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
+        <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
+          <Link href="/" className="text-xs" style={{ color: colors.blue }}>
+            ← 返回首頁
+          </Link>
+          <header className="mb-6 text-center">
+            <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
+              宜蘭・包棟民宿
+            </p>
+            <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
+              房務班表
+            </h1>
+          </header>
+
+          <div className="mb-2 flex items-center justify-between">
+            <button type="button" onClick={goToPrevMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+              ← 上個月
+            </button>
+            <p className={`${display.className} text-lg italic`}>
+              {year} 年 {month} 月
+            </p>
+            <button type="button" onClick={goToNextMonth} className="px-3 py-1 text-sm" style={{ color: colors.blue }}>
+              下個月 →
+            </button>
+          </div>
+
+          {isLoading && (
+            <p className="text-center text-xs" style={{ color: colors.muted }}>
+              載入中…
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="text-center text-xs" style={{ color: colors.alert }}>
+              {error}
+            </p>
+          )}
+
+          <div className="mt-4 grid grid-cols-7 gap-1 text-center text-[11px]" style={{ color: colors.muted }}>
+            {WEEKDAY_HEADERS.map((w) => (
+              <div key={w}>{w}</div>
+            ))}
+          </div>
+          <div className="mt-1 grid grid-cols-7 gap-1">
+            {calendarCells.map((cell, i) => {
+              const dateStr = formatYMD(cell.year, cell.month, cell.day);
+              const myCoverageToday = coverage.filter((c) => c.checkOut === dateStr && allowedPropertyIds.includes(c.propertyId));
+              return (
+                <div
+                  key={i}
+                  className="flex flex-col items-center gap-0.5 border px-0.5 pb-1 pt-1 text-[9px] leading-tight"
+                  style={{
+                    borderColor: colors.line,
+                    color: cell.isCurrentMonth ? colors.ink : colors.muted,
+                    opacity: cell.isCurrentMonth ? 1 : 0.5,
+                  }}
+                >
+                  <span>{cell.day}</span>
+                  {myCoverageToday.map((c) => (
+                    <span key={c.propertyId} style={{ color: colors.pine }}>
+                      {PROPERTY_SHORT_LABELS[c.propertyCode] ?? c.propertyName}
+                    </span>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="mt-4 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+            日期是退房日（打掃整理是客人離開後才進行，準備給下一組客人）。有顯示民宿名稱的日期，代表當天有退房，請前往處理。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>

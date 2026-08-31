@@ -57,6 +57,11 @@ const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = [
   "/change-password",
   "/login",
 ];
+/** 處理垃圾的清潔員、來收備品的洗衣公司——只能看兩個班表頁面，跟
+ * 房務員的路徑限制範圍一樣，但畫面內容會被大幅簡化（見
+ * monthly-schedule.tsx/today-schedule.tsx 收到 isPropertyRestricted
+ * 之後的處理） */
+const PROPERTY_RESTRICTED_ALLOWED_PREFIXES = ["/schedule", "/change-password", "/login"];
 
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -110,15 +115,20 @@ export async function proxy(request: NextRequest) {
     try {
       const serviceClient = createServiceRoleClient();
       const { data: employeeRow } = await (serviceClient.from("employees") as any)
-        .select("id, position, short_name")
+        .select("id, position, short_name, employee_property_access(property_id)")
         .eq("user_id", user.id)
         .maybeSingle();
       const employeeId = (employeeRow?.id as string | undefined) ?? "";
       const position = (employeeRow?.position as string | undefined) ?? "";
       const shortName = (employeeRow?.short_name as string | undefined) ?? "";
+      const isPropertyRestricted = position === "清潔員" || position === "洗衣公司";
+      const allowedPropertyIds: string[] = isPropertyRestricted
+        ? ((employeeRow?.employee_property_access ?? []) as any[]).map((r) => r.property_id as string)
+        : [];
 
-      // 把查到的職稱/簡稱/員工id寫進 request header，往下傳給實際的頁面，
-      // 避免頁面自己再查一次——見上面檔案開頭的效能優化說明。
+      // 把查到的職稱/簡稱/員工id/可見民宿範圍寫進 request header，往下
+      // 傳給實際的頁面，避免頁面自己再查一次——見上面檔案開頭的效能
+      // 優化說明。
       // ⚠️ 這裡重建 supabaseResponse 時，要把「原本 supabaseResponse
       // 上可能已經有的 cookie」複製過去——上面 supabase.auth.getUser()
       // 如果剛好觸發 session token 刷新，會透過 setAll callback 把新
@@ -130,6 +140,7 @@ export async function proxy(request: NextRequest) {
       requestHeaders.set("x-employee-id", employeeId);
       requestHeaders.set("x-employee-position", position);
       requestHeaders.set("x-employee-short-name", shortName);
+      requestHeaders.set("x-employee-allowed-property-ids", allowedPropertyIds.join(","));
       const responseWithHeaders = NextResponse.next({ request: { headers: requestHeaders } });
       supabaseResponse.cookies.getAll().forEach((cookie) => {
         responseWithHeaders.cookies.set(cookie.name, cookie.value);
@@ -141,7 +152,9 @@ export async function proxy(request: NextRequest) {
           ? HOUSEKEEPING_STAFF_ALLOWED_PREFIXES
           : position === "管家"
             ? HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES
-            : null;
+            : isPropertyRestricted
+              ? PROPERTY_RESTRICTED_ALLOWED_PREFIXES
+              : null;
 
       if (allowedPrefixes) {
         const isRoot = pathname === "/";

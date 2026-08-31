@@ -13,7 +13,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { createEmployeeAction, createEmployeeLoginAccountAction, listAllEmployeesAction, updateEmployeeAction } from "@/app/actions/employee";
+import { getAllPropertiesSettingsAction } from "@/app/actions/property";
 import type { EmployeeDetail, EmployeeFields } from "@/lib/schedule/queries";
+import type { PropertySettingsDetail } from "@/lib/pricing/queries";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -52,7 +54,12 @@ const STATUS_LABEL: Record<string, string> = {
 
 /** 職稱固定選單，避免手動輸入出現各式各樣不一致的名稱（例如「房務」
  * 跟「房務員」意思一樣但打法不同，之後篩選/比對會漏掉） */
-const POSITION_OPTIONS = ["管理員", "房務員", "管家"];
+const POSITION_OPTIONS = ["管理員", "房務員", "管家", "清潔員", "洗衣公司"];
+
+/** 只負責部分民宿的職稱——這兩種選了以後，表單會多顯示「可見民宿
+ * 範圍」的複選框，理由見 lib/schedule/queries.ts
+ * PROPERTY_RESTRICTED_POSITIONS 的說明 */
+const PROPERTY_RESTRICTED_POSITIONS = ["清潔員", "洗衣公司"];
 
 const EMPTY_FIELDS: EmployeeFields = {
   name: "",
@@ -64,6 +71,7 @@ const EMPTY_FIELDS: EmployeeFields = {
   birthDate: "",
   hireDate: "",
   lineId: "",
+  allowedPropertyIds: [],
 };
 
 /** 表單裡都用空字串代表「沒填」，送出前轉成 null（跟資料庫的 nullable 欄位對應） */
@@ -78,6 +86,9 @@ function toNullableFields(fields: EmployeeFields): EmployeeFields {
     birthDate: fields.birthDate || null,
     hireDate: fields.hireDate || null,
     lineId: fields.lineId?.trim() || null,
+    // 職稱不是限定範圍的兩種角色，可見民宿範圍固定清空——避免萬一
+    // 表單狀態沒有正確重置，殘留舊職稱的勾選內容意外被送出
+    allowedPropertyIds: PROPERTY_RESTRICTED_POSITIONS.includes(fields.position?.trim() ?? "") ? fields.allowedPropertyIds : [],
   };
 }
 
@@ -92,6 +103,7 @@ function detailToFields(detail: EmployeeDetail): EmployeeFields {
     birthDate: detail.birthDate ?? "",
     hireDate: detail.hireDate ?? "",
     lineId: detail.lineId ?? "",
+    allowedPropertyIds: detail.allowedPropertyIds,
   };
 }
 
@@ -99,6 +111,8 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
   const [employees, setEmployees] = useState<EmployeeDetail[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** 只負責部分民宿的職稱要用到的民宿清單（可見民宿範圍複選框選項） */
+  const [properties, setProperties] = useState<PropertySettingsDetail[]>([]);
 
   // null = 列表檢視；"new" = 新增表單；其他字串 = 正在編輯這個 id 的員工
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
@@ -117,6 +131,13 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
 
   useEffect(() => {
     loadEmployees();
+    getAllPropertiesSettingsAction()
+      .then(setProperties)
+      .catch(() => {
+        // 民宿清單只是給複選框用，查詢失敗不影響員工列表主功能，
+        // 安靜失敗就好——最壞情況只是「清潔員/洗衣公司」這兩種職稱
+        // 暫時看不到可見民宿範圍的選項，不影響其他員工的管理功能
+      });
   }, []);
 
   async function loadEmployees() {
@@ -191,12 +212,24 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
     try {
       const payload = toNullableFields(fields);
       if (editingId === "new") {
-        await createEmployeeAction(payload);
+        const newId = await createEmployeeAction(payload);
+        await loadEmployees();
+        // 新增成功後不要直接關掉表單——直接切換成「編輯這個剛建立的
+        // 員工」，並且自動展開建立登入帳號的子表單，讓職員可以一口氣
+        // 把帳號也建好，不用先關掉表單、再重新點進列表找剛剛那筆員工
+        // 進去編輯。Email 欄位如果剛剛新增時有填，直接帶進去，省一次
+        // 輸入。
+        setEditingId(newId);
+        setShowLoginAccountForm(true);
+        setLoginEmail(payload.email ?? "");
+        setLoginPassword("");
+        setCreateAccountError(null);
+        setCreateAccountSuccess(false);
       } else if (editingId) {
         await updateEmployeeAction(editingId, payload);
+        setEditingId(null);
+        await loadEmployees();
       }
-      setEditingId(null);
-      await loadEmployees();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
     } finally {
@@ -413,6 +446,51 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
               </label>
             </div>
 
+            {/* 只有職稱是「清潔員」「洗衣公司」才顯示——這兩種角色不是
+                每天被排到哪間就處理哪間，是固定只負責某幾間民宿，需要
+                另外設定可以看到哪些民宿 */}
+            {PROPERTY_RESTRICTED_POSITIONS.includes(fields.position?.trim() ?? "") && (
+              <div className="flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  可見民宿範圍（本日班表/房務班表只會顯示這幾間）
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {properties.map((p) => {
+                    const checked = fields.allowedPropertyIds.includes(p.propertyId);
+                    return (
+                      <label
+                        key={p.propertyId}
+                        className="flex cursor-pointer items-center gap-1.5 border px-3 py-1.5 text-xs"
+                        style={
+                          checked
+                            ? { borderColor: colors.pine, backgroundColor: colors.pineSoft, color: colors.pine }
+                            : { borderColor: colors.line, color: colors.ink }
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...fields.allowedPropertyIds, p.propertyId]
+                              : fields.allowedPropertyIds.filter((id) => id !== p.propertyId);
+                            updateField("allowedPropertyIds", next);
+                          }}
+                          className="sr-only"
+                        />
+                        {p.name}
+                      </label>
+                    );
+                  })}
+                </div>
+                {properties.length > 0 && fields.allowedPropertyIds.length === 0 && (
+                  <p className="text-[11px]" style={{ color: colors.alert }}>
+                    請至少勾選一間民宿，不然這個人登入後會什麼都看不到
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
                 <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
@@ -480,10 +558,12 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
               </label>
             </div>
 
-            {/* 登入帳號——只有編輯已存在的員工才會出現（新增中的員工
-                還沒有 id）。這是第一階段權限控管的一部分：能不能登入
-                跟登入後有什麼權限是兩回事，目前所有登入的人權限都
-                一樣，還沒做角色區分。 */}
+            {/* 登入帳號——新增員工存檔成功後會自動切換成編輯模式並展開
+                這個子表單（見 handleSubmit 的說明），讓職員可以一口氣
+                把帳號也建好，不用先儲存、再重新點進列表找剛剛那筆
+                員工進去編輯。這是第一階段權限控管的一部分：能不能
+                登入跟登入後有什麼權限是兩回事，目前所有登入的人權限
+                都一樣，還沒做角色區分。 */}
             {editingEmployee && (
               <div className="border-t pt-3" style={{ borderColor: colors.line }}>
                 <p className="text-[11px] font-bold" style={{ color: colors.ink }}>

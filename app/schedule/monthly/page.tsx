@@ -39,18 +39,21 @@ export default async function MonthlySchedulePage() {
   // 跟訂單管理頁面同一種優化：伺服器端先把「這個月月曆格子」實際
   // 涵蓋範圍（含跨月補的天數）的排班資料查好，跟角色查詢平行進行，
   // 一起當初始資料傳給 client component，避免點進頁面時的空白等待。
-  const [{ id, position }, assignments, coverage, employees] = await Promise.all([
+  const [{ id, position, allowedPropertyIds }, assignments, coverage, employees] = await Promise.all([
     getCurrentEmployeeInfo(),
     listStaffAssignmentsForRangeAction(startDate, endDateExclusive),
     getCheckOutCoverageForRangeAction(startDate, endDateExclusive),
     listActiveEmployeesAction(),
   ]);
   const isHousekeepingStaff = position === "房務員";
+  const isPropertyRestricted = position === "清潔員" || position === "洗衣公司";
 
   return (
     <MonthlySchedule
       isHousekeepingStaff={isHousekeepingStaff}
       currentEmployeeId={id}
+      isPropertyRestricted={isPropertyRestricted}
+      allowedPropertyIds={allowedPropertyIds}
       initialAssignments={assignments}
       initialCoverage={coverage}
       initialEmployees={employees}

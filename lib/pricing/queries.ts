@@ -413,6 +413,26 @@ export async function getQuoteCheckInDatesInRange(startDate: string, endDateExcl
   return Array.from(new Set(((data ?? []) as any[]).map((row) => row.check_in as string)));
 }
 
+/**
+ * 刪除單一一張報價單——用於「報價記錄查詢」頁面，職員手動清掉重複/
+ * 過時的個別報價（例如同一組客人因為調整需求，前後產生了好幾張
+ * 報價，只想留最後定案的那張）。
+ *
+ * 不管報價單狀態是什麼都能刪，包含已確認訂房(accepted)的——
+ * reservations.source_quote_id 參照到報價單，刪除時會自動變成
+ * null（不會連 reservations 一起砍掉），已確認訂房的正式記錄本身
+ * 不受影響，只是往回追溯到原始報價單的關聯會斷掉。是否要提醒
+ * 使用者這一點，由呼叫端（quotes-search.tsx）決定要不要在刪除前
+ * 顯示額外警示文字。
+ */
+export async function deleteQuote(quoteId: string): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const { error } = await supabase.from("quotes").delete().eq("id", quoteId);
+  if (error) {
+    throw new Error(`刪除報價單失敗：${error.message}`);
+  }
+}
+
 export async function listRecentQuotes(params?: { search?: string; checkInDate?: string }): Promise<QuoteSummary[]> {
   const supabase = createServiceRoleClient();
 

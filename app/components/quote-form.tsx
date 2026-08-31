@@ -627,7 +627,7 @@ export function QuoteForm() {
         .qf-root .qf-input:focus { border-color: ${colors.pine} !important; }
       `}</style>
 
-      <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
+      <div className="w-full" style={{ maxWidth: "30rem", color: colors.ink }}>
         <Link href="/" className="text-xs" style={{ color: colors.blue }}>
           ← 返回首頁
         </Link>
@@ -849,29 +849,32 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-6 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
                     PROPERTY_OPTIONS.find((opt) => opt.value === quote.request.propertyCode)?.label
                   }私人會所`}
                 </p>
-                {/* 「包棟報價單」外面包一層 relative 容器（block 元素，
-                    佔滿整個標題區塊寬度）——報價日期/有效期限用
-                    absolute + top:0/right:0 貼齊這個容器的右上角，
-                    「上緣」精準對齊「包棟報價單」文字本身（不管民宿
-                    名稱多長、標題整體變多高都不受影響），「右邊」貼
-                    齊標題區塊本身的右邊界，不會超出卡片範圍。
-                    「包棟報價單」文字繼續吃外層 text-center，視覺上
-                    還是維持在整個標題區塊置中，不受旁邊這個絕對定位
-                    元素影響。 */}
-                <div className="relative mt-1">
+                {/* 「包棟報價單」外面包一層 relative 容器——報價日期/
+                    有效期限用 absolute + top:50%/translateY(-50%) 對齊
+                    這個容器的垂直中心。
+                    ⚠️ 這裡的 min-height 很關鍵：absolute 定位的子元素
+                    不會影響父層的高度計算，如果只給父層一行文字的
+                    自然高度，兩行的日期資訊會超出父層範圍，變成疊到
+                    父層外面——如果父層外面剛好是標題區塊自己的下邊界
+                    以外，日期資訊就會跑到深綠色背景外面、疊在下面
+                    米色的內容區塊上，變得幾乎看不見（之前發生過的
+                    「有效期限看不到」就是這樣來的）。這裡明確給
+                    min-height，確保父層的高度一定容得下兩行文字，
+                    不管視覺上「包棟報價單」本身多高。 */}
+                <div className="relative mt-1" style={{ minHeight: "24px" }}>
                   <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
                     包棟報價單
                   </p>
                   <div
-                    className="absolute right-0 top-0 text-right text-[10px] leading-relaxed"
-                    style={{ color: colors.pineSoft }}
+                    className="absolute right-0 top-1/2 text-right text-[8px] leading-tight"
+                    style={{ color: colors.pineSoft, transform: "translateY(-50%)" }}
                   >
                     <p>報價日期：{formatSlashDate(todayYMD())}</p>
                     <p>有效期限：{formatSlashDate(addDaysToYMD(todayYMD(), QUOTE_VALIDITY_DAYS))}</p>
@@ -879,8 +882,11 @@ export function QuoteForm() {
                 </div>
               </div>
 
-              {/* 內容區：明確給 padding，轉圖片時這個縮排會一起被截進去 */}
-              <div className="px-6 py-5" style={{ color: colors.ink }}>
+              {/* 內容區：明確給 padding，轉圖片時這個縮排會一起被截進去。
+                  上方 padding 特意比其他方向小很多——上面接的是深色
+                  標題區塊，已經有自己的 py-6，兩個 padding 疊加會讓
+                  「預訂資訊」上方空白感覺太大 */}
+              <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
                 <ReceiptSectionHeader icon="📅" title="預訂資訊" />
                 <div className="flex flex-col gap-1.5 text-xs">
                   <InfoRow label="入住日期" value={formatDateWithWeekday(quote.request.checkIn)} />
@@ -978,11 +984,11 @@ export function QuoteForm() {
                   </div>
                 </div>
 
-                {/* 匯款帳號：文字加大加粗，label/value 靠近一點方便逐行核對 */}
+                {/* 匯款帳號：label/value 靠近一點方便逐行核對 */}
                 {quote.messageContext?.bank && (
                   <>
                     <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
-                    <div className="flex flex-col gap-2 text-base font-semibold">
+                    <div className="flex flex-col gap-2 text-sm font-semibold">
                       <InfoRow label="銀行" value={quote.messageContext.bank.name} />
                       <InfoRow label="分行" value={quote.messageContext.bank.branch} />
                       <InfoRow label="帳號" value={quote.messageContext.bank.accountNumber} />

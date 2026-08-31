@@ -78,13 +78,24 @@ interface AssignmentWithPrep {
 export function TodaySchedule({
   isHousekeepingStaff = false,
   currentEmployeeId = null,
+  isPropertyRestricted = false,
+  allowedPropertyIds = [],
 }: {
   isHousekeepingStaff?: boolean;
   currentEmployeeId?: string | null;
+  /** 只負責部分民宿的職稱（清潔員/洗衣公司）——這個角色看到的畫面
+   * 大幅簡化，只顯示 allowedPropertyIds 裡的民宿今天有沒有退房，
+   * 不顯示客人資料、房務人員指派狀況等其他內容 */
+  isPropertyRestricted?: boolean;
+  allowedPropertyIds?: string[];
 }) {
   const [today, setToday] = useState<string>("");
   const [rows, setRows] = useState<AssignmentWithPrep[] | null>(null);
   const [unassigned, setUnassigned] = useState<CheckOutCoverage[]>([]);
+  /** 今天全部的退房民宿（不分有沒有指派房務人員）——只有
+   * isPropertyRestricted 那種簡化畫面會用到，一般畫面用 rows/unassigned
+   * 分開處理已指派/未指派兩種狀態，不需要這個 */
+  const [todayCoverage, setTodayCoverage] = useState<CheckOutCoverage[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +136,7 @@ export function TodaySchedule({
         : withPrep;
       setRows(ownRows);
       setUnassigned(isHousekeepingStaff ? [] : coverage.filter((c) => c.checkOut === todayStr && !c.hasAssignment));
+      setTodayCoverage(coverage.filter((c) => c.checkOut === todayStr));
       setEmployees(employeeList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "讀取失敗，請稍後再試");
@@ -196,6 +208,70 @@ export function TodaySchedule({
     // 有指定民宿的排前面，不指定的排最後
     return groups.sort((a, b) => (a.propertyId === null ? 1 : b.propertyId === null ? -1 : 0));
   })();
+
+  // 清潔員/洗衣公司這類只負責部分民宿的角色，畫面完全不一樣、也
+  // 簡單很多——不顯示客人資料、房務人員指派狀況、加購項目等內容，
+  // 只列出自己負責的民宿裡，今天有沒有退房需要處理。獨立寫一個
+  // return，不跟下面一般畫面的大段 JSX 混在一起，避免兩種完全不同
+  // 用途的畫面共用同一段容易改壞、也難以確認「這段內容這個角色
+  // 到底看不看得到」。
+  if (isPropertyRestricted) {
+    const myProperties = todayCoverage.filter((c) => allowedPropertyIds.includes(c.propertyId));
+    return (
+      <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
+        <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
+          <header className="mb-6 text-center">
+            <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
+              宜蘭・包棟民宿
+            </p>
+            <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
+              本日班表
+            </h1>
+            {today && (
+              <p className="mt-2 text-xs" style={{ color: colors.muted }}>
+                {formatDateWithWeekday(today)}
+              </p>
+            )}
+          </header>
+
+          {isLoading && (
+            <p className="text-center text-xs" style={{ color: colors.muted }}>
+              載入中…
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="text-center text-xs" style={{ color: colors.alert }}>
+              {error}
+            </p>
+          )}
+
+          {!isLoading && !error && (
+            <>
+              {myProperties.length === 0 ? (
+                <p className="text-center text-xs leading-relaxed" style={{ color: colors.muted }}>
+                  今天沒有需要處理的民宿。
+                </p>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {myProperties.map((c) => (
+                    <div key={c.propertyId} className="border p-4" style={{ borderColor: colors.line }}>
+                      <p className={`${display.className} text-xl italic`} style={{ color: colors.ink }}>
+                        {c.propertyName}
+                      </p>
+                      <p className="mt-1 text-xs" style={{ color: colors.pine }}>
+                        ✓ 今天有退房，請前往處理
+                        {c.hasBbq ? "（有加烤肉，垃圾量會比較多）" : ""}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>

@@ -79,6 +79,10 @@ export interface CurrentEmployeeInfo {
   id: string | null;
   position: string | null;
   shortName: string | null;
+  /** 只有職稱是「清潔員」「洗衣公司」才會有內容——這個員工可以看到
+   * 哪些民宿，見 lib/schedule/queries.ts PROPERTY_RESTRICTED_POSITIONS
+   * 的說明。其他職稱固定是空陣列（代表不限制） */
+  allowedPropertyIds: string[];
 }
 
 export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
@@ -86,8 +90,14 @@ export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
   const headerPosition = headerStore.get("x-employee-position");
   const headerShortName = headerStore.get("x-employee-short-name");
   const headerId = headerStore.get("x-employee-id");
+  const headerAllowedPropertyIds = headerStore.get("x-employee-allowed-property-ids");
   if (headerPosition !== null) {
-    return { id: headerId || null, position: headerPosition || null, shortName: headerShortName || null };
+    return {
+      id: headerId || null,
+      position: headerPosition || null,
+      shortName: headerShortName || null,
+      allowedPropertyIds: headerAllowedPropertyIds ? headerAllowedPropertyIds.split(",").filter(Boolean) : [],
+    };
   }
 
   return getCurrentEmployeeInfoUncached();
@@ -96,7 +106,7 @@ export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
 async function getCurrentEmployeeInfoUncached(): Promise<CurrentEmployeeInfo> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) return { id: null, position: null, shortName: null };
+  if (!url || !anonKey) return { id: null, position: null, shortName: null, allowedPropertyIds: [] };
 
   try {
     const cookieStore = await cookies();
@@ -114,19 +124,20 @@ async function getCurrentEmployeeInfoUncached(): Promise<CurrentEmployeeInfo> {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return { id: null, position: null, shortName: null };
+    if (!user) return { id: null, position: null, shortName: null, allowedPropertyIds: [] };
 
     const serviceClient = createServiceRoleClient();
     const { data } = await (serviceClient.from("employees") as any)
-      .select("id, position, short_name")
+      .select("id, position, short_name, employee_property_access(property_id)")
       .eq("user_id", user.id)
       .maybeSingle();
     return {
       id: (data?.id as string) ?? null,
       position: (data?.position as string) ?? null,
       shortName: (data?.short_name as string) ?? null,
+      allowedPropertyIds: ((data?.employee_property_access ?? []) as any[]).map((r) => r.property_id as string),
     };
   } catch {
-    return { id: null, position: null, shortName: null };
+    return { id: null, position: null, shortName: null, allowedPropertyIds: [] };
   }
 }

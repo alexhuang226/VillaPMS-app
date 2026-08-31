@@ -19,6 +19,26 @@ export interface Employee {
 /** 房務排班用的員工職稱：只有這兩種才會出現在排班表單的選單裡 */
 const HOUSEKEEPING_POSITIONS = ["管家", "房務員"];
 
+/**
+ * 只負責部分民宿的職稱——處理垃圾的清潔員、來收備品的洗衣公司。
+ * 這兩種角色登入後，本日班表／房務班表只會看到自己被指定負責的
+ * 民宿，而且畫面內容會大幅簡化（不顯示客人資料、其他人員的班表、
+ * 金額等資訊，只顯示「這間民宿今天有沒有退房，需不需要去處理」）。
+ */
+export const PROPERTY_RESTRICTED_POSITIONS = ["清潔員", "洗衣公司"];
+
+/** 查單一員工可以看到哪些民宿——proxy.ts／lib/auth/current-employee.ts
+ * 判斷角色權限時用，只有職稱是 PROPERTY_RESTRICTED_POSITIONS 才需要
+ * 查這個，其他職稱不受限制，不用查也沒意義 */
+export async function getEmployeeAllowedPropertyIds(employeeId: string): Promise<string[]> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase.from("employee_property_access").select("property_id").eq("employee_id", employeeId);
+  if (error) {
+    throw new Error(`查詢可見民宿範圍失敗：${error.message}`);
+  }
+  return ((data ?? []) as any[]).map((row) => row.property_id as string);
+}
+
 /** 員工列表，給排班表單的下拉選單用，只顯示在職、職稱是管家或房務員的員工 */
 export async function listActiveEmployees(): Promise<Employee[]> {
   const supabase = createServiceRoleClient();
@@ -52,10 +72,14 @@ export interface EmployeeDetail {
   lineId: string | null;
   /** 有沒有連結登入帳號（employees.user_id 是否有值） */
   hasLoginAccount: boolean;
+  /** 這個員工可以看到哪些民宿——只有「清潔員」「洗衣公司」這類只
+   * 負責部分民宿的職稱才需要限制，管理員/管家/房務員這個陣列固定
+   * 是空的（代表不限制，畫面上照舊看得到全部） */
+  allowedPropertyIds: string[];
 }
 
 const EMPLOYEE_SELECT =
-  "id, name, short_name, phone, email, position, employment_status, birth_date, hire_date, line_id, user_id";
+  "id, name, short_name, phone, email, position, employment_status, birth_date, hire_date, line_id, user_id, employee_property_access(property_id)";
 
 function mapEmployeeRow(row: any): EmployeeDetail {
   return {
@@ -70,6 +94,7 @@ function mapEmployeeRow(row: any): EmployeeDetail {
     hireDate: (row.hire_date as string) ?? null,
     lineId: (row.line_id as string) ?? null,
     hasLoginAccount: Boolean(row.user_id),
+    allowedPropertyIds: ((row.employee_property_access ?? []) as any[]).map((r) => r.property_id as string),
   };
 }
 
@@ -97,26 +122,54 @@ export interface EmployeeFields {
   birthDate: string | null;
   hireDate: string | null;
   lineId: string | null;
+  /** 見 EmployeeDetail.allowedPropertyIds 的說明。只有職稱是「清潔員」
+   * 「洗衣公司」才需要填，其他職稱傳空陣列即可（代表不限制） */
+  allowedPropertyIds: string[];
 }
 
-export async function createEmployee(fields: EmployeeFields): Promise<void> {
+/** 覆寫這個員工的可見民宿範圍——先刪掉舊的，再整批寫入新的，跟
+ * lib/pricing/queries.ts updateReservation() 處理加購項目用的是同一種
+ * 「先清空、再整批寫入」模式，不用逐筆比對哪些增加/刪除 */
+async function replaceEmployeePropertyAccess(supabase: ReturnType<typeof createServiceRoleClient>, employeeId: string, propertyIds: string[]): Promise<void> {
+  const { error: deleteError } = await supabase.from("employee_property_access").delete().eq("employee_id", employeeId);
+  if (deleteError) {
+    throw new Error(`更新可見民宿範圍失敗：${deleteError.message}`);
+  }
+  if (propertyIds.length > 0) {
+    const rows = propertyIds.map((propertyId) => ({ employee_id: employeeId, property_id: propertyId }));
+    const { error: insertError } = await (supabase.from("employee_property_access") as any).insert(rows);
+    if (insertError) {
+      throw new Error(`更新可見民宿範圍失敗：${insertError.message}`);
+    }
+  }
+}
+
+/** 回傳新增員工的 id——新增員工表單存檔後，要馬上讓職員接著建立
+ * 登入帳號（不用先關掉表單、再重新點進編輯畫面），建立登入帳號的
+ * action 需要用到這個 id 把 auth 帳號連結到正確的員工資料。 */
+export async function createEmployee(fields: EmployeeFields): Promise<string> {
   const supabase = createServiceRoleClient();
   const organizationId = await getSingleOrganizationId();
-  const { error } = await (supabase.from("employees") as any).insert({
-    organization_id: organizationId,
-    name: fields.name,
-    short_name: fields.shortName,
-    phone: fields.phone,
-    email: fields.email,
-    position: fields.position,
-    employment_status: fields.employmentStatus,
-    birth_date: fields.birthDate,
-    hire_date: fields.hireDate,
-    line_id: fields.lineId,
-  });
+  const { data, error } = await (supabase.from("employees") as any)
+    .insert({
+      organization_id: organizationId,
+      name: fields.name,
+      short_name: fields.shortName,
+      phone: fields.phone,
+      email: fields.email,
+      position: fields.position,
+      employment_status: fields.employmentStatus,
+      birth_date: fields.birthDate,
+      hire_date: fields.hireDate,
+      line_id: fields.lineId,
+    })
+    .select("id")
+    .single();
   if (error) {
     throw new Error(`新增員工失敗：${error.message}`);
   }
+  await replaceEmployeePropertyAccess(supabase, data.id as string, fields.allowedPropertyIds);
+  return data.id as string;
 }
 
 export async function updateEmployee(id: string, fields: EmployeeFields): Promise<void> {
@@ -137,6 +190,7 @@ export async function updateEmployee(id: string, fields: EmployeeFields): Promis
   if (error) {
     throw new Error(`更新員工資料失敗：${error.message}`);
   }
+  await replaceEmployeePropertyAccess(supabase, id, fields.allowedPropertyIds);
 }
 
 export interface StaffAssignment {

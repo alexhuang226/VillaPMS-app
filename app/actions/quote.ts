@@ -43,6 +43,7 @@ import {
   getReservationNoByQuoteId,
   getReservationByQuoteId,
   getSingleOrganizationId,
+  deleteQuote,
   getQuoteCheckInDatesInRange,
   listRecentQuotes,
 } from "@/lib/pricing/queries";
@@ -205,6 +206,22 @@ export async function searchQuotesAction(params?: { search?: string; checkInDate
  * lib/pricing/queries.ts getQuoteCheckInDatesInRange 的說明 */
 export async function getQuoteCheckInDatesInRangeAction(startDate: string, endDateExclusive: string): Promise<string[]> {
   return getQuoteCheckInDatesInRange(startDate, endDateExclusive);
+}
+
+/**
+ * 刪除單一報價單——回傳值刻意用「結果物件」不是 throw，理由見上面
+ * ConfirmReservationResult 的說明（Next.js 正式環境下 Server Action
+ * 用 throw 拋出的錯誤訊息會被抹除）。
+ */
+export type DeleteQuoteResult = { success: true } | { success: false; message: string };
+
+export async function deleteQuoteAction(quoteId: string): Promise<DeleteQuoteResult> {
+  try {
+    await deleteQuote(quoteId);
+    return { success: true };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : "刪除失敗，請稍後再試" };
+  }
 }
 
 /**
