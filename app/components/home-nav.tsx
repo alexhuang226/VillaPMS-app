@@ -44,6 +44,9 @@ interface NavItem {
    * HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES 保持一致——否則管家會看到
    * 點下去就被導回本日班表的無效選項 */
   housekeepingManagerVisible?: boolean;
+  /** 清潔員/洗衣公司登入後只看得到標記這個的項目，範圍要跟 proxy.ts
+   * 的 PROPERTY_RESTRICTED_ALLOWED_PREFIXES 保持一致 */
+  propertyRestrictedVisible?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -64,6 +67,7 @@ const NAV_ITEMS: NavItem[] = [
     description: "今天上班名單與房務準備內容",
     housekeepingVisible: true,
     housekeepingManagerVisible: true,
+    propertyRestrictedVisible: true,
   },
   {
     href: "/schedule/monthly",
@@ -72,6 +76,7 @@ const NAV_ITEMS: NavItem[] = [
     description: "月曆檢視、指派房務人員，退房訂單缺人會警示",
     housekeepingVisible: true,
     housekeepingManagerVisible: true,
+    propertyRestrictedVisible: true,
   },
   {
     href: "/employees",
@@ -94,17 +99,21 @@ const NAV_ITEMS: NavItem[] = [
 export function HomeNav({
   isHousekeepingStaff = false,
   isHousekeepingManager = false,
+  isPropertyRestricted = false,
   currentUserShortName = null,
 }: {
   isHousekeepingStaff?: boolean;
   isHousekeepingManager?: boolean;
+  isPropertyRestricted?: boolean;
   currentUserShortName?: string | null;
 }) {
   const visibleItems = isHousekeepingStaff
     ? NAV_ITEMS.filter((item) => item.housekeepingVisible)
     : isHousekeepingManager
       ? NAV_ITEMS.filter((item) => item.housekeepingManagerVisible)
-      : NAV_ITEMS;
+      : isPropertyRestricted
+        ? NAV_ITEMS.filter((item) => item.propertyRestrictedVisible)
+        : NAV_ITEMS;
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>

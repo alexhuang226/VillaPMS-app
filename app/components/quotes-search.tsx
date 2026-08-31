@@ -181,7 +181,7 @@ function ConfirmationImageCard({
 }: {
   detail: ReservationDetail;
   quote: PackageQuote | null;
-  cardRef: RefObject<HTMLDivElement>;
+  cardRef: RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div style={{ height: 0, overflow: "hidden" }}>
@@ -298,7 +298,7 @@ function QuoteReceiptCard({
   quote: PackageQuote;
   createdAt: string | null;
   isConfirmed: boolean;
-  cardRef?: RefObject<HTMLDivElement>;
+  cardRef?: RefObject<HTMLDivElement | null>;
 }) {
   if (!quote.messageContext || !quote.roomAllocation) return null;
   return (
