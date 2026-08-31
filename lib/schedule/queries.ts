@@ -500,3 +500,32 @@ export async function createEmployeeLoginAccount(employeeId: string, email: stri
     throw new Error(`帳號建立成功，但連結員工資料失敗：${updateError.message}`);
   }
 }
+
+/**
+ * 重設員工登入密碼——員工忘記密碼時，由管理者（能進到員工管理頁面
+ * 的人）直接重設，不透過寄信驗證的「忘記密碼」流程。這是小團隊
+ * 內部系統刻意選擇的簡化做法：設定寄信服務（SMTP）對這個規模的
+ * 工具來說是不必要的額外複雜度，管理者本來就負責建立/管理員工的
+ * 登入帳號，直接重設密碼是同一個信任層級內的操作。
+ */
+export async function resetEmployeePassword(employeeId: string, newPassword: string): Promise<void> {
+  const supabase = createServiceRoleClient();
+
+  const { data: employeeRow, error: fetchError } = await supabase
+    .from("employees")
+    .select("user_id")
+    .eq("id", employeeId)
+    .maybeSingle();
+  if (fetchError) {
+    throw new Error(`查詢員工資料失敗：${fetchError.message}`);
+  }
+  const userId = (employeeRow as any)?.user_id as string | undefined;
+  if (!userId) {
+    throw new Error("這個員工還沒有登入帳號，沒有密碼可以重設");
+  }
+
+  const { error: updateError } = await supabase.auth.admin.updateUserById(userId, { password: newPassword });
+  if (updateError) {
+    throw new Error(`重設密碼失敗：${updateError.message}`);
+  }
+}

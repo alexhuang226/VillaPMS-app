@@ -12,7 +12,13 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { createEmployeeAction, createEmployeeLoginAccountAction, listAllEmployeesAction, updateEmployeeAction } from "@/app/actions/employee";
+import {
+  createEmployeeAction,
+  createEmployeeLoginAccountAction,
+  listAllEmployeesAction,
+  resetEmployeePasswordAction,
+  updateEmployeeAction,
+} from "@/app/actions/employee";
 import { getAllPropertiesSettingsAction } from "@/app/actions/property";
 import type { EmployeeDetail, EmployeeFields } from "@/lib/schedule/queries";
 import type { PropertySettingsDetail } from "@/lib/pricing/queries";
@@ -129,6 +135,13 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
   const [createAccountError, setCreateAccountError] = useState<string | null>(null);
   const [createAccountSuccess, setCreateAccountSuccess] = useState(false);
 
+  // 重設密碼——員工忘記密碼時，管理者直接重設，不透過寄信驗證流程
+  const [showResetPasswordForm, setShowResetPasswordForm] = useState(false);
+  const [resetPassword, setResetPassword] = useState("");
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [resetPasswordError, setResetPasswordError] = useState<string | null>(null);
+  const [resetPasswordSuccess, setResetPasswordSuccess] = useState(false);
+
   useEffect(() => {
     loadEmployees();
     getAllPropertiesSettingsAction()
@@ -169,6 +182,10 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
     setLoginPassword("");
     setCreateAccountError(null);
     setCreateAccountSuccess(false);
+    setShowResetPasswordForm(false);
+    setResetPassword("");
+    setResetPasswordError(null);
+    setResetPasswordSuccess(false);
   }
 
   function cancelEdit() {
@@ -193,6 +210,33 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
       setCreateAccountError(err instanceof Error ? err.message : "建立帳號失敗，請稍後再試");
     } finally {
       setIsCreatingAccount(false);
+    }
+  }
+
+  /** 重設員工登入密碼——員工忘記密碼時，管理者直接重設新密碼給他，
+   * 不透過寄信驗證的「忘記密碼」流程（這個規模的內部工具不需要額外
+   * 設定寄信服務） */
+  async function handleResetPassword() {
+    if (editingId === "new" || !editingId) return;
+    if (!resetPassword.trim()) {
+      setResetPasswordError("請填寫新密碼");
+      return;
+    }
+    setIsResettingPassword(true);
+    setResetPasswordError(null);
+    try {
+      const result = await resetEmployeePasswordAction(editingId, resetPassword);
+      if (!result.success) {
+        setResetPasswordError(result.message);
+        return;
+      }
+      setResetPasswordSuccess(true);
+      setShowResetPasswordForm(false);
+      setResetPassword("");
+    } catch (err) {
+      setResetPasswordError(err instanceof Error ? err.message : "重設密碼失敗，請稍後再試");
+    } finally {
+      setIsResettingPassword(false);
     }
   }
 
@@ -225,6 +269,10 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
         setLoginPassword("");
         setCreateAccountError(null);
         setCreateAccountSuccess(false);
+        setShowResetPasswordForm(false);
+        setResetPassword("");
+        setResetPasswordError(null);
+        setResetPasswordSuccess(false);
       } else if (editingId) {
         await updateEmployeeAction(editingId, payload);
         setEditingId(null);
@@ -570,9 +618,69 @@ export function EmployeeManager({ isHousekeepingManager = false }: { isHousekeep
                   登入帳號
                 </p>
                 {editingEmployee.hasLoginAccount ? (
-                  <p className="mt-1 text-xs" style={{ color: colors.pine }}>
-                    ✓ 已有登入帳號
-                  </p>
+                  <div className="mt-1">
+                    <p className="text-xs" style={{ color: colors.pine }}>
+                      ✓ 已有登入帳號
+                    </p>
+                    {resetPasswordSuccess ? (
+                      <p className="mt-1 text-xs" style={{ color: colors.pine }}>
+                        ✓ 密碼已重設
+                      </p>
+                    ) : showResetPasswordForm ? (
+                      <div className="mt-2 flex flex-col gap-2">
+                        <label className="flex flex-col gap-1">
+                          <span style={{ color: colors.muted }} className="text-[11px]">
+                            新密碼
+                          </span>
+                          <input
+                            type="password"
+                            value={resetPassword}
+                            onChange={(e) => setResetPassword(e.target.value)}
+                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          />
+                        </label>
+                        {resetPasswordError && (
+                          <p role="alert" className="text-[11px]" style={{ color: colors.alert }}>
+                            {resetPasswordError}
+                          </p>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowResetPasswordForm(false);
+                              setResetPassword("");
+                              setResetPasswordError(null);
+                            }}
+                            disabled={isResettingPassword}
+                            className="border px-3 py-1.5 text-xs disabled:opacity-50"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleResetPassword}
+                            disabled={isResettingPassword}
+                            className="px-3 py-1.5 text-xs disabled:opacity-50"
+                            style={{ backgroundColor: colors.pine, color: "#FFFFFF" }}
+                          >
+                            {isResettingPassword ? "重設中…" : "確定重設"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowResetPasswordForm(true)}
+                        className="mt-1 text-xs"
+                        style={{ color: colors.blue }}
+                      >
+                        忘記密碼？重設密碼
+                      </button>
+                    )}
+                  </div>
                 ) : createAccountSuccess ? (
                   <p className="mt-1 text-xs" style={{ color: colors.pine }}>
                     ✓ 已建立登入帳號
