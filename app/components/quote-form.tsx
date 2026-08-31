@@ -849,7 +849,7 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-10 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
