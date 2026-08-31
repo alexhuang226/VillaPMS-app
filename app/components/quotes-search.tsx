@@ -322,7 +322,7 @@ function QuoteReceiptCard({
   return (
     <>
                     <div ref={cardRef} className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="relative px-6 pb-14 pt-12 text-center" style={{ backgroundColor: colors.pine }}>
+                      <div className="relative px-6 pb-10 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
                         <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                           {`${quote.messageContext.propertyName}私人會所`}
                         </p>
