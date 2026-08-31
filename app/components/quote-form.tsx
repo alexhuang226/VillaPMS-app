@@ -397,7 +397,7 @@ function formatSlashDate(dateStr: string): string {
  * 讓螢幕/圖片版跟複製文字版看起來是「同一份東西」的兩種呈現方式 */
 function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) {
   return (
-    <div className="mt-5 mb-2 flex items-center gap-2 border-t pt-4" style={{ borderColor: colors.line }}>
+    <div className="mt-3 mb-1.5 flex items-center gap-2 border-t pt-3" style={{ borderColor: colors.line }}>
       <span className="text-base leading-none">{icon}</span>
       <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
         {title}
@@ -849,7 +849,7 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-6 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-14 pt-12 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
@@ -868,7 +868,16 @@ export function QuoteForm() {
                     「有效期限看不到」就是這樣來的）。這裡明確給
                     min-height，確保父層的高度一定容得下兩行文字，
                     不管視覺上「包棟報價單」本身多高。 */}
-                <div className="relative mt-1" style={{ minHeight: "24px" }}>
+                {/* ⚠️ min-height 這裡故意給比視覺上兩行文字實際需要的
+                    高度更多一些餘裕（32px，不是精算後剛好夠用的
+                    20-24px）——中文字元的實際行高，在不同瀏覽器/裝置
+                    上算出來的數字會有落差（尤其中文字型的預設行高
+                    通常比純英數字更高），精算剛好夠用的數字曾經在
+                    實機上還是不夠、導致文字疊出標題區塊外面。這裡
+                    故意抓比較寬鬆的安全值，同時外層標題區塊自己的
+                    下方 padding 也從 pb-6 加到 pb-8，兩層都留一點餘裕，
+                    比只精算單一個數字更不容易再次出問題。 */}
+                <div className="relative mt-1" style={{ minHeight: "32px" }}>
                   <p className="tracking-[0.3em]" style={{ color: colors.pineSoft, fontSize: "16px" }}>
                     包棟報價單
                   </p>
@@ -889,10 +898,18 @@ export function QuoteForm() {
               <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
                 <ReceiptSectionHeader icon="📅" title="預訂資訊" />
                 <div className="flex flex-col gap-1.5 text-xs">
-                  <InfoRow label="入住日期" value={formatDateWithWeekday(quote.request.checkIn)} />
-                  <InfoRow label="退房日期" value={formatDateWithWeekday(quote.request.checkOut)} />
-                  <InfoRow label="預訂天數" value={daysNightsLabel(quote.nights)} />
-                  <InfoRow label="入住人數" value={guestSummary(quote)} />
+                  <PairedInfoRow
+                    items={[
+                      { label: "入住日期", value: formatDateWithWeekday(quote.request.checkIn) },
+                      { label: "退房日期", value: formatDateWithWeekday(quote.request.checkOut) },
+                    ]}
+                  />
+                  <PairedInfoRow
+                    items={[
+                      { label: "預訂天數", value: daysNightsLabel(quote.nights) },
+                      { label: "入住人數", value: guestSummary(quote) },
+                    ]}
+                  />
                   {quote.roomAllocation &&
                     roomAllocationSummaryItems(quote.roomAllocation).map((item, i) => (
                       <InfoRow key={`room-${i}`} label={i === 0 ? "房型配置" : ""} value={item.text} />
@@ -959,14 +976,14 @@ export function QuoteForm() {
                 </div>
 
                 {/* 總金額：淡綠色底色的區塊，是整張收據視覺上的焦點 */}
-                <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
+                <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
                   <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
                     包棟總費用
                   </p>
-                  <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
+                  <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
                     NT$ {quote.packageTotal.toLocaleString()}
                   </p>
-                  <div className="mt-3 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                  <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
                     <span style={{ color: colors.muted }} className="text-xs tracking-wide">
                       訂金
                     </span>
@@ -989,8 +1006,12 @@ export function QuoteForm() {
                   <>
                     <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
                     <div className="flex flex-col gap-2 text-sm font-semibold">
-                      <InfoRow label="銀行" value={quote.messageContext.bank.name} />
-                      <InfoRow label="分行" value={quote.messageContext.bank.branch} />
+                      <PairedInfoRow
+                        items={[
+                          { label: "銀行", value: quote.messageContext.bank.name },
+                          { label: "分行", value: quote.messageContext.bank.branch },
+                        ]}
+                      />
                       <InfoRow label="帳號" value={quote.messageContext.bank.accountNumber} />
                       <InfoRow label="戶名" value={quote.messageContext.bank.accountName} />
                     </div>
@@ -1109,6 +1130,24 @@ function InfoRow({ label, value }: { label: string; value: string }) {
         {label}
       </span>
       <span style={{ color: colors.ink }}>{value}</span>
+    </div>
+  );
+}
+
+/** 兩個欄位並排顯示，取代兩行各自獨立的 InfoRow——用在報價單圖片，
+ * 讓卡片整體高度短一點。標籤在上、內容在下（不是 InfoRow 那種
+ * 標籤在左），因為並排之後每欄的寬度只剩一半，標籤放旁邊會太擠。 */
+function PairedInfoRow({ items }: { items: { label: string; value: string }[] }) {
+  return (
+    <div className="flex gap-4">
+      {items.map((item, i) => (
+        <div key={i} className="flex-1">
+          <p className="text-[10px]" style={{ color: colors.muted }}>
+            {item.label}
+          </p>
+          <p style={{ color: colors.ink }}>{item.value}</p>
+        </div>
+      ))}
     </div>
   );
 }

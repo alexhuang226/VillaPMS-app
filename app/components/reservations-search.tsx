@@ -740,13 +740,23 @@ export function ReservationsSearch({
     }
   }
 
-  /** 'YYYY-MM-DD' → '2026/08/29'，訂房確認單圖片用，跟文字版
-   * （reservation-message.ts 的 formatDateWithWeekday）故意不共用
-   * ——那邊是私有函式沒有 export，這裡的格式也略有不同（不帶星期，
-   * 有 (15:00後)/(11:00前) 這種入住/退房時間提示） */
+  /** 'YYYY-MM-DD' → '2026/08/29'，用在報價日期/有效期限這種不需要
+   * 顯示星期幾的地方 */
   function formatSlashDate(dateStr: string): string {
     const [y, m, d] = dateStr.split("-");
     return `${y}/${m}/${d}`;
+  }
+
+  /** 'YYYY-MM-DD' → '2026/08/29 (週四)'，入住/退房日期用——跟報價單
+   * 的日期格式一致（lib/pricing/quote-message.ts 的
+   * formatDateWithWeekday 是同樣的格式，只是那邊是私有函式沒有
+   * export，這裡另外寫一份一樣邏輯的，不特別為此加一個新的 import
+   * 依賴）。原本這裡是顯示 (15:00後)/(11:00前) 這種入住/退房時間
+   * 提示，改成跟報價單一致顯示星期幾。 */
+  function formatDateWithWeekdayLocal(dateStr: string): string {
+    const WEEKDAY_LABELS = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
+    const date = new Date(`${dateStr}T00:00:00`);
+    return `${formatSlashDate(dateStr)} (${WEEKDAY_LABELS[date.getDay()]})`;
   }
 
   function nightsLabel(checkIn: string, checkOut: string): string {
@@ -2064,8 +2074,8 @@ export function ReservationsSearch({
                                   ━━━━━━━━━━━━━━
                                 </p>
                                 <p className="mt-2 font-bold">📅 預訂資訊</p>
-                                <p className="mt-1">• 入住日期：{formatSlashDate(detail.checkIn)} (15:00後)</p>
-                                <p>• 退房日期：{formatSlashDate(detail.checkOut)} (11:00前)</p>
+                                <p className="mt-1">• 入住日期：{formatDateWithWeekdayLocal(detail.checkIn)}</p>
+                                <p>• 退房日期：{formatDateWithWeekdayLocal(detail.checkOut)}</p>
                                 <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
                                 <p>
                                   • 入住人數：{detail.adults}大
