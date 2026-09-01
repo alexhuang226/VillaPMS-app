@@ -219,7 +219,16 @@ export function MonthlySchedule({
   const [assignments, setAssignments] = useState<StaffAssignment[]>(initialAssignments ?? []);
   const [coverage, setCoverage] = useState<CheckOutCoverage[]>(initialCoverage ?? []);
   const [employees, setEmployees] = useState<Employee[]>(initialEmployees ?? []);
-  const [isLoading, setIsLoading] = useState(true);
+  // ⚠️ 初始值要看 server component 有沒有先查好初始資料——如果已經
+  // 有（initialAssignments !== null），代表下面那個 useEffect 會跳過
+  // 第一次的資料查詢（見那裡「skippedInitialLoadRef」的說明），這種
+  // 情況下 loadMonth()（唯一會把 isLoading 設回 false 的地方）根本
+  // 不會被呼叫——如果這裡還是固定從 true 開始，isLoading 就會卡住
+  // 永遠是 true，下面「{!isLoading && ...}」那段月曆內容永遠不會
+  // 顯示出來，變成一直卡在「載入中」，直到使用者換月份、觸發
+  // loadMonth() 真的執行一次為止（這正是「一直讀取中，必須先點下
+  // 一個月才會出現班表」這個問題的成因）。
+  const [isLoading, setIsLoading] = useState(initialAssignments === null);
   const [error, setError] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
