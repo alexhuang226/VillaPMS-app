@@ -341,13 +341,21 @@ export interface UpcomingPrepInfo {
   hasExtraBed: boolean;
 }
 
+/**
+ * 效能優化：原本這裡是兩次分開的查詢（先查訂單、再用訂單 id 查
+ * 加購項目），改成用巢狀 select 把 reservation_items 一起帶出來，
+ * 一次查詢就好——這個函式在房務班表點進某一天時，會對當天每間
+ * 有排班的民宿各呼叫一次（雖然已經用 Promise.all 平行處理，不同
+ * 民宿之間不會互相等待），每間民宿原本需要兩次序列的資料庫來回，
+ * 減半成一次，是房務班表點日期後感覺等很久的其中一個原因。
+ */
 export async function getUpcomingPrepInfo(propertyId: string, onOrAfterDate: string): Promise<UpcomingPrepInfo | null> {
   const supabase = createServiceRoleClient();
 
   const { data, error } = await supabase
     .from("reservations")
     .select(
-      "id, reservation_no, check_in, check_out, adults, children, booking_source, status, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name)"
+      "id, reservation_no, check_in, check_out, adults, children, booking_source, status, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name), reservation_items(item_type)"
     )
     .eq("property_id", propertyId)
     .gte("check_in", onOrAfterDate)
@@ -370,14 +378,7 @@ export async function getUpcomingPrepInfo(propertyId: string, onOrAfterDate: str
   };
   const roomItems = roomAllocationSummaryItems(allocation).map((item) => item.text);
 
-  const { data: itemsData, error: itemsError } = await supabase
-    .from("reservation_items")
-    .select("item_type")
-    .eq("reservation_id", row.id);
-  if (itemsError) {
-    throw new Error(`查詢加購項目失敗：${itemsError.message}`);
-  }
-  const itemTypes = new Set(((itemsData ?? []) as any[]).map((i) => i.item_type as string));
+  const itemTypes = new Set(((row.reservation_items ?? []) as any[]).map((i) => i.item_type as string));
 
   const nights = Math.round(
     (new Date(`${row.check_out}T00:00:00Z`).getTime() - new Date(`${row.check_in}T00:00:00Z`).getTime()) /

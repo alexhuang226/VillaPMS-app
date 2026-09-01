@@ -50,7 +50,6 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { href: "/quote", icon: "📝", title: "製作報價單", description: "填入住資訊，自動算價格並存檔" },
   { href: "/quotes", icon: "🔍", title: "查詢報價單", description: "找以前的報價，客人確認後轉為訂房記錄" },
   {
     href: "/reservations",
@@ -60,15 +59,6 @@ const NAV_ITEMS: NavItem[] = [
     housekeepingManagerVisible: true,
   },
   { href: "/receivables", icon: "💰", title: "查詢應收", description: "訂金／尾款收款狀況，標記已收款" },
-  {
-    href: "/schedule/today",
-    icon: "📅",
-    title: "本日班表",
-    description: "今天上班名單與房務準備內容",
-    housekeepingVisible: true,
-    housekeepingManagerVisible: true,
-    propertyRestrictedVisible: true,
-  },
   {
     href: "/schedule/monthly",
     icon: "🗂️",

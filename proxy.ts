@@ -157,11 +157,20 @@ export async function proxy(request: NextRequest) {
               : null;
 
       if (allowedPrefixes) {
-        const isRoot = pathname === "/";
+        // 房務員、清潔員、洗衣公司都只需要看房務班表，首頁對他們來說
+        // 只有一堆點了也進不去的按鈕，直接把根目錄也當「不允許」，
+        // 逼他們一登入就被導去房務班表——管家維持原本的行為，根目錄
+        // 還是允許的，不受這次改動影響（管家能用的功能比較多，首頁
+        // 對他們還是有意義的）。
+        const shouldRedirectRootToMonthly = position === "房務員" || isPropertyRestricted;
+        const isRoot = pathname === "/" && !shouldRedirectRootToMonthly;
         const isAllowed = isRoot || allowedPrefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`));
         if (!isAllowed) {
           const redirectUrl = request.nextUrl.clone();
-          redirectUrl.pathname = "/schedule/today";
+          // 導去房務班表（月曆檢視），不是本日班表——本日班表這個頁面
+          // 之後會被移除，房務班表點進特定日期已經包含原本本日班表的
+          // 所有內容
+          redirectUrl.pathname = shouldRedirectRootToMonthly ? "/schedule/monthly" : "/schedule/today";
           return NextResponse.redirect(redirectUrl);
         }
       }

@@ -1038,6 +1038,9 @@ export interface ReservationUpdateFields extends ReservationAddOnFields {
   bookingSource: string;
   status: string;
   finalTotal: number;
+  /** 訂金金額——可以直接改，尾款會用「總金額－這個新的訂金金額」
+   * 重算，不是讀資料庫裡原本記錄的舊訂金金額 */
+  depositAmount: number;
   needsInvoice: boolean;
   invoiceTitle: string | null;
   invoiceTaxId: string | null;
@@ -1078,22 +1081,20 @@ export async function updateReservation(reservationId: string, fields: Reservati
     throw new Error(`更新訂單失敗：${error.message}`);
   }
 
-  // 總金額改了，尾款金額要跟著重算（尾款 = 總金額 - 訂金），訂金
-  // 金額維持不動——訂金通常已經收了，不會因為事後改總金額而跟著變。
-  // 這裡不管總金額實際上有沒有真的改變都重新算一次，反正結果一樣，
-  // 比額外去判斷「這次有沒有改到 final_total」簡單、也不會有漏判的
-  // 風險。
-  const { data: depositRow, error: depositFetchError } = await supabase
-    .from("payments")
-    .select("amount")
+  // 訂金/尾款金額重算——訂金直接用表單填的新金額寫入（不是讀資料庫
+  // 裡原本的舊金額），尾款＝總金額－這次的訂金金額，確保兩者加總
+  // 起來一定等於總金額。不管總金額/訂金金額實際上有沒有真的改變
+  // 都重新算一次，反正結果一樣，比額外去判斷「這次有沒有改到」
+  // 簡單、也不會有漏判的風險。
+  const newBalanceAmount = fields.finalTotal - fields.depositAmount;
+
+  const { error: depositUpdateError } = await (supabase.from("payments") as any)
+    .update({ amount: fields.depositAmount })
     .eq("reservation_id", reservationId)
-    .eq("payment_kind", "deposit")
-    .maybeSingle();
-  if (depositFetchError) {
-    throw new Error(`查詢訂金金額失敗：${depositFetchError.message}`);
+    .eq("payment_kind", "deposit");
+  if (depositUpdateError) {
+    throw new Error(`更新訂金金額失敗：${depositUpdateError.message}`);
   }
-  const depositAmount = Number((depositRow as any)?.amount ?? 0);
-  const newBalanceAmount = fields.finalTotal - depositAmount;
 
   const { error: balanceUpdateError } = await (supabase.from("payments") as any)
     .update({ amount: newBalanceAmount })
@@ -1328,6 +1329,10 @@ export interface CreateReservationFields extends ReservationAddOnFields {
   bookingSource: string;
   finalTotal: number;
   paymentStatus: string;
+  /** 訂金金額——預設從報價單金額帶入（呼叫端自己決定要帶什麼進來，
+   * 這裡單純接收），沒有報價單可以參考的話，呼叫端會傳 0。用這個
+   * 金額實際建立訂金/尾款應收款記錄，見下面的說明。 */
+  depositAmount: number;
   needsInvoice: boolean;
   invoiceTitle: string | null;
   invoiceTaxId: string | null;
@@ -1336,6 +1341,21 @@ export interface CreateReservationFields extends ReservationAddOnFields {
   doubleSuiteCount: number;
   doublePlainCount: number;
 }
+
+/** 整體付款狀況(payment_status)，對應到訂金/尾款各自該有的狀態——
+ * 跟 lib/pricing/queries.ts updateReservationPaymentStatus() 用同一套
+ * 對照表，確保不管是新增訂單當下就填付款狀況、還是事後在訂單詳情
+ * 頁面改，算出來的結果一致。 */
+const PAYMENT_STATUS_TARGET_MAP: Record<
+  string,
+  { deposit: "pending" | "paid" | "void" | "refunded"; balance: "pending" | "paid" | "void" | "refunded" }
+> = {
+  pending_deposit: { deposit: "pending", balance: "pending" },
+  deposit_paid: { deposit: "paid", balance: "pending" },
+  balance_paid: { deposit: "paid", balance: "paid" },
+  deposit_refunded: { deposit: "refunded", balance: "void" },
+  deposit_forfeited: { deposit: "paid", balance: "void" },
+};
 
 export async function createReservationDirectly(
   fields: CreateReservationFields
@@ -1414,6 +1434,50 @@ export async function createReservationDirectly(
   if (itemLines.length > 0) {
     const { error: itemError } = await (supabase.from("reservation_items") as any).insert(itemLines);
     if (itemError) throw new Error(`寫入加購項目失敗：${itemError.message}`);
+  }
+
+  // 訂金/尾款應收款記錄——直接建立的訂單（Airbnb 等平台訂房，跳過
+  // 報價流程）原本完全不會建立這兩筆記錄，導致「付款狀況」控制項
+  // 改了狀態也沒有實際的記錄可以同步、「查詢應收」也查不到這筆
+  // 訂單。現在用職員填的訂金金額（預設從報價單帶入，沒有的話是 0）
+  // 實際建立這兩筆記錄，狀態依 fields.paymentStatus 對應決定。
+  const paymentTarget = PAYMENT_STATUS_TARGET_MAP[fields.paymentStatus] ?? { deposit: "pending" as const, balance: "pending" as const };
+  const now = new Date().toISOString();
+  const balanceAmount = fields.finalTotal - fields.depositAmount;
+  // 尾款到期日用「入住前 7 天」，跟這個系統其他地方（confirmReservationFromQuoteAction
+  // 沒有報價單當初約定的天數可以參考時的預設值、reservation-message.ts 的提醒文字）
+  // 採用同一個預設慣例
+  const balanceDueDate = new Date(`${fields.checkIn}T00:00:00`);
+  balanceDueDate.setDate(balanceDueDate.getDate() - 7);
+
+  const { error: depositPaymentError } = await (supabase.from("payments") as any).insert({
+    organization_id: organizationId,
+    reservation_id: reservationId,
+    payment_kind: "deposit",
+    direction: "receivable",
+    amount: fields.depositAmount,
+    currency: "TWD",
+    due_date: fields.checkIn,
+    status: paymentTarget.deposit,
+    paid_at: paymentTarget.deposit === "paid" ? now : null,
+  });
+  if (depositPaymentError) {
+    throw new Error(`建立訂金應收款失敗：${depositPaymentError.message}`);
+  }
+
+  const { error: balancePaymentError } = await (supabase.from("payments") as any).insert({
+    organization_id: organizationId,
+    reservation_id: reservationId,
+    payment_kind: "balance",
+    direction: "receivable",
+    amount: balanceAmount,
+    currency: "TWD",
+    due_date: balanceDueDate.toISOString().slice(0, 10),
+    status: paymentTarget.balance,
+    paid_at: paymentTarget.balance === "paid" ? now : null,
+  });
+  if (balancePaymentError) {
+    throw new Error(`建立尾款應收款失敗：${balancePaymentError.message}`);
   }
 
   return { reservationId, reservationNo };

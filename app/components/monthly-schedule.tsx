@@ -68,6 +68,9 @@ const PROPERTY_SHORT_LABELS: Record<string, string> = {
 };
 
 const WEEKDAY_HEADERS = ["日", "一", "二", "三", "四", "五", "六"];
+/** 帶「週」字的版本，給訂房日期這種需要完整星期幾文字的地方用，
+ * 跟月曆欄位標題（WEEKDAY_HEADERS，只需要單一個字）分開 */
+const WEEKDAY_LABELS = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
 
 function getDaysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
@@ -79,6 +82,22 @@ function firstWeekdayOfMonth(year: number, month: number): number {
 
 function formatYMD(year: number, month: number, day: number): string {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/** 跟 today-schedule.tsx 用的是同一份對照表——本日班表打算被取消，
+ * 這裡改成房務班表自己維護一份，不再依賴那個檔案 */
+const BOOKING_SOURCE_LABEL: Record<string, string> = {
+  line_official: "LINE官方",
+  airbnb: "Airbnb",
+  walk_in: "現場",
+  phone: "電話",
+  other_ota: "其他OTA",
+  other: "其他",
+};
+
+function formatDateWithWeekday(dateStr: string): string {
+  const date = new Date(`${dateStr}T00:00:00`);
+  return `${dateStr.replaceAll("-", "/")} (${WEEKDAY_LABELS[date.getDay()]})`;
 }
 
 interface CalendarCell {
@@ -236,6 +255,18 @@ export function MonthlySchedule({
   // 查到的結果不一定一樣，只用 propertyId 當 key 會讓不同天顯示到
   // 彼此快取住的舊資料。
   const [prepInfoByProperty, setPrepInfoByProperty] = useState<Record<string, UpcomingPrepInfo | null>>({});
+  // 跟 prepInfoByProperty 保持同步的 ref——下面查詢「還缺哪些民宿的
+  // 房務準備內容」那個 effect，要讀「目前已經查過哪些」來判斷還缺
+  // 什麼，但不能把 prepInfoByProperty 本身列進那個 effect 的依賴
+  // 陣列：那個 effect 自己會呼叫 setPrepInfoByProperty 更新這個
+  // state，如果同時把它列為依賴，等於每次查完都會讓自己重新跑一次
+  // （雖然不會無限迴圈——第二次跑會發現已經沒有需要查的、直接
+  // return，但還是多一次不必要的 effect 執行）。用 ref 讀「目前
+  // 最新的值」，同時效果本身的依賴不需要包含它，兩全其美。
+  const prepInfoByPropertyRef = useRef(prepInfoByProperty);
+  useEffect(() => {
+    prepInfoByPropertyRef.current = prepInfoByProperty;
+  }, [prepInfoByProperty]);
 
   // 修改某間民宿某一天的房務人員名單——新增/變更/刪除人員，不能
   // 改成其他民宿（要換民宿的話，那是不同的排班，應該用「新增排班」
@@ -273,7 +304,7 @@ export function MonthlySchedule({
           .map((a) => a.propertyId as string)
       )
     );
-    const toFetch = propertyIds.filter((id) => !(`${id}|${selectedDate}` in prepInfoByProperty));
+    const toFetch = propertyIds.filter((id) => !(`${id}|${selectedDate}` in prepInfoByPropertyRef.current));
     if (toFetch.length === 0) return;
 
     Promise.all(
@@ -292,7 +323,7 @@ export function MonthlySchedule({
         return next;
       });
     });
-  }, [selectedDate, assignments, prepInfoByProperty]);
+  }, [selectedDate, assignments]);
 
   async function loadMonth(y: number, m: number) {
     setIsLoading(true);
@@ -1069,12 +1100,47 @@ export function MonthlySchedule({
                             </>
                           )}
 
-                          {isCheckout && prep && (prep.hasBbq || prep.hasExtraBed) && (
-                            <p className="mt-1.5 border-t pt-1.5 font-semibold" style={{ borderColor: colors.line, color: colors.pine }}>
-                              下一組：
-                              {prep.hasBbq ? "🍖 有烤肉　" : ""}
-                              {prep.hasExtraBed ? "🛏️ 有加床" : ""}
-                            </p>
+                          {/* 房務準備內容——完整版，內容跟本日班表
+                              （today-schedule.tsx，計劃要被取消）的
+                              「房務準備內容」完全一致，這裡改成獨立
+                              維護一份，不再依賴那個檔案。只有實際
+                              退房日才顯示，因為只有這種情況「下一組
+                              入住」才有意義（非退房日的一般安排，
+                              房間不會有人退房，也就沒有「準備給下一
+                              組」這件事）。 */}
+                          {isCheckout && (
+                            <div className="mt-2 border-t pt-2" style={{ borderColor: colors.line }}>
+                              <p className="text-[11px] font-bold" style={{ color: colors.ink }}>
+                                房務準備內容
+                              </p>
+                              {!prep ? (
+                                <p className="mt-1" style={{ color: colors.muted }}>
+                                  近期沒有入住訂單，不用特別準備。
+                                </p>
+                              ) : (
+                                <div className="mt-1 flex flex-col gap-1" style={{ color: colors.muted }}>
+                                  <p>
+                                    下一組入住：{formatDateWithWeekday(prep.checkIn)} ～ {prep.checkOut}（{prep.nights}晚）
+                                  </p>
+                                  <p>
+                                    {prep.adults}大 {prep.children}小　{prep.guestName || "（未填姓名）"}　
+                                    {BOOKING_SOURCE_LABEL[prep.bookingSource] ?? prep.bookingSource}
+                                  </p>
+                                  {prep.roomItems.map((item, i) => (
+                                    <div key={i} className="flex items-baseline gap-3">
+                                      <span className="w-10 shrink-0">{i === 0 ? "房型" : ""}</span>
+                                      <span>{item}</span>
+                                    </div>
+                                  ))}
+                                  {(prep.hasBbq || prep.hasExtraBed) && (
+                                    <p style={{ color: colors.pine }} className="font-semibold">
+                                      {prep.hasBbq ? "🍖 有烤肉　" : ""}
+                                      {prep.hasExtraBed ? "🛏️ 有加床" : ""}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       );

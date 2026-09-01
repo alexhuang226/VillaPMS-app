@@ -123,6 +123,7 @@ const EMPTY_CREATE_FIELDS: CreateReservationFields = {
   bookingSource: "airbnb",
   finalTotal: 0,
   paymentStatus: "pending_deposit",
+  depositAmount: 0,
   needsInvoice: false,
   invoiceTitle: null,
   invoiceTaxId: null,
@@ -684,6 +685,11 @@ export function ReservationsSearch({
     const bbqItem = detail.items.find((i) => i.itemType === "bbq");
     const foodTruckItem = detail.items.find((i) => i.itemType === "food_truck");
     const earlyCheckinItem = detail.items.find((i) => i.itemType === "early_checkin");
+    // 訂金金額預設帶入目前已經記錄的金額——如果這筆訂單是從報價單
+    // 確認轉過來的，這個金額本來就等於當初報價單算出的訂金；如果是
+    // 直接建立的訂單，就是職員當初填的金額，兩種情況都不需要另外
+    // 查一次報價單，目前記錄的金額就是正確的預設值
+    const currentDepositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
 
     setEditFields({
       checkIn: detail.checkIn,
@@ -696,6 +702,7 @@ export function ReservationsSearch({
       bookingSource: detail.bookingSource,
       status: detail.status,
       finalTotal: detail.finalTotal,
+      depositAmount: currentDepositPayment?.amount ?? 0,
       needsInvoice: detail.needsInvoice,
       invoiceTitle: detail.invoiceTitle,
       invoiceTaxId: detail.invoiceTaxId,
@@ -1019,6 +1026,16 @@ export function ReservationsSearch({
                 ))}
               </select>
             </label>
+
+            {/* 訂金金額——預設 0，職員自己依報價單金額填入。跟付款狀況
+                一起送出，建立訂單時會實際建立訂金/尾款應收款記錄
+                （直接建立的訂單原本完全沒有這兩筆記錄，導致付款狀況
+                改了也沒有實際資料可以同步、查詢應收也查不到）。 */}
+            <NumberField
+              label="訂金金額（預設 0，依報價單金額填入）"
+              value={createFields.depositAmount}
+              onChange={(v) => updateCreateField("depositAmount", v)}
+            />
 
             <div className="grid grid-cols-2 gap-4">
               <label className="flex flex-col gap-1">
@@ -1801,6 +1818,17 @@ export function ReservationsSearch({
                           style={{ borderColor: colors.line, color: colors.ink }}
                         />
                       </label>
+
+                      {/* 訂金金額——預設帶入目前已經記錄的金額（見
+                          startEdit() 的說明），可以直接改；尾款會用
+                          「總金額－這裡填的訂金」重算 */}
+                      <div className="mt-2">
+                        <NumberField
+                          label="訂金金額"
+                          value={editFields.depositAmount}
+                          onChange={(v) => updateEditField("depositAmount", v)}
+                        />
+                      </div>
                     </div>
 
                     {editError && (

@@ -76,6 +76,7 @@ import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { calculateAndSaveQuoteAction } from "@/app/actions/quote";
+import { calculateAutoRoomAllocationAction } from "@/app/actions/reservation";
 import {
   accommodationDayGroups,
   addOnFeeBreakdown,
@@ -409,6 +410,15 @@ function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) 
 export function QuoteForm() {
   const [form, setForm] = useState<FormState>(initialState);
   const [quote, setQuote] = useState<PackageQuote | null>(null);
+  /** 依目前填的民宿/人數，系統原本會自動建議的房型配置——顯示在
+   * 「手動調整房型」上方當參考，讓職員知道系統原本的建議是什麼，
+   * 再決定要怎麼調整，不用憑空猜 */
+  const [autoSuggestedAllocation, setAutoSuggestedAllocation] = useState<{
+    fourPersonSuiteCount: number;
+    fourPersonDowngradeCount: number;
+    doubleSuiteCount: number;
+    doublePlainCount: number;
+  } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -463,6 +473,26 @@ export function QuoteForm() {
   /** 這間民宿的四人套房實體房間總數，「四人套房」「降規四人套房」兩個
    * 下拉選單的上限都靠它算，元件裡多處要用，抽出來共用一次就好 */
   const fourPersonRoomMax = FOUR_PERSON_ROOM_TOTAL[form.propertyCode] ?? 0;
+
+  // 民宿/人數改變時，重新查一次系統原本會自動建議的房型配置，顯示
+  // 在「手動調整房型」上方當參考。這個計算需要查資料庫（每間民宿
+  // 實際的房間數），沒辦法純前端算，所以呼叫跟「新增訂單」表單
+  // 共用的同一個 action（calculateAutoRoomAllocationAction），確保
+  // 兩邊看到的建議邏輯完全一致。
+  useEffect(() => {
+    let cancelled = false;
+    calculateAutoRoomAllocationAction(form.propertyCode, form.adults, form.children)
+      .then((result) => {
+        if (!cancelled) setAutoSuggestedAllocation(result);
+      })
+      .catch(() => {
+        // 這只是輔助參考顯示，查詢失敗不影響報價表單其他功能，
+        // 安靜失敗就好
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.propertyCode, form.adults, form.children]);
 
   /**
    * 手動調整房型的「四人套房」數量一改，「降規四人套房」的上限
@@ -785,32 +815,44 @@ export function QuoteForm() {
                   手動調整房型（根據客人要求的房型報價）
                 </label>
                 {form.useRoomOverride && (
-                  <div className="mt-3 grid grid-cols-2 gap-4">
-                    <SelectField
+                  <>
+                    {autoSuggestedAllocation && (
+                      <p className="mt-2 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                        系統依目前人數自動建議：
+                        {[
+                          autoSuggestedAllocation.fourPersonSuiteCount > 0 && `四人套房 ${autoSuggestedAllocation.fourPersonSuiteCount}`,
+                          autoSuggestedAllocation.fourPersonDowngradeCount > 0 &&
+                            `降規四人套房 ${autoSuggestedAllocation.fourPersonDowngradeCount}`,
+                          autoSuggestedAllocation.doubleSuiteCount > 0 && `雙人套房 ${autoSuggestedAllocation.doubleSuiteCount}`,
+                          autoSuggestedAllocation.doublePlainCount > 0 && `雙人雅房 ${autoSuggestedAllocation.doublePlainCount}`,
+                        ]
+                          .filter(Boolean)
+                          .join("、") || "（沒有建議房型）"}
+                      </p>
+                    )}
+                    <div className="mt-3 grid grid-cols-2 gap-4">
+                    <NumberField
                       label="四人套房"
                       value={form.overrideFourPersonSuiteCount}
                       onChange={handleOverrideFourPersonSuiteChange}
-                      max={fourPersonRoomMax}
                     />
-                    <SelectField
+                    <NumberField
                       label="降規四人套房"
                       value={form.overrideFourPersonDowngradeCount}
                       onChange={(v) => update("overrideFourPersonDowngradeCount", v)}
-                      max={Math.max(0, fourPersonRoomMax - form.overrideFourPersonSuiteCount)}
                     />
-                    <SelectField
+                    <NumberField
                       label="雙人套房"
                       value={form.overrideDoubleSuiteCount}
                       onChange={(v) => update("overrideDoubleSuiteCount", v)}
-                      max={DOUBLE_SUITE_ROOM_TOTAL[form.propertyCode] ?? 0}
                     />
-                    <SelectField
+                    <NumberField
                       label="雙人雅房"
                       value={form.overrideDoublePlainCount}
                       onChange={(v) => update("overrideDoublePlainCount", v)}
-                      max={DOUBLE_PLAIN_ROOM_TOTAL[form.propertyCode] ?? 0}
                     />
-                  </div>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
