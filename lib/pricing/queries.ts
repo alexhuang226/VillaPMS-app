@@ -1071,7 +1071,7 @@ export async function updateReservation(reservationId: string, fields: Reservati
       double_plain_count: fields.doublePlainCount,
     })
     .eq("id", reservationId)
-    .select("property_id")
+    .select("property_id, payment_status")
     .single();
 
   if (error) {
@@ -1137,6 +1137,23 @@ export async function updateReservation(reservationId: string, fields: Reservati
       if (insertAddonError) {
         throw new Error(`寫入加購項目失敗：${insertAddonError.message}`);
       }
+    }
+  }
+
+  // 訂單取消後，訂金/尾款要歸零、不計入營收——但「沒收訂金」是刻意
+  // 的例外：這種取消是客人的訂金被民宿留下當作取消費，金額維持
+  // 原樣、還是要算進營收（getYearlyRevenueStats 已經處理這個例外，
+  // 這裡只要避免同時把這個情況下的金額誤歸零就好）。用上面
+  // reservations 更新時一併查出來的 payment_status（不是另外查一次）
+  // 判斷是不是這個例外。
+  const currentPaymentStatus = (updatedRow as any)?.payment_status as string | undefined;
+  if (fields.status === "cancelled" && currentPaymentStatus !== "deposit_forfeited") {
+    const { error: zeroOutError } = await (supabase.from("payments") as any)
+      .update({ amount: 0, status: "void" })
+      .eq("reservation_id", reservationId)
+      .in("payment_kind", ["deposit", "balance"]);
+    if (zeroOutError) {
+      throw new Error(`訂單取消後歸零訂金/尾款失敗：${zeroOutError.message}`);
     }
   }
 }

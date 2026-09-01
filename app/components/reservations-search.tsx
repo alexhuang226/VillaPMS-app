@@ -289,6 +289,63 @@ function computeWeekSegments(week: CalendarCell[], propertyReservations: Calenda
   return segments;
 }
 
+/**
+ * 數字輸入框——跟報價單（quote-form.tsx）用的是同一種寫法：
+ * type="text" + inputMode="numeric"，內部自己維護一份原始字串狀態
+ * （raw），不是讓 <input type="number"> 直接綁定數字。理由是
+ * type="number" 直接綁定數字值時，要把 0 改成別的數字，得先在 0
+ * 後面打新數字（變成例如 "05"），再手動把 0 刪掉，體驗很不好；
+ * 用字串狀態的話，欄位可以先被整個清空成空字串，再直接打新數字，
+ * 失焦時如果還是空字串才補回 0，不會有「先打字才能刪 0」的問題。
+ */
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const [raw, setRaw] = useState(() => String(value));
+
+  // value 是外部（表單狀態）算出來的，例如切換民宿導致自動建議的
+  // 房型配置改變——這種「外部改變」要同步更新顯示的字串，不然使用者
+  // 會看到欄位沒有跟著變
+  useEffect(() => {
+    setRaw(String(value));
+  }, [value]);
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const next = e.target.value;
+    if (next === "" || /^\d*$/.test(next)) {
+      setRaw(next);
+      onChange(next === "" ? 0 : Number(next));
+    }
+  }
+
+  function handleBlur() {
+    if (raw === "") setRaw("0");
+  }
+
+  return (
+    <label className="flex flex-col gap-1">
+      <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+        {label}
+      </span>
+      <input
+        type="text"
+        inputMode="numeric"
+        value={raw}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        className="w-full border-b bg-transparent py-1 text-sm outline-none"
+        style={{ borderColor: colors.line, color: colors.ink }}
+      />
+    </label>
+  );
+}
+
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-3">
@@ -1038,74 +1095,14 @@ export function ReservationsSearch({
                   ))}
                 </select>
               </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                  訪客
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.visitors}
-                  onChange={(e) => updateCreateField("visitors", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
+              <NumberField label="訪客" value={createFields.visitors} onChange={(v) => updateCreateField("visitors", v)} />
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  大人
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.adults}
-                  onChange={(e) => updateCreateField("adults", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  小孩
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.children}
-                  onChange={(e) => updateCreateField("children", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  嬰幼兒
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.infants}
-                  onChange={(e) => updateCreateField("infants", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span style={{ color: colors.muted }} className="text-[11px]">
-                  寵物
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  value={createFields.pets}
-                  onChange={(e) => updateCreateField("pets", Number(e.target.value))}
-                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                  style={{ borderColor: colors.line, color: colors.ink }}
-                />
-              </label>
+              <NumberField label="大人" value={createFields.adults} onChange={(v) => updateCreateField("adults", v)} />
+              <NumberField label="小孩" value={createFields.children} onChange={(v) => updateCreateField("children", v)} />
+              <NumberField label="嬰幼兒" value={createFields.infants} onChange={(v) => updateCreateField("infants", v)} />
+              <NumberField label="寵物" value={createFields.pets} onChange={(v) => updateCreateField("pets", v)} />
             </div>
 
             <div>
@@ -1113,58 +1110,26 @@ export function ReservationsSearch({
                 房型配置（跟著民宿／人數自動建議，可以手動調整）
               </p>
               <div className="grid grid-cols-2 gap-4">
-                <label className="flex flex-col gap-1">
-                  <span style={{ color: colors.muted }} className="text-[11px]">
-                    四人套房
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={createFields.fourPersonSuiteCount}
-                    onChange={(e) => updateCreateRoomField("fourPersonSuiteCount", Number(e.target.value))}
-                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span style={{ color: colors.muted }} className="text-[11px]">
-                    降規四人套房
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={createFields.fourPersonDowngradeCount}
-                    onChange={(e) => updateCreateRoomField("fourPersonDowngradeCount", Number(e.target.value))}
-                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span style={{ color: colors.muted }} className="text-[11px]">
-                    雙人套房
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={createFields.doubleSuiteCount}
-                    onChange={(e) => updateCreateRoomField("doubleSuiteCount", Number(e.target.value))}
-                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span style={{ color: colors.muted }} className="text-[11px]">
-                    雙人雅房
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={createFields.doublePlainCount}
-                    onChange={(e) => updateCreateRoomField("doublePlainCount", Number(e.target.value))}
-                    className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                    style={{ borderColor: colors.line, color: colors.ink }}
-                  />
-                </label>
+                <NumberField
+                  label="四人套房"
+                  value={createFields.fourPersonSuiteCount}
+                  onChange={(v) => updateCreateRoomField("fourPersonSuiteCount", v)}
+                />
+                <NumberField
+                  label="降規四人套房"
+                  value={createFields.fourPersonDowngradeCount}
+                  onChange={(v) => updateCreateRoomField("fourPersonDowngradeCount", v)}
+                />
+                <NumberField
+                  label="雙人套房"
+                  value={createFields.doubleSuiteCount}
+                  onChange={(v) => updateCreateRoomField("doubleSuiteCount", v)}
+                />
+                <NumberField
+                  label="雙人雅房"
+                  value={createFields.doublePlainCount}
+                  onChange={(v) => updateCreateRoomField("doublePlainCount", v)}
+                />
               </div>
             </div>
 
