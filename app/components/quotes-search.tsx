@@ -47,6 +47,7 @@ import {
   BOOKING_POLICY_ICONS,
   BOOKING_POLICY_NOTES,
   buildQuoteMessage,
+  consolidatedAccommodationGroups,
   daysNightsLabel,
   formatDateWithWeekday,
   guestSummary,
@@ -145,26 +146,6 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
       ))}
     </div>
   );
-}
-
-/** 房型配置並排顯示用的分組——盡量兩個一排塞進去節省高度，但「降規
- * 四人套房」文字比較長（帶著「(提供1床，以雙人套房計費)」的說明），
- * 固定自己單獨一排，不跟別的房型擠在一起變得太擁擠。 */
-function groupRoomItems<T extends { text: string }>(items: T[]): T[][] {
-  const groups: T[][] = [];
-  let i = 0;
-  while (i < items.length) {
-    const isDowngrade = items[i].text.includes("降規");
-    const nextIsDowngrade = i + 1 < items.length && items[i + 1].text.includes("降規");
-    if (isDowngrade || i + 1 >= items.length || nextIsDowngrade) {
-      groups.push([items[i]]);
-      i += 1;
-    } else {
-      groups.push([items[i], items[i + 1]]);
-      i += 2;
-    }
-  }
-  return groups;
 }
 
 function ReceiptSectionHeader({ icon, title, noBorder }: { icon: string; title: string; noBorder?: boolean }) {
@@ -450,20 +431,15 @@ function QuoteReceiptCard({
                               { label: "入住人數", value: guestSummary(quote) },
                             ]}
                           />
-                          {groupRoomItems(roomAllocationSummaryItems(quote.roomAllocation)).map((group, gi) => (
-                            <div key={`room-${gi}`} className="flex items-baseline gap-3">
-                              <span className="shrink-0" style={{ width: "4.5em", color: colors.muted }}>
-                                {gi === 0 ? "房型配置" : ""}
-                              </span>
-                              <div className="flex flex-1 gap-4">
-                                {group.map((item, ii) => (
-                                  <span key={ii} className="flex-1" style={{ color: colors.ink }}>
-                                    {item.text}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
+                          <InfoRow
+                            label="使用房數"
+                            value={`${
+                              quote.roomAllocation.fourPersonSuiteCount +
+                              quote.roomAllocation.fourPersonDowngradeCount +
+                              quote.roomAllocation.doubleSuiteCount +
+                              quote.roomAllocation.doublePlainCount
+                            } 間房（詳見下方費用明細）`}
+                          />
                           {addOnSummaryItems(quote).map((item, i) => (
                             <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
                           ))}
@@ -471,18 +447,19 @@ function QuoteReceiptCard({
 
                         <ReceiptSectionHeader icon="💰" title="費用明細" />
                         <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs" style={{ color: colors.muted }}>
-                          {accommodationDayGroups(quote).map((group, gi) => (
+                          {consolidatedAccommodationGroups(quote).map((group, gi) => (
                             <div key={`day-${gi}`} className="contents">
-                              {group.dateLabel && (
+                              {group.dateRangeLabel && (
                                 <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
-                                  {group.dateLabel}
+                                  {group.dateRangeLabel}
                                 </p>
                               )}
                               {group.items.map((item, i) => (
                                 <div key={i} className="contents">
-                                  <span className={group.dateLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+                                  <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
                                   <span className="text-right tabular-nums">
                                     NT${item.unitPrice.toLocaleString()}×{item.qty}
+                                    {group.nights > 1 ? `×${group.nights}晚` : ""}
                                   </span>
                                   <span>=</span>
                                   <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>

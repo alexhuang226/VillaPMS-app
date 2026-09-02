@@ -83,7 +83,7 @@ export function formatDateWithWeekday(dateStr: string): string {
 }
 
 /** 'YYYY-MM-DD' → '09/20(週日)'，逐晚住宿費用列表用的短格式 */
-function formatMonthDayWeekday(dateStr: string): string {
+export function formatMonthDayWeekday(dateStr: string): string {
   const date = new Date(`${dateStr}T00:00:00`);
   const [, month, day] = dateStr.split("-");
   return `${month}/${day}(${WEEKDAY_LABELS[date.getDay()]})`;
@@ -241,6 +241,66 @@ export function accommodationDayGroups(quote: PackageQuote): AccommodationDayGro
       items,
     };
   });
+}
+
+export interface ConsolidatedAccommodationGroup {
+  /** null 只有 1 晚（不需要顯示日期）才會是 null，其他情況一定有值 */
+  dateRangeLabel: string | null;
+  nights: number;
+  items: AccommodationLineItem[];
+}
+
+/**
+ * 把逐晚的住宿費用明細（accommodationDayGroups）合併連續且房型／單價
+ * 組合完全相同的晚數成一行——例如連續 3 晚都是平日、同樣房型同樣
+ * 單價，原本要列 3 行內容一模一樣的明細，合併成一行「10/1～10/3
+ * (3晚)」，數量維持房間數不變，小計乘上晚數。只要有一晚的房型或
+ * 單價不一樣（例如中途遇到假日調整），就會從那一晚開始另外分一組，
+ * 不會勉強合併過去，確保每一組顯示的價格都是準確的。
+ *
+ * 這個合併結果同時取代原本「房型配置」欄位單獨列出的房型清單——
+ * 兩邊列的其實是同一件事（哪些房型、幾間），合併後不用兩個地方各
+ * 列一次。
+ */
+export function consolidatedAccommodationGroups(quote: PackageQuote): ConsolidatedAccommodationGroup[] {
+  const dayGroups = accommodationDayGroups(quote);
+  const { nightlyBreakdown } = quote;
+  if (dayGroups.length === 0) return [];
+
+  const showDate = quote.nights > 1;
+  const signatureOf = (items: AccommodationLineItem[]) => items.map((it) => `${it.roomLabel}:${it.unitPrice}:${it.qty}`).join("|");
+
+  const result: ConsolidatedAccommodationGroup[] = [];
+  let i = 0;
+  while (i < dayGroups.length) {
+    const signature = signatureOf(dayGroups[i].items);
+    let j = i;
+    while (j + 1 < dayGroups.length && signatureOf(dayGroups[j + 1].items) === signature) {
+      j++;
+    }
+    const nightsInGroup = j - i + 1;
+    const startDate = nightlyBreakdown[i].date;
+    const endDate = nightlyBreakdown[j].date;
+
+    const dateRangeLabel = showDate
+      ? nightsInGroup === 1
+        ? formatMonthDayWeekday(startDate)
+        : `${formatMonthDayWeekday(startDate)}～${formatMonthDayWeekday(endDate)} (${nightsInGroup}晚)`
+      : null;
+
+    result.push({
+      dateRangeLabel,
+      nights: nightsInGroup,
+      items: dayGroups[i].items.map((it) => ({
+        roomLabel: it.roomLabel,
+        unitPrice: it.unitPrice,
+        qty: it.qty,
+        lineTotal: it.unitPrice * it.qty * nightsInGroup,
+      })),
+    });
+    i = j + 1;
+  }
+  return result;
 }
 
 /**

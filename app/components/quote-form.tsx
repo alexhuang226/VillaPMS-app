@@ -78,7 +78,6 @@ import { Fraunces, Work_Sans } from "next/font/google";
 import { calculateAndSaveQuoteAction } from "@/app/actions/quote";
 import { calculateAutoRoomAllocationAction } from "@/app/actions/reservation";
 import {
-  accommodationDayGroups,
   addOnFeeBreakdown,
   addOnSummaryItems,
   BANK_TRANSFER_NOTE,
@@ -87,11 +86,11 @@ import {
   BOOKING_POLICY_ICONS,
   BOOKING_POLICY_NOTES,
   buildQuoteMessage,
+  consolidatedAccommodationGroups,
   daysNightsLabel,
   formatDateWithWeekday,
   guestSummary,
   INFANT_NOTE,
-  roomAllocationSummaryItems,
 } from "@/lib/pricing/quote-message";
 import { DOUBLE_PLAIN_ROOM_TOTAL, DOUBLE_SUITE_ROOM_TOTAL, EXTRA_BED_TEMP_MAX, FOUR_PERSON_ROOM_TOTAL } from "@/lib/pricing/property-room-allocation";
 import type { PackageQuote, PropertyCode, RoomAllocationOverride, StayRequest } from "@/lib/pricing/types";
@@ -649,8 +648,19 @@ export function QuoteForm() {
 
   return (
     <div
-      className={`${body.className} qf-root flex min-h-screen w-full justify-center px-5 py-8`}
-      style={{ backgroundColor: colors.canvas }}
+      className={`${body.className} qf-root flex min-h-screen w-full justify-center px-5`}
+      style={{
+        backgroundColor: colors.canvas,
+        // ⚠️ 這個 app 整體是 viewport-fit=cover（見 app/layout.tsx 的
+        // viewport 設定），內容本來就會延伸到瀏海/圓角這些安全區域
+        // 底下，所以每個頁面自己都要處理安全區域的留白，不能只靠
+        // 固定的 py-8——用 max() 確保「原本設計的 32px」跟「這台裝置
+        // 實際的瀏海/圓角安全區域」兩者取比較大的那個，沒有瀏海的
+        // 裝置維持原本 32px，有瀏海的裝置會自動多留一點，不會被
+        // 瀏海蓋住最上面的內容。
+        paddingTop: "max(2rem, env(safe-area-inset-top))",
+        paddingBottom: "max(2rem, env(safe-area-inset-bottom))",
+      }}
     >
       {/* focus 狀態用 :focus 偽類處理，inline style 無法直接寫偽類，
           用 !important 蓋過元素本身的 inline borderColor */}
@@ -958,21 +968,17 @@ export function QuoteForm() {
                       { label: "入住人數", value: guestSummary(quote) },
                     ]}
                   />
-                  {quote.roomAllocation &&
-                    groupRoomItems(roomAllocationSummaryItems(quote.roomAllocation)).map((group, gi) => (
-                      <div key={`room-${gi}`} className="flex items-baseline gap-3">
-                        <span className="shrink-0" style={{ width: "4.5em", color: colors.muted }}>
-                          {gi === 0 ? "房型配置" : ""}
-                        </span>
-                        <div className="flex flex-1 gap-4">
-                          {group.map((item, ii) => (
-                            <span key={ii} className="flex-1" style={{ color: colors.ink }}>
-                              {item.text}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
+                  {quote.roomAllocation && (
+                    <InfoRow
+                      label="使用房數"
+                      value={`${
+                        quote.roomAllocation.fourPersonSuiteCount +
+                        quote.roomAllocation.fourPersonDowngradeCount +
+                        quote.roomAllocation.doubleSuiteCount +
+                        quote.roomAllocation.doublePlainCount
+                      } 間房（詳見下方費用明細）`}
+                    />
+                  )}
                   {addOnSummaryItems(quote).map((item, i) => (
                     <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
                   ))}
@@ -989,18 +995,19 @@ export function QuoteForm() {
                   className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs"
                   style={{ color: colors.muted }}
                 >
-                  {accommodationDayGroups(quote).map((group, gi) => (
+                  {consolidatedAccommodationGroups(quote).map((group, gi) => (
                     <Fragment key={`day-${gi}`}>
-                      {group.dateLabel && (
+                      {group.dateRangeLabel && (
                         <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
-                          {group.dateLabel}
+                          {group.dateRangeLabel}
                         </p>
                       )}
                       {group.items.map((item, i) => (
                         <Fragment key={i}>
-                          <span className={group.dateLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+                          <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
                           <span className="text-right tabular-nums">
                             NT${item.unitPrice.toLocaleString()}×{item.qty}
+                            {group.nights > 1 ? `×${group.nights}晚` : ""}
                           </span>
                           <span>=</span>
                           <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
@@ -1209,24 +1216,4 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
       ))}
     </div>
   );
-}
-
-/** 房型配置並排顯示用的分組——盡量兩個一排塞進去節省高度，但「降規
- * 四人套房」文字比較長（帶著「(提供1床，以雙人套房計費)」的說明），
- * 固定自己單獨一排，不跟別的房型擠在一起變得太擁擠。 */
-function groupRoomItems<T extends { text: string }>(items: T[]): T[][] {
-  const groups: T[][] = [];
-  let i = 0;
-  while (i < items.length) {
-    const isDowngrade = items[i].text.includes("降規");
-    const nextIsDowngrade = i + 1 < items.length && items[i + 1].text.includes("降規");
-    if (isDowngrade || i + 1 >= items.length || nextIsDowngrade) {
-      groups.push([items[i]]);
-      i += 1;
-    } else {
-      groups.push([items[i], items[i + 1]]);
-      i += 2;
-    }
-  }
-  return groups;
 }
