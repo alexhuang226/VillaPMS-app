@@ -148,13 +148,32 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
   );
 }
 
-function ReceiptSectionHeader({ icon, title, noBorder }: { icon: string; title: string; noBorder?: boolean }) {
+function ReceiptSectionHeader({
+  icon,
+  title,
+  note,
+  noBorder,
+}: {
+  icon: string;
+  title: string;
+  /** 選填，跟著標題同一行、用括號附註——例如「匯款帳號」後面直接
+   * 接「⚠️ 匯款後請告知...」提醒，不用另外佔一行 */
+  note?: string;
+  noBorder?: boolean;
+}) {
   return (
-    <div className={`mt-3 mb-1.5 flex items-center gap-2 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
-      <span className="text-base leading-none">{icon}</span>
-      <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
-        {title}
+    <div className={`mt-3 mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
+      <span className="flex items-center gap-2">
+        <span className="text-base leading-none">{icon}</span>
+        <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
+          {title}
+        </span>
       </span>
+      {note && (
+        <span className="text-[11px] font-semibold" style={{ color: colors.alert }}>
+          （{note}）
+        </span>
+      )}
     </div>
   );
 }
@@ -463,6 +482,14 @@ function QuoteReceiptCard({
                                   </span>
                                   <span>=</span>
                                   <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                                  {item.subLabel && (
+                                    <p
+                                      className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}
+                                      style={{ color: colors.muted }}
+                                    >
+                                      {item.subLabel}
+                                    </p>
+                                  )}
                                 </div>
                               ))}
                             </div>
@@ -522,20 +549,23 @@ function QuoteReceiptCard({
 
                         {quote.messageContext.bank && (
                           <>
-                            <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
-                            <div className="flex flex-col gap-2 text-sm font-semibold">
-                              <PairedInfoRow
-                                items={[
-                                  { label: "銀行", value: quote.messageContext.bank.name },
-                                  { label: "分行", value: quote.messageContext.bank.branch },
-                                ]}
-                              />
-                              <InfoRow label="帳號" value={quote.messageContext.bank.accountNumber} />
-                              <InfoRow label="戶名" value={quote.messageContext.bank.accountName} />
+                            <ReceiptSectionHeader icon="🏦" title="匯款帳號" note={`⚠️ ${BANK_TRANSFER_NOTE}`} />
+                            <div className="flex gap-3 text-sm font-semibold">
+                              <div className="flex-[3]">
+                                <p className="text-[10px]" style={{ color: colors.muted }}>
+                                  銀行
+                                </p>
+                                <p style={{ color: colors.ink }}>
+                                  {quote.messageContext.bank.name}（{quote.messageContext.bank.branch}）
+                                </p>
+                              </div>
+                              <div className="flex-[2]">
+                                <p className="text-[10px]" style={{ color: colors.muted }}>
+                                  帳號
+                                </p>
+                                <p style={{ color: colors.ink }}>{quote.messageContext.bank.accountNumber}</p>
+                              </div>
                             </div>
-                            <p className="mt-2 text-xs font-semibold leading-relaxed" style={{ color: colors.alert }}>
-                              ⚠️ {BANK_TRANSFER_NOTE}
-                            </p>
                           </>
                         )}
 

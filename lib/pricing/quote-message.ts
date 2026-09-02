@@ -179,6 +179,10 @@ function addOnLines(quote: PackageQuote): string[] {
  */
 export interface AccommodationLineItem {
   roomLabel: string;
+  /** 選填，房型名稱下方另外一行的補充說明——例如「降規四人套房」
+   * 底下的「（提供1床使用，以雙人房計費）」，跟房型名稱分開存，
+   * 畫面上分兩行顯示，不是直接接在房型名稱後面 */
+  subLabel?: string;
   unitPrice: number;
   qty: number;
   lineTotal: number;
@@ -230,6 +234,7 @@ export function accommodationDayGroups(quote: PackageQuote): AccommodationDayGro
     if (roomAllocation.fourPersonDowngradeCount > 0) {
       items.push({
         roomLabel: "降規四人套房",
+        subLabel: "（提供1床使用，以雙人房計費）",
         unitPrice: downgradePrice,
         qty: roomAllocation.fourPersonDowngradeCount,
         lineTotal: downgradePrice * roomAllocation.fourPersonDowngradeCount,
@@ -293,6 +298,7 @@ export function consolidatedAccommodationGroups(quote: PackageQuote): Consolidat
       nights: nightsInGroup,
       items: dayGroups[i].items.map((it) => ({
         roomLabel: it.roomLabel,
+        subLabel: it.subLabel,
         unitPrice: it.unitPrice,
         qty: it.qty,
         lineTotal: it.unitPrice * it.qty * nightsInGroup,
@@ -423,6 +429,7 @@ export function buildQuoteMessage(quote: PackageQuote): string {
       lines.push(
         `${prefix}${item.roomLabel} $${item.unitPrice.toLocaleString()} × ${item.qty}間 = $${item.lineTotal.toLocaleString()} 元`
       );
+      if (item.subLabel) lines.push(`${prefix}${item.subLabel}`);
     }
   }
 

@@ -395,13 +395,32 @@ function formatSlashDate(dateStr: string): string {
 
 /** 報價收據用的段落標題：icon + 標題文字，跟複製文字版的 emoji 對應，
  * 讓螢幕/圖片版跟複製文字版看起來是「同一份東西」的兩種呈現方式 */
-function ReceiptSectionHeader({ icon, title, noBorder }: { icon: string; title: string; noBorder?: boolean }) {
+function ReceiptSectionHeader({
+  icon,
+  title,
+  note,
+  noBorder,
+}: {
+  icon: string;
+  title: string;
+  /** 選填，跟著標題同一行、用括號附註——例如「匯款帳號」後面直接
+   * 接「⚠️ 匯款後請告知...」提醒，不用另外佔一行 */
+  note?: string;
+  noBorder?: boolean;
+}) {
   return (
-    <div className={`mt-3 mb-1.5 flex items-center gap-2 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
-      <span className="text-base leading-none">{icon}</span>
-      <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
-        {title}
+    <div className={`mt-3 mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
+      <span className="flex items-center gap-2">
+        <span className="text-base leading-none">{icon}</span>
+        <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
+          {title}
+        </span>
       </span>
+      {note && (
+        <span className="text-[11px] font-semibold" style={{ color: colors.alert }}>
+          （{note}）
+        </span>
+      )}
     </div>
   );
 }
@@ -907,8 +926,8 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-5 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
-                <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
+              <div className="relative px-6 pb-4 pt-5 text-center" style={{ backgroundColor: colors.pine }}>
+                <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
                     PROPERTY_OPTIONS.find((opt) => opt.value === quote.request.propertyCode)?.label
@@ -1011,6 +1030,14 @@ export function QuoteForm() {
                           </span>
                           <span>=</span>
                           <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                          {item.subLabel && (
+                            <p
+                              className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}
+                              style={{ color: colors.muted }}
+                            >
+                              {item.subLabel}
+                            </p>
+                          )}
                         </Fragment>
                       ))}
                     </Fragment>
@@ -1041,14 +1068,18 @@ export function QuoteForm() {
                   )}
                 </div>
 
-                {/* 總金額：淡綠色底色的區塊，是整張收據視覺上的焦點 */}
+                {/* 總金額：淡綠色底色的區塊，是整張收據視覺上的焦點。
+                    標籤/金額改成同一列（原本是標籤一行、大字金額另外
+                    一行），省一點垂直空間 */}
                 <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
-                  <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                    包棟總費用
-                  </p>
-                  <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
-                    NT$ {quote.packageTotal.toLocaleString()}
-                  </p>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                      包棟總費用
+                    </span>
+                    <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
+                      NT$ {quote.packageTotal.toLocaleString()}
+                    </span>
+                  </div>
                   <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
                     <span style={{ color: colors.muted }} className="text-xs tracking-wide">
                       訂金
@@ -1059,7 +1090,7 @@ export function QuoteForm() {
                   </div>
                   <div className="mt-1 flex items-baseline justify-between">
                     <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                      尾款(入住前 1 週匯款)
+                      尾款<span style={{ color: colors.alert }}>(入住前 1 週匯款)</span>
                     </span>
                     <span style={{ color: colors.ink }} className="text-sm font-semibold">
                       NT$ {quote.balanceDue.toLocaleString()}
@@ -1067,26 +1098,32 @@ export function QuoteForm() {
                   </div>
                 </div>
 
-                {/* 匯款帳號：label/value 靠近一點方便逐行核對 */}
+                {/* 匯款帳號：label/value 靠近一點方便逐行核對。分行併進
+                    銀行名稱後面括號裡；「匯款後請告知」提醒改成緊接在
+                    「匯款帳號」標題同一行、用括號附註
+                    （ReceiptSectionHeader 的 note 參數），不再另外
+                    佔一整行。
+                    ⚠️ 戶名拿掉了——空出來的寬度讓給銀行（帶分行說明，
+                    通常比較長）跟帳號，降低換行機率。 */}
                 {quote.messageContext?.bank && (
                   <>
-                    <ReceiptSectionHeader icon="🏦" title="匯款帳號" />
-                    <div className="flex flex-col gap-2 text-sm font-semibold">
-                      <PairedInfoRow
-                        items={[
-                          { label: "銀行", value: quote.messageContext.bank.name },
-                          { label: "分行", value: quote.messageContext.bank.branch },
-                        ]}
-                      />
-                      <InfoRow label="帳號" value={quote.messageContext.bank.accountNumber} />
-                      <InfoRow label="戶名" value={quote.messageContext.bank.accountName} />
+                    <ReceiptSectionHeader icon="🏦" title="匯款帳號" note={`⚠️ ${BANK_TRANSFER_NOTE}`} />
+                    <div className="flex gap-3 text-sm font-semibold">
+                      <div className="flex-[3]">
+                        <p className="text-[10px]" style={{ color: colors.muted }}>
+                          銀行
+                        </p>
+                        <p style={{ color: colors.ink }}>
+                          {quote.messageContext.bank.name}（{quote.messageContext.bank.branch}）
+                        </p>
+                      </div>
+                      <div className="flex-[2]">
+                        <p className="text-[10px]" style={{ color: colors.muted }}>
+                          帳號
+                        </p>
+                        <p style={{ color: colors.ink }}>{quote.messageContext.bank.accountNumber}</p>
+                      </div>
                     </div>
-                    <p
-                      className="mt-2 text-xs font-semibold leading-relaxed"
-                      style={{ color: colors.alert }}
-                    >
-                      ⚠️ {BANK_TRANSFER_NOTE}
-                    </p>
                   </>
                 )}
 
