@@ -48,14 +48,18 @@ export function calculateDeposit(
   return Math.floor((packageTotal * rate) / unit) * unit;
 }
 
-/** 加床費用：加固定床數量 * 加固定床費用 + 加臨時床數量 * 加臨時床費用 */
+/** 加床費用：加固定床數量 * 加固定床費用（一次性）+ 加臨時床數量 *
+ * 加臨時床費用 * 入住晚數——臨時床是每晚都要租用的東西，固定床是
+ * 一次性加購（例如把降規房間的床型固定改成加床配置），所以只有
+ * 臨時床的費用要乘上晚數，固定床不用。 */
 export function calculateExtraBedFee(
   extraBedFixedQty: number,
   extraBedTempQty: number,
-  prices: FlatServicePrices
+  prices: FlatServicePrices,
+  nights: number
 ): number {
   if (extraBedFixedQty <= 0 && extraBedTempQty <= 0) return 0;
-  return extraBedFixedQty * prices.extraBedFixed + extraBedTempQty * prices.extraBedTemp;
+  return extraBedFixedQty * prices.extraBedFixed + extraBedTempQty * prices.extraBedTemp * nights;
 }
 
 /** 加房費用：加房數量 * 加房費用 */
@@ -356,7 +360,7 @@ export function calculatePackageQuote(params: {
     ? 0
     : nightlyBreakdown.reduce((sum, night) => sum + night.amount, 0);
 
-  const extraBedFee = calculateExtraBedFee(extraBedFixedQty, extraBedTempQty, servicePrices);
+  const extraBedFee = calculateExtraBedFee(extraBedFixedQty, extraBedTempQty, servicePrices, nightlyBreakdown.length);
   const extraRoomFee = calculateExtraRoomFee(extraRoomQty, servicePrices);
   const petCleaningFee = calculatePetCleaningFee(petQty, roomCounts.freePetAllowance, servicePrices);
   const addOnFee = calculateAddOnFee(request.addOns, servicePrices);

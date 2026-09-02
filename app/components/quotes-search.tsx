@@ -49,6 +49,7 @@ import {
   buildQuoteMessage,
   consolidatedAccommodationGroups,
   daysNightsLabel,
+  extraBedTempLineItem,
   formatDateWithWeekday,
   guestSummary,
   INFANT_NOTE,
@@ -116,6 +117,56 @@ function Row({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </div>
+  );
+}
+
+/** 跟 quote-form.tsx 用的是同一種寫法：type="text" + inputMode="numeric"，
+ * 內部自己維護一份原始字串狀態（raw），不是讓 <input type="number">
+ * 直接綁定數字——要把 0 改成別的數字，不用先在 0 後面打字、再手動
+ * 刪掉 0。編輯報價內容表單的人數／房型欄位跟一開始製作報價單用
+ * 同一套元件，維持輸入體驗一致。 */
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const [raw, setRaw] = useState(() => String(value));
+
+  useEffect(() => {
+    setRaw(String(value));
+  }, [value]);
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const next = e.target.value;
+    if (next === "" || /^\d*$/.test(next)) {
+      setRaw(next);
+      onChange(next === "" ? 0 : Number(next));
+    }
+  }
+
+  function handleBlur() {
+    if (raw === "") setRaw("0");
+  }
+
+  return (
+    <label className="flex flex-col gap-1">
+      <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+        {label}
+      </span>
+      <input
+        type="text"
+        inputMode="numeric"
+        value={raw}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        className="w-full border-b bg-transparent py-1 text-center text-sm outline-none"
+        style={{ borderColor: colors.line, color: colors.ink }}
+      />
+    </label>
   );
 }
 
@@ -494,6 +545,26 @@ function QuoteReceiptCard({
                               ))}
                             </div>
                           ))}
+                          {/* 加臨時床用跟房型一樣的格式（單價×間數×晚數＝
+                              小計），不是跟其他加購項目一樣塞進下面那個
+                              只有「標籤/金額」兩欄的列表——這是唯一一項
+                              金額會隨晚數變動的加購項目，格式跟房型一致
+                              比較看得出來怎麼算的。 */}
+                          {(() => {
+                            const item = extraBedTempLineItem(quote);
+                            if (!item) return null;
+                            return (
+                              <div className="contents">
+                                <span>{item.roomLabel}</span>
+                                <span className="text-right tabular-nums">
+                                  NT${item.unitPrice.toLocaleString()}×{item.qty}
+                                  {item.nights > 1 ? `×${item.nights}晚` : ""}
+                                </span>
+                                <span>=</span>
+                                <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                              </div>
+                            );
+                          })()}
                           {addOnFeeBreakdown(quote).map((item, i) => (
                             <div key={`fee-${i}`} className="contents">
                               <span>{item.label}</span>
@@ -563,7 +634,9 @@ function QuoteReceiptCard({
                                 <p className="text-[10px]" style={{ color: colors.muted }}>
                                   帳號
                                 </p>
-                                <p style={{ color: colors.ink }}>{quote.messageContext.bank.accountNumber}</p>
+                                <p className="text-base tracking-wide" style={{ color: colors.ink }}>
+                                  {quote.messageContext.bank.accountNumber}
+                                </p>
                               </div>
                             </div>
                           </>
@@ -1575,7 +1648,7 @@ export function QuotesSearch() {
         {rowQuoteImageData && (
           <div style={{ height: 0, overflow: "hidden" }}>
             <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
-              <div className={body.className} style={{ width: "414px", backgroundColor: colors.canvas }}>
+              <div className={body.className} style={{ width: "480px", backgroundColor: colors.canvas }}>
                 <QuoteReceiptCard
                   quote={rowQuoteImageData.quote}
                   createdAt={rowQuoteImageData.createdAt}
@@ -1731,58 +1804,26 @@ export function QuotesSearch() {
                           style={{ borderColor: colors.line, color: colors.ink }}
                         />
                       </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          大人
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editRequest.adults}
-                          onChange={(e) => updateEditRequestField("adults", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          小孩
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editRequest.children}
-                          onChange={(e) => updateEditRequestField("children", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          嬰幼兒
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editRequest.infants ?? 0}
-                          onChange={(e) => updateEditRequestField("infants", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          寵物
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editRequest.pets ?? 0}
-                          onChange={(e) => updateEditRequestField("pets", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
+                      <NumberField
+                        label="大人"
+                        value={editRequest.adults}
+                        onChange={(v) => updateEditRequestField("adults", v)}
+                      />
+                      <NumberField
+                        label="小孩"
+                        value={editRequest.children}
+                        onChange={(v) => updateEditRequestField("children", v)}
+                      />
+                      <NumberField
+                        label="嬰幼兒"
+                        value={editRequest.infants ?? 0}
+                        onChange={(v) => updateEditRequestField("infants", v)}
+                      />
+                      <NumberField
+                        label="寵物"
+                        value={editRequest.pets ?? 0}
+                        onChange={(v) => updateEditRequestField("pets", v)}
+                      />
                     </div>
 
                     <div>
@@ -1790,58 +1831,26 @@ export function QuotesSearch() {
                         房型數量（留空或 0 表示系統自動依人數分配，只此清綠沒有雙人套房／雅房，陌隱/水景璞堤沒有降規四人套房）
                       </p>
                       <div className="grid grid-cols-2 gap-3">
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            四人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.roomOverride?.fourPersonSuiteCount ?? 0}
-                            onChange={(e) => updateEditRoomOverride("fourPersonSuiteCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            降規四人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.roomOverride?.fourPersonDowngradeCount ?? 0}
-                            onChange={(e) => updateEditRoomOverride("fourPersonDowngradeCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            雙人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.roomOverride?.doubleSuiteCount ?? 0}
-                            onChange={(e) => updateEditRoomOverride("doubleSuiteCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            雙人雅房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.roomOverride?.doublePlainCount ?? 0}
-                            onChange={(e) => updateEditRoomOverride("doublePlainCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
+                        <NumberField
+                          label="四人套房"
+                          value={editRequest.roomOverride?.fourPersonSuiteCount ?? 0}
+                          onChange={(v) => updateEditRoomOverride("fourPersonSuiteCount", v)}
+                        />
+                        <NumberField
+                          label="降規四人套房"
+                          value={editRequest.roomOverride?.fourPersonDowngradeCount ?? 0}
+                          onChange={(v) => updateEditRoomOverride("fourPersonDowngradeCount", v)}
+                        />
+                        <NumberField
+                          label="雙人套房"
+                          value={editRequest.roomOverride?.doubleSuiteCount ?? 0}
+                          onChange={(v) => updateEditRoomOverride("doubleSuiteCount", v)}
+                        />
+                        <NumberField
+                          label="雙人雅房"
+                          value={editRequest.roomOverride?.doublePlainCount ?? 0}
+                          onChange={(v) => updateEditRoomOverride("doublePlainCount", v)}
+                        />
                       </div>
                     </div>
 

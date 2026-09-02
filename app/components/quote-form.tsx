@@ -88,6 +88,7 @@ import {
   buildQuoteMessage,
   consolidatedAccommodationGroups,
   daysNightsLabel,
+  extraBedTempLineItem,
   formatDateWithWeekday,
   guestSummary,
   INFANT_NOTE,
@@ -612,6 +613,11 @@ export function QuoteForm() {
     if (!receiptRef.current) return;
     setImageWorking(true);
     setImageNote(null);
+    // 記錄有沒有真的動過寬度、原本的寬度是什麼，這樣不管中間哪個
+    // 步驟丟出例外，都能在最下面的 finally 保證改回去，不會把頁面
+    // 卡在被截圖用的暫時寬度
+    let widthWasOverridden = false;
+    let originalWidth = "";
 
     try {
       // 等 next/font 載入的字型（Fraunces/Work Sans）完全就緒再截圖，
@@ -622,6 +628,25 @@ export function QuoteForm() {
       }
 
       const node = receiptRef.current;
+      // ⚠️ 一般手機瀏覽器的畫面寬度（375～430px 左右）遠比整份收據
+      // 設計時假設的寬度（40rem／640px）窄很多——收據本身是用
+      // w-full + max-width 做響應式排版，在手機上會被壓縮到跟螢幕
+      // 一樣窄，這時候某些原本該在一行內顯示完的內容（例如銀行帳號
+      // 那一排）會被擠到換行。網頁上這樣顯示沒問題（響應式排版本來
+      // 就該這樣），但截圖的時候如果直接用 node.scrollWidth（當下
+      // 實際渲染的寬度），截出來的圖片就會是「手機螢幕寬度」的窄
+      // 版本，帶著這些不必要的換行。
+      // 這裡在截圖前，暫時把寬度強制改成比較寬的固定值，讓內容重新
+      // 排版成「設計寬度」該有的樣子，截圖後再把寬度改回去（清空
+      // inline style，讓它恢復成原本响應式的 w-full 行為），不影響
+      // 使用者接下來繼續操作頁面看到的畫面。
+      originalWidth = node.style.width;
+      node.style.width = "480px";
+      widthWasOverridden = true;
+      // 改寬度後瀏覽器要重新排版才會反映到 scrollWidth/scrollHeight，
+      // 用兩次 requestAnimationFrame 確保至少經過一次繪製週期
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+
       // 明確指定寬高，用 scrollWidth/scrollHeight（完整內容的實際尺寸，
       // 不受目前畫面捲動位置影響）取代預設量法，避免圖片下緣被裁切。
       const { toBlob } = await import("html-to-image");
@@ -661,6 +686,12 @@ export function QuoteForm() {
       if (err instanceof Error && err.name === "AbortError") return;
       setWarning(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
     } finally {
+      // 不管上面成功還是中途出錯，只要真的動過寬度就一定要改回去，
+      // 不然頁面會卡在被截圖用的暫時寬度，使用者接下來看到的畫面
+      // 會不正常
+      if (widthWasOverridden && receiptRef.current) {
+        receiptRef.current.style.width = originalWidth;
+      }
       setImageWorking(false);
     }
   }
@@ -1042,6 +1073,25 @@ export function QuoteForm() {
                       ))}
                     </Fragment>
                   ))}
+                  {/* 加臨時床用跟房型一樣的格式（單價×間數×晚數＝小計），
+                      不是跟其他加購項目一樣塞進下面那個只有「標籤/
+                      金額」兩欄的列表——這是唯一一項金額會隨晚數變動
+                      的加購項目，格式跟房型一致比較看得出來怎麼算的。 */}
+                  {(() => {
+                    const item = extraBedTempLineItem(quote);
+                    if (!item) return null;
+                    return (
+                      <Fragment key="extra-bed-temp">
+                        <span>{item.roomLabel}</span>
+                        <span className="text-right tabular-nums">
+                          NT${item.unitPrice.toLocaleString()}×{item.qty}
+                          {item.nights > 1 ? `×${item.nights}晚` : ""}
+                        </span>
+                        <span>=</span>
+                        <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                      </Fragment>
+                    );
+                  })()}
                   {addOnFeeBreakdown(quote).map((item, i) => (
                     <Fragment key={`fee-${i}`}>
                       <span>{item.label}</span>
@@ -1121,7 +1171,9 @@ export function QuoteForm() {
                         <p className="text-[10px]" style={{ color: colors.muted }}>
                           帳號
                         </p>
-                        <p style={{ color: colors.ink }}>{quote.messageContext.bank.accountNumber}</p>
+                        <p className="text-base tracking-wide" style={{ color: colors.ink }}>
+                          {quote.messageContext.bank.accountNumber}
+                        </p>
                       </div>
                     </div>
                   </>

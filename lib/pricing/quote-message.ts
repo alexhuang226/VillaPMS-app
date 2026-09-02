@@ -328,10 +328,10 @@ export function addOnFeeBreakdown(quote: PackageQuote): { label: string; amount:
     items.push({ label: "加固定床", amount: extraBedFixedQty * prices.extraBedFixed });
   }
 
-  const extraBedTempQty = request.extraBedTempQty ?? 0;
-  if (extraBedTempQty > 0) {
-    items.push({ label: "加臨時床", amount: extraBedTempQty * prices.extraBedTemp });
-  }
+  // 加臨時床不在這裡列——它是唯一一項金額要乘上入住晚數的加購項目，
+  // 顯示方式改成跟上面房型費用明細同一種「單價×間數×晚數＝小計」
+  // 格式（見 extraBedTempLineItem()），不適合塞進這個只有「標籤＋
+  // 金額」兩欄的列表，避免格式不一致。
 
   const extraRoomQty = request.extraRoomQty ?? 0;
   if (extraRoomQty > 0) items.push({ label: "加開房間", amount: extraRoomQty * prices.extraRoom });
@@ -343,6 +343,28 @@ export function addOnFeeBreakdown(quote: PackageQuote): { label: string; amount:
   if (request.addOns?.earlyCheckin) items.push({ label: "提前入住", amount: prices.earlyCheckin });
 
   return items;
+}
+
+/**
+ * 加臨時床費用，用跟房型費用明細（AccommodationLineItem）一樣的
+ * 「單價／間數／小計」結構，讓畫面上可以套用同一套「單價×間數×
+ * 晚數＝小計」的格式顯示（跟四人套房／雙人套房那些房型項目一致），
+ * 不是「加臨時床（N床×M晚）：$總額」這種另外拼好文字標籤的格式。
+ * 沒有加臨時床（qty 是 0）回傳 null。
+ */
+export function extraBedTempLineItem(quote: PackageQuote): (AccommodationLineItem & { nights: number }) | null {
+  const { request, messageContext } = quote;
+  if (!messageContext) return null;
+  const qty = request.extraBedTempQty ?? 0;
+  if (qty <= 0) return null;
+  const unitPrice = messageContext.servicePrices.extraBedTemp;
+  return {
+    roomLabel: "加臨時床",
+    unitPrice,
+    qty,
+    nights: quote.nights,
+    lineTotal: unitPrice * qty * quote.nights,
+  };
 }
 
 /** 「包棟基本人數」提醒區塊的項目，只列出這次入住實際出現過的 day_type */
@@ -431,6 +453,17 @@ export function buildQuoteMessage(quote: PackageQuote): string {
       );
       if (item.subLabel) lines.push(`${prefix}${item.subLabel}`);
     }
+  }
+
+  // 加臨時床用跟房型一樣的「單價×間數×晚數＝小計」格式，不是跟其他
+  // 加購項目一樣塞進 addOnFeeBreakdown 裡用「標籤：金額」帶過——
+  // 這是唯一一項金額會隨晚數變動的加購項目，格式跟房型一致比較
+  // 看得出來怎麼算出來的
+  const extraBedTemp = extraBedTempLineItem(quote);
+  if (extraBedTemp) {
+    lines.push(
+      ` 💰 ${extraBedTemp.roomLabel} $${extraBedTemp.unitPrice.toLocaleString()} × ${extraBedTemp.qty}床 × ${extraBedTemp.nights}晚 = $${extraBedTemp.lineTotal.toLocaleString()} 元`
+    );
   }
 
   for (const item of addOnFeeBreakdown(quote)) {

@@ -598,7 +598,15 @@ export function ReservationsSearch({
       });
       setCreatedReservationNo(reservationNo);
       setShowCreateForm(false);
-      // 建立成功後重新查一次目前這個月的日曆，讓新訂單馬上顯示出來
+      // 建立成功後重新查一次目前這個月的日曆，讓新訂單馬上顯示出來。
+      // ⚠️ 這裡的邏輯本身跟換月份時觸發的查詢完全一樣，但職員反映
+      // 新增訂單後月曆沒有馬上更新，要換月份、切回來才看得到——研判
+      // 是剛寫入的資料庫記錄，緊接著馬上查詢時還沒完全反映出來
+      // （資料庫寫入到「查詢讀得到」中間可能有極短暫的延遲），換
+      // 月份時因為隔了一段使用者操作的時間，這個延遲早就過了才不會
+      // 遇到。這裡刻意加一個很短的延遲再查，避免緊接著同一個瞬間查詢
+      // 到還沒完全寫入的狀態。
+      await new Promise((resolve) => setTimeout(resolve, 400));
       if (year !== null && month !== null) {
         const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
