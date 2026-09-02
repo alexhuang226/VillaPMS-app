@@ -55,7 +55,7 @@ function formatPercent(rate: number): string {
 }
 
 function formatMoney(amount: number): string {
-  return `NT$ ${Math.round(amount).toLocaleString()}`;
+  return Math.round(amount).toLocaleString();
 }
 
 export function RevenueStats() {
@@ -240,10 +240,10 @@ export function RevenueStats() {
               <table className="mt-2 w-full text-[11px]">
                 <thead>
                   <tr style={{ color: colors.muted }}>
-                    <th className="pb-1 text-left font-normal">月份</th>
-                    <th className="pb-1 text-right font-normal">營收</th>
-                    <th className="pb-1 text-right font-normal">費用</th>
-                    <th className="pb-1 text-right font-normal">毛利</th>
+                    <th className="pb-1 text-center font-normal">月份</th>
+                    <th className="pb-1 text-center font-normal">營收</th>
+                    <th className="pb-1 text-center font-normal">費用</th>
+                    <th className="pb-1 text-center font-normal">毛利</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -295,18 +295,32 @@ export function RevenueStats() {
                     expenses.filter((e) => e.month === monthNum).map((e) => [e.propertyCode, e.totalAmount])
                   );
                   const monthTotalExpense = rows.reduce((sum, r) => sum + (expenseByCode.get(r.propertyCode) ?? 0), 0);
+                  // 累計——從 1 月一路加到這個月為止，讓職員不用自己
+                  // 心算就能看出「到目前這個月為止，今年整體做了多少」，
+                  // 不是只看單月的數字
+                  const cumulativeRows = stats.monthlyByProperty.filter((e) => e.month <= monthNum);
+                  const cumulativeRevenue = cumulativeRows.reduce((sum, r) => sum + r.revenue, 0);
+                  const cumulativeNights = cumulativeRows.reduce((sum, r) => sum + r.nightsBooked, 0);
+                  const cumulativeExpense = expenses
+                    .filter((e) => e.month <= monthNum)
+                    .reduce((sum, e) => sum + e.totalAmount, 0);
+                  const cumulativeDays = Array.from({ length: monthNum }, (_, i) =>
+                    new Date(stats.year, i + 1, 0).getDate()
+                  ).reduce((sum, d) => sum + d, 0);
+                  const cumulativeOccupancyRate =
+                    rows.length > 0 && cumulativeDays > 0 ? cumulativeNights / (rows.length * cumulativeDays) : 0;
                   return (
                     <div key={monthNum} className="border p-3" style={{ borderColor: colors.line, opacity: monthHasData ? 1 : 0.5 }}>
                       <p className={`${display.className} text-base italic`}>{monthNum} 月</p>
                       <table className="mt-1 w-full text-[11px]">
                         <thead>
                           <tr style={{ color: colors.muted }}>
-                            <th className="pb-1 text-left font-normal">民宿</th>
-                            <th className="pb-1 text-right font-normal">營收</th>
-                            <th className="pb-1 text-right font-normal">費用</th>
-                            <th className="pb-1 text-right font-normal">毛利</th>
-                            <th className="pb-1 text-right font-normal">訂房天數</th>
-                            <th className="pb-1 text-right font-normal">住房率</th>
+                            <th className="pb-1 text-center font-normal">民宿</th>
+                            <th className="pb-1 text-center font-normal">營收</th>
+                            <th className="pb-1 text-center font-normal">費用</th>
+                            <th className="pb-1 text-center font-normal">毛利</th>
+                            <th className="pb-1 text-center font-normal">訂房天數</th>
+                            <th className="pb-1 text-center font-normal">住房率</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -338,6 +352,19 @@ export function RevenueStats() {
                             </td>
                             <td className="py-0.5 text-right tabular-nums">{monthTotalNights} 天</td>
                             <td className="py-0.5 text-right tabular-nums">{formatPercent(monthOccupancyRate)}</td>
+                          </tr>
+                          <tr style={{ color: colors.muted }}>
+                            <td className="py-0.5">累計</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeRevenue)}</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeExpense)}</td>
+                            <td
+                              className="py-0.5 text-right tabular-nums"
+                              style={{ color: cumulativeRevenue - cumulativeExpense >= 0 ? colors.pine : colors.alert }}
+                            >
+                              {formatMoney(cumulativeRevenue - cumulativeExpense)}
+                            </td>
+                            <td className="py-0.5 text-right tabular-nums">{cumulativeNights} 天</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatPercent(cumulativeOccupancyRate)}</td>
                           </tr>
                         </tbody>
                       </table>
