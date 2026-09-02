@@ -668,7 +668,7 @@ export function QuoteForm() {
         .qf-root .qf-input:focus { border-color: ${colors.pine} !important; }
       `}</style>
 
-      <div className="w-full" style={{ maxWidth: "34rem", color: colors.ink }}>
+      <div className="w-full" style={{ maxWidth: "40rem", color: colors.ink }}>
         {/* 改成瀏覽器上一頁，不是寫死連回首頁——這個頁面現在主要是從
             訂單管理（月曆上方「製作報價單」按鈕）點進來的，回上一頁
             實際上就是回到訂單管理，比強制導回首頁更符合現在的使用
@@ -1095,9 +1095,8 @@ export function QuoteForm() {
                   {baseGuestsReminderItems(quote).length > 0 && (
                     <div>
                       <p>
-                        {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
+                        {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計，{INFANT_NOTE})：
                       </p>
-                      <p>{INFANT_NOTE}</p>
                       {baseGuestsReminderItems(quote).map((item, i) => (
                         <p key={i}>
                           ・{item.label}({item.note})：{item.required} 人

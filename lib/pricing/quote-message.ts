@@ -41,7 +41,7 @@ export const BOOKING_POLICY_ICONS = ["🛏️", "👥", "🗺️"];
 /** 「包棟基本人數」提醒區塊標題前面的 icon */
 export const BASE_GUESTS_ICON = "🧑‍🤝‍🧑";
 /** 已經含符號跟句號，直接顯示，不用再另外包 "(*...)" */
-export const INFANT_NOTE = "・3歲以下幼童不算佔床。";
+export const INFANT_NOTE = "3歲以下幼童不算佔床";
 export const BANK_TRANSFER_NOTE = "匯款後請告知，以便核對並保留房期！";
 
 const WEEKDAY_LABELS = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
@@ -456,8 +456,7 @@ export function buildQuoteMessage(quote: PackageQuote): string {
 
   lines.push("📝 預訂須知");
 
-  lines.push(`${BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：`);
-  lines.push(` ${INFANT_NOTE}`);
+  lines.push(`${BASE_GUESTS_ICON} 包棟基本人數(未達以低消計，${INFANT_NOTE})：`);
   for (const item of baseGuestsReminderItems(quote)) {
     lines.push(` • ${item.label}(${item.note})：${item.required} 人`);
   }

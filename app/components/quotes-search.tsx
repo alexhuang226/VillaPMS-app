@@ -542,9 +542,8 @@ function QuoteReceiptCard({
                           {baseGuestsReminderItems(quote).length > 0 && (
                             <div>
                               <p>
-                                {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
+                                {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計，{INFANT_NOTE})：
                               </p>
-                              <p>{INFANT_NOTE}</p>
                               {baseGuestsReminderItems(quote).map((item, i) => (
                                 <p key={i}>
                                   ・{item.label}({item.note})：{item.required} 人
@@ -1260,7 +1259,7 @@ export function QuotesSearch() {
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
-      <div className="w-full" style={{ maxWidth: "34rem", color: colors.ink }}>
+      <div className="w-full" style={{ maxWidth: "40rem", color: colors.ink }}>
         <Link href="/" className="text-xs" style={{ color: colors.blue }}>
           ← 返回首頁
         </Link>
