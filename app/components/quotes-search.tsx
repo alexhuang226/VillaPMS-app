@@ -369,8 +369,8 @@ function QuoteReceiptCard({
   return (
     <>
                     <div ref={cardRef} className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="relative px-6 pb-5 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
-                        <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
+                      <div className="relative px-6 pb-4 pt-5 text-center" style={{ backgroundColor: colors.pine }}>
+                        <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                           {`${quote.messageContext.propertyName}私人會所`}
                         </p>
                         {/* 「包棟報價單/訂房確認單」外面包一層 relative 容器——
@@ -494,12 +494,14 @@ function QuoteReceiptCard({
                         </div>
 
                         <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
-                          <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                            包棟總費用
-                          </p>
-                          <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
-                            NT$ {quote.packageTotal.toLocaleString()}
-                          </p>
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                              包棟總費用
+                            </span>
+                            <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
+                              NT$ {quote.packageTotal.toLocaleString()}
+                            </span>
+                          </div>
                           <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
                             <span style={{ color: colors.muted }} className="text-xs tracking-wide">
                               訂金
@@ -510,7 +512,7 @@ function QuoteReceiptCard({
                           </div>
                           <div className="mt-1 flex items-baseline justify-between">
                             <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                              尾款(入住前 1 週匯款)
+                              尾款<span style={{ color: colors.alert }}>(入住前 1 週匯款)</span>
                             </span>
                             <span style={{ color: colors.ink }} className="text-sm font-semibold">
                               NT$ {quote.balanceDue.toLocaleString()}
@@ -1435,7 +1437,7 @@ export function QuotesSearch() {
                       className="text-[11px] disabled:opacity-50"
                       style={{ color: colors.blue }}
                     >
-                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 圖片"}
+                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 訂單圖片"}
                     </button>
                   ) : (
                     <button
@@ -1543,7 +1545,7 @@ export function QuotesSearch() {
         {rowQuoteImageData && (
           <div style={{ height: 0, overflow: "hidden" }}>
             <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
-              <div className={body.className} style={{ width: "375px", backgroundColor: colors.canvas }}>
+              <div className={body.className} style={{ width: "414px", backgroundColor: colors.canvas }}>
                 <QuoteReceiptCard
                   quote={rowQuoteImageData.quote}
                   createdAt={rowQuoteImageData.createdAt}
@@ -2135,7 +2137,7 @@ export function QuotesSearch() {
                       className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
                       style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
                     >
-                      {imageWorking ? "圖片產生中…" : "🖼️ 轉成圖片"}
+                      {imageWorking ? "圖片產生中…" : "🖼️ 訂單圖片"}
                     </button>
                     {imageError && (
                       <p className="text-[11px]" style={{ color: colors.alert }}>
