@@ -211,7 +211,6 @@ function ConfirmationImageCard({
             </p>
           </div>
           <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
-            <p style={{ color: colors.pine }}>✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~</p>
             <p className="mt-3" style={{ color: colors.muted }}>
               ━━━━━━━━━━━━━━
             </p>

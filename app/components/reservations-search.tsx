@@ -22,6 +22,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
@@ -230,6 +231,24 @@ async function fetchCalendarRange(year: number, month: number): Promise<Calendar
   return getCalendarReservationsForRangeAction(startDate, endDateExclusive);
 }
 
+/** 某筆訂房區間（checkIn ~ checkOut）落在某年某月的晚數，兩者沒有
+ * 重疊回傳 0——跟 lib/revenue/queries.ts 的同名函式邏輯一致，這裡是
+ * 前端要用，兩邊執行環境不同沒辦法直接共用。用來算「當月每間民宿
+ * 統計訂房天數」，月曆資料本身含跨月補的天數（見 getGridDateRange
+ * 的說明），只算真正屬於目前這個月份的晚數，不能整包直接數。 */
+function nightsInMonth(checkIn: string, checkOut: string, year: number, month: number): number {
+  const monthStart = Date.UTC(year, month - 1, 1);
+  const monthEndExclusive = Date.UTC(year, month, 1);
+  const stayStart = new Date(`${checkIn}T00:00:00Z`).getTime();
+  const stayEnd = new Date(`${checkOut}T00:00:00Z`).getTime();
+
+  const overlapStart = Math.max(monthStart, stayStart);
+  const overlapEnd = Math.min(monthEndExclusive, stayEnd);
+
+  const nights = Math.round((overlapEnd - overlapStart) / (1000 * 60 * 60 * 24));
+  return Math.max(0, nights);
+}
+
 interface WeekBarSegment {
   reservation: CalendarReservation;
   startCol: number; // 1-7，這筆訂單在這一週最早出現的欄位
@@ -374,6 +393,7 @@ export function ReservationsSearch({
   initialYear?: number | null;
   initialMonth?: number | null;
 }) {
+  const router = useRouter();
   const now = new Date();
   // 年/月直接用初始值（優先用 server component 傳進來的、沒有的話用
   // 現在的年月）當 useState 的初始值，不要另外開一個 useEffect 在
@@ -901,12 +921,29 @@ export function ReservationsSearch({
   // 切成一週一列（7 個一組），每一列各自算色塊要畫在哪幾欄
   const weeks: CalendarCell[][] = Array.from({ length: weeksCount }, (_, w) => calendarCells.slice(w * 7, w * 7 + 7));
 
+  // 當月每間民宿統計訂房天數——用月曆本來就已經載入的 reservations
+  // 直接算，不用另外查資料庫。跟 lib/revenue/queries.ts 算全年住房率
+  // 用的是同一種邏輯：已取消的訂單不算、訂房晚數只算真正落在目前
+  // 這個月份的部分（月曆資料含跨月補的天數，不能整包直接數）。
+  const propertyNightsStats =
+    year !== null && month !== null
+      ? PROPERTIES.map((p) => {
+          const nights = reservations
+            .filter((r) => r.propertyCode === p.code && r.status !== "cancelled")
+            .reduce((sum, r) => sum + nightsInMonth(r.checkIn, r.checkOut, year, month), 0);
+          return { ...p, nights };
+        })
+      : [];
+
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
       <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
-        <Link href="/" className="text-xs" style={{ color: colors.blue }}>
-          ← 返回首頁
-        </Link>
+        {/* 改成瀏覽器上一頁，不是寫死連回首頁——訂單管理現在常常是從
+            其他地方（例如首頁其他功能）點進來查看/處理訂單，回上
+            一頁比強制導回首頁更符合實際的使用路徑。 */}
+        <button type="button" onClick={() => router.back()} className="text-xs" style={{ color: colors.blue }}>
+          ← 返回上一頁
+        </button>
         <header className="mb-6 text-center">
           <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
             宜蘭・包棟民宿
@@ -2060,9 +2097,6 @@ export function ReservationsSearch({
                                 </p>
                               </div>
                               <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
-                                <p style={{ color: colors.pine }}>
-                                  ✅ 已收到訂金匯款，訂房已確認，期待您的光臨！請查看下方訂房資料是否正確哦~
-                                </p>
                                 <p className="mt-3" style={{ color: colors.muted }}>
                                   ━━━━━━━━━━━━━━
                                 </p>
@@ -2129,6 +2163,25 @@ export function ReservationsSearch({
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {/* 當月每間民宿統計訂房天數——放在頁面最下方，不管有沒有選取
+            某一筆訂單都會顯示，不用另外查資料庫，直接用月曆已經載入
+            的資料算 */}
+        {propertyNightsStats.length > 0 && (
+          <div className="mt-8 border-t pt-4" style={{ borderColor: colors.line }}>
+            <p className="mb-2 text-xs font-bold" style={{ color: colors.ink }}>
+              {year} 年 {month} 月 各民宿訂房天數
+            </p>
+            <div className="flex flex-col gap-1.5 text-xs">
+              {propertyNightsStats.map((p) => (
+                <div key={p.code} className="flex items-baseline justify-between">
+                  <span style={{ color: colors.muted }}>{p.label}</span>
+                  <span style={{ color: colors.ink }}>{p.nights} 天</span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

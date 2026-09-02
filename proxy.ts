@@ -54,6 +54,7 @@ const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = [
   "/reservations",
   "/employees",
   "/holidays",
+  "/expenses",
   "/change-password",
   "/login",
 ];

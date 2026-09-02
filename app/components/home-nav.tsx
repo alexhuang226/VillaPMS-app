@@ -60,6 +60,13 @@ const NAV_ITEMS: NavItem[] = [
   },
   { href: "/receivables", icon: "💰", title: "查詢應收", description: "訂金／尾款收款狀況，標記已收款" },
   {
+    href: "/expenses",
+    icon: "🧾",
+    title: "費用記錄",
+    description: "記錄房租／薪資／其他費用，營收報表算毛利用",
+    housekeepingManagerVisible: true,
+  },
+  {
     href: "/schedule/monthly",
     icon: "🗂️",
     title: "房務班表",

@@ -22,7 +22,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { getYearlyRevenueStatsAction } from "@/app/actions/revenue";
+import { getYearlyExpensesByPropertyAction, getYearlyUnassignedExpensesAction } from "@/app/actions/expense";
 import type { YearlyRevenueStats } from "@/lib/revenue/queries";
+import type { MonthlyPropertyExpense, YearlyUnassignedExpenses } from "@/lib/expenses/queries";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -59,6 +61,8 @@ function formatMoney(amount: number): string {
 export function RevenueStats() {
   const [year, setYear] = useState<number | null>(null);
   const [stats, setStats] = useState<YearlyRevenueStats | null>(null);
+  const [expenses, setExpenses] = useState<MonthlyPropertyExpense[]>([]);
+  const [unassignedExpenses, setUnassignedExpenses] = useState<YearlyUnassignedExpenses>({ totalAmount: 0, byMonth: [] });
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +77,18 @@ export function RevenueStats() {
     let cancelled = false;
     setIsLoading(true);
     setError(null);
+    // 費用統計是這次新加的功能，故意讓它「安全失敗」（查詢失敗的話
+    // 就當作沒有費用資料，不影響營收數字本身）——營收統計原本就是
+    // 已經在用的報表，不該因為新功能查詢失敗就整頁掛掉
+    Promise.all([
+      getYearlyExpensesByPropertyAction(year).catch(() => []),
+      getYearlyUnassignedExpensesAction(year).catch(() => ({ totalAmount: 0, byMonth: [] })),
+    ]).then(([expensesData, unassignedData]) => {
+      if (!cancelled) {
+        setExpenses(expensesData);
+        setUnassignedExpenses(unassignedData);
+      }
+    });
     getYearlyRevenueStatsAction(year)
       .then((data) => {
         if (!cancelled) setStats(data);
@@ -155,6 +171,38 @@ export function RevenueStats() {
               <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
                 住房率＝三間民宿全年訂房晚數合計／（3 間 × 全年天數）
               </p>
+              {(() => {
+                const totalExpense = expenses.reduce((sum, e) => sum + e.totalAmount, 0);
+                const totalProfit = stats.totalRevenue - totalExpense - unassignedExpenses.totalAmount;
+                return (
+                  <>
+                    <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                        總費用（含不指定民宿）
+                      </span>
+                      <span style={{ color: colors.ink }} className="text-sm font-semibold">
+                        {formatMoney(totalExpense + unassignedExpenses.totalAmount)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-baseline justify-between">
+                      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                        總毛利（營收－費用）
+                      </span>
+                      <span
+                        className="text-sm font-semibold"
+                        style={{ color: totalProfit >= 0 ? colors.pine : colors.alert }}
+                      >
+                        {formatMoney(totalProfit)}
+                      </span>
+                    </div>
+                    {unassignedExpenses.totalAmount > 0 && (
+                      <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
+                        其中 {formatMoney(unassignedExpenses.totalAmount)} 是不指定民宿的費用（例如同時涵蓋好幾間的薪資），沒有分攤到下方個別民宿的毛利明細裡
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* 每月總營收長條圖 */}
@@ -180,6 +228,48 @@ export function RevenueStats() {
               </div>
             </div>
 
+            {/* 每月總覽——營收/費用/毛利放在一起，一眼看完 12 個月，
+                不用像下面「每月各民宿明細」那樣要分別展開每個月、
+                每間民宿才看得到。這裡的費用是「這個月全部民宿加總
+                ＋不指定民宿」的總額，不分民宿，跟下面明細表「單一
+                民宿」層級的費用是不同層次的數字。 */}
+            <div className="mt-6">
+              <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                每月總覽
+              </p>
+              <table className="mt-2 w-full text-[11px]">
+                <thead>
+                  <tr style={{ color: colors.muted }}>
+                    <th className="pb-1 text-left font-normal">月份</th>
+                    <th className="pb-1 text-right font-normal">營收</th>
+                    <th className="pb-1 text-right font-normal">費用</th>
+                    <th className="pb-1 text-right font-normal">毛利</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
+                    const monthRevenue = stats.monthlyTotalRevenue.find((m) => m.month === monthNum)?.revenue ?? 0;
+                    const monthPropertyExpense = expenses
+                      .filter((e) => e.month === monthNum)
+                      .reduce((sum, e) => sum + e.totalAmount, 0);
+                    const monthUnassignedExpense = unassignedExpenses.byMonth.find((m) => m.month === monthNum)?.amount ?? 0;
+                    const monthExpense = monthPropertyExpense + monthUnassignedExpense;
+                    const monthProfit = monthRevenue - monthExpense;
+                    return (
+                      <tr key={monthNum} className="border-t" style={{ borderColor: colors.line }}>
+                        <td className="py-1">{monthNum} 月</td>
+                        <td className="py-1 text-right tabular-nums">{formatMoney(monthRevenue)}</td>
+                        <td className="py-1 text-right tabular-nums">{formatMoney(monthExpense)}</td>
+                        <td className="py-1 text-right tabular-nums" style={{ color: monthProfit >= 0 ? colors.pine : colors.alert }}>
+                          {formatMoney(monthProfit)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
             {/* 每月各民宿明細 */}
             <div className="mt-6">
               <p className="text-xs font-bold" style={{ color: colors.ink }}>
@@ -198,6 +288,13 @@ export function RevenueStats() {
                   const daysInThisMonth = new Date(stats.year, monthNum, 0).getDate();
                   const monthOccupancyRate =
                     rows.length > 0 && daysInThisMonth > 0 ? monthTotalNights / (rows.length * daysInThisMonth) : 0;
+                  // 費用/毛利——用 propertyCode 對照，找不到費用記錄的
+                  // 民宿當作這個月費用是 0（沒記錄費用不代表沒有費用，
+                  // 只是還沒記，不能假裝毛利＝營收）
+                  const expenseByCode = new Map<string, number>(
+                    expenses.filter((e) => e.month === monthNum).map((e) => [e.propertyCode, e.totalAmount])
+                  );
+                  const monthTotalExpense = rows.reduce((sum, r) => sum + (expenseByCode.get(r.propertyCode) ?? 0), 0);
                   return (
                     <div key={monthNum} className="border p-3" style={{ borderColor: colors.line, opacity: monthHasData ? 1 : 0.5 }}>
                       <p className={`${display.className} text-base italic`}>{monthNum} 月</p>
@@ -206,22 +303,39 @@ export function RevenueStats() {
                           <tr style={{ color: colors.muted }}>
                             <th className="pb-1 text-left font-normal">民宿</th>
                             <th className="pb-1 text-right font-normal">營收</th>
+                            <th className="pb-1 text-right font-normal">費用</th>
+                            <th className="pb-1 text-right font-normal">毛利</th>
                             <th className="pb-1 text-right font-normal">訂房天數</th>
                             <th className="pb-1 text-right font-normal">住房率</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {rows.map((r) => (
-                            <tr key={r.propertyCode}>
-                              <td className="py-0.5">{r.propertyName}</td>
-                              <td className="py-0.5 text-right tabular-nums">{formatMoney(r.revenue)}</td>
-                              <td className="py-0.5 text-right tabular-nums">{r.nightsBooked} 天</td>
-                              <td className="py-0.5 text-right tabular-nums">{formatPercent(r.occupancyRate)}</td>
-                            </tr>
-                          ))}
+                          {rows.map((r) => {
+                            const propertyExpense = expenseByCode.get(r.propertyCode) ?? 0;
+                            const propertyProfit = r.revenue - propertyExpense;
+                            return (
+                              <tr key={r.propertyCode}>
+                                <td className="py-0.5">{r.propertyName}</td>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(r.revenue)}</td>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(propertyExpense)}</td>
+                                <td className="py-0.5 text-right tabular-nums" style={{ color: propertyProfit >= 0 ? colors.pine : colors.alert }}>
+                                  {formatMoney(propertyProfit)}
+                                </td>
+                                <td className="py-0.5 text-right tabular-nums">{r.nightsBooked} 天</td>
+                                <td className="py-0.5 text-right tabular-nums">{formatPercent(r.occupancyRate)}</td>
+                              </tr>
+                            );
+                          })}
                           <tr className="border-t font-bold" style={{ borderColor: colors.line, color: colors.pine }}>
                             <td className="py-0.5">合計</td>
                             <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalRevenue)}</td>
+                            <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalExpense)}</td>
+                            <td
+                              className="py-0.5 text-right tabular-nums"
+                              style={{ color: monthTotalRevenue - monthTotalExpense >= 0 ? colors.pine : colors.alert }}
+                            >
+                              {formatMoney(monthTotalRevenue - monthTotalExpense)}
+                            </td>
                             <td className="py-0.5 text-right tabular-nums">{monthTotalNights} 天</td>
                             <td className="py-0.5 text-right tabular-nums">{formatPercent(monthOccupancyRate)}</td>
                           </tr>
