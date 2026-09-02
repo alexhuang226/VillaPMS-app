@@ -73,7 +73,7 @@
  */
 
 import { useEffect, useRef, useState, Fragment } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { calculateAndSaveQuoteAction } from "@/app/actions/quote";
 import { calculateAutoRoomAllocationAction } from "@/app/actions/reservation";
@@ -396,9 +396,9 @@ function formatSlashDate(dateStr: string): string {
 
 /** 報價收據用的段落標題：icon + 標題文字，跟複製文字版的 emoji 對應，
  * 讓螢幕/圖片版跟複製文字版看起來是「同一份東西」的兩種呈現方式 */
-function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) {
+function ReceiptSectionHeader({ icon, title, noBorder }: { icon: string; title: string; noBorder?: boolean }) {
   return (
-    <div className="mt-3 mb-1.5 flex items-center gap-2 border-t pt-3" style={{ borderColor: colors.line }}>
+    <div className={`mt-3 mb-1.5 flex items-center gap-2 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
       <span className="text-base leading-none">{icon}</span>
       <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
         {title}
@@ -408,6 +408,7 @@ function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) 
 }
 
 export function QuoteForm() {
+  const router = useRouter();
   const [form, setForm] = useState<FormState>(initialState);
   const [quote, setQuote] = useState<PackageQuote | null>(null);
   /** 依目前填的民宿/人數，系統原本會自動建議的房型配置——顯示在
@@ -657,10 +658,15 @@ export function QuoteForm() {
         .qf-root .qf-input:focus { border-color: ${colors.pine} !important; }
       `}</style>
 
-      <div className="w-full" style={{ maxWidth: "30rem", color: colors.ink }}>
-        <Link href="/" className="text-xs" style={{ color: colors.blue }}>
-          ← 返回首頁
-        </Link>
+      <div className="w-full" style={{ maxWidth: "34rem", color: colors.ink }}>
+        {/* 改成瀏覽器上一頁，不是寫死連回首頁——這個頁面現在主要是從
+            訂單管理（月曆上方「製作報價單」按鈕）點進來的，回上一頁
+            實際上就是回到訂單管理，比強制導回首頁更符合現在的使用
+            方式；如果偶爾是從其他地方點進來的，也能正確回到那裡，
+            不是寫死一個固定目的地。 */}
+        <button type="button" onClick={() => router.back()} className="text-xs" style={{ color: colors.blue }}>
+          ← 返回上一頁
+        </button>
         <header className="mb-6 text-center">
           <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
             宜蘭・包棟民宿
@@ -891,7 +897,7 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-5 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
@@ -938,7 +944,7 @@ export function QuoteForm() {
                   標題區塊，已經有自己的 py-6，兩個 padding 疊加會讓
                   「預訂資訊」上方空白感覺太大 */}
               <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
-                <ReceiptSectionHeader icon="📅" title="預訂資訊" />
+                <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
                 <div className="flex flex-col gap-1.5 text-xs">
                   <PairedInfoRow
                     items={[
@@ -953,8 +959,19 @@ export function QuoteForm() {
                     ]}
                   />
                   {quote.roomAllocation &&
-                    roomAllocationSummaryItems(quote.roomAllocation).map((item, i) => (
-                      <InfoRow key={`room-${i}`} label={i === 0 ? "房型配置" : ""} value={item.text} />
+                    groupRoomItems(roomAllocationSummaryItems(quote.roomAllocation)).map((group, gi) => (
+                      <div key={`room-${gi}`} className="flex items-baseline gap-3">
+                        <span className="shrink-0" style={{ width: "4.5em", color: colors.muted }}>
+                          {gi === 0 ? "房型配置" : ""}
+                        </span>
+                        <div className="flex flex-1 gap-4">
+                          {group.map((item, ii) => (
+                            <span key={ii} className="flex-1" style={{ color: colors.ink }}>
+                              {item.text}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
                     ))}
                   {addOnSummaryItems(quote).map((item, i) => (
                     <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
@@ -1073,12 +1090,12 @@ export function QuoteForm() {
                       <p>
                         {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
                       </p>
+                      <p>{INFANT_NOTE}</p>
                       {baseGuestsReminderItems(quote).map((item, i) => (
                         <p key={i}>
                           ・{item.label}({item.note})：{item.required} 人
                         </p>
                       ))}
-                      <p>{INFANT_NOTE}</p>
                     </div>
                   )}
                   {BOOKING_POLICY_NOTES.map((note, i) => {
@@ -1192,4 +1209,24 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
       ))}
     </div>
   );
+}
+
+/** 房型配置並排顯示用的分組——盡量兩個一排塞進去節省高度，但「降規
+ * 四人套房」文字比較長（帶著「(提供1床，以雙人套房計費)」的說明），
+ * 固定自己單獨一排，不跟別的房型擠在一起變得太擁擠。 */
+function groupRoomItems<T extends { text: string }>(items: T[]): T[][] {
+  const groups: T[][] = [];
+  let i = 0;
+  while (i < items.length) {
+    const isDowngrade = items[i].text.includes("降規");
+    const nextIsDowngrade = i + 1 < items.length && items[i + 1].text.includes("降規");
+    if (isDowngrade || i + 1 >= items.length || nextIsDowngrade) {
+      groups.push([items[i]]);
+      i += 1;
+    } else {
+      groups.push([items[i], items[i + 1]]);
+      i += 2;
+    }
+  }
+  return groups;
 }

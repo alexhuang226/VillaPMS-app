@@ -397,10 +397,10 @@ export function buildQuoteMessage(quote: PackageQuote): string {
   lines.push("📝 預訂須知");
 
   lines.push(`${BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：`);
+  lines.push(` ${INFANT_NOTE}`);
   for (const item of baseGuestsReminderItems(quote)) {
     lines.push(` • ${item.label}(${item.note})：${item.required} 人`);
   }
-  lines.push(` ${INFANT_NOTE}`);
 
   BOOKING_POLICY_NOTES.forEach((note, i) => {
     lines.push(`${BOOKING_POLICY_ICONS[i]}${note}`);

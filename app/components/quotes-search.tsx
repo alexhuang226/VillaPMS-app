@@ -147,9 +147,29 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
   );
 }
 
-function ReceiptSectionHeader({ icon, title }: { icon: string; title: string }) {
+/** 房型配置並排顯示用的分組——盡量兩個一排塞進去節省高度，但「降規
+ * 四人套房」文字比較長（帶著「(提供1床，以雙人套房計費)」的說明），
+ * 固定自己單獨一排，不跟別的房型擠在一起變得太擁擠。 */
+function groupRoomItems<T extends { text: string }>(items: T[]): T[][] {
+  const groups: T[][] = [];
+  let i = 0;
+  while (i < items.length) {
+    const isDowngrade = items[i].text.includes("降規");
+    const nextIsDowngrade = i + 1 < items.length && items[i + 1].text.includes("降規");
+    if (isDowngrade || i + 1 >= items.length || nextIsDowngrade) {
+      groups.push([items[i]]);
+      i += 1;
+    } else {
+      groups.push([items[i], items[i + 1]]);
+      i += 2;
+    }
+  }
+  return groups;
+}
+
+function ReceiptSectionHeader({ icon, title, noBorder }: { icon: string; title: string; noBorder?: boolean }) {
   return (
-    <div className="mt-3 mb-1.5 flex items-center gap-2 border-t pt-3" style={{ borderColor: colors.line }}>
+    <div className={`mt-3 mb-1.5 flex items-center gap-2 ${noBorder ? "" : "border-t pt-3"}`} style={{ borderColor: colors.line }}>
       <span className="text-base leading-none">{icon}</span>
       <span className="text-sm font-bold tracking-wide" style={{ color: colors.ink }}>
         {title}
@@ -192,6 +212,15 @@ const QUOTE_VALIDITY_DAYS = 14;
  * 使用者點的那一列報價）。抽成元件、各自傳自己的 ref 進來，避免
  * 同一份 100 多行的 JSX 複製兩份，以後要改內容才不用改兩個地方。
  */
+/** 訂房確認單專用的咖啡色系——跟報價單的深綠(colors.pine)區分開來，
+ * 讓「已經確認的訂房」在視覺上跟「還在報價階段」的文件有明顯區別。
+ * 深焙咖啡色（標題）+ 淺焦糖／拿鐵色（金額强調框），走內斂沉穩、
+ * 不搶眼的路線，跟民宿本身溫暖但不張揚的調性也搭。只用在這張卡片，
+ * 不影響其他地方（報價單、頁面其他元素）原本的綠色系。 */
+const CONFIRM_DARK = "#3E2B23";
+const CONFIRM_LIGHT = "#F1E4D3";
+const CONFIRM_ACCENT = "#8A6A4F";
+
 function ConfirmationImageCard({
   detail,
   quote,
@@ -201,20 +230,34 @@ function ConfirmationImageCard({
   quote: PackageQuote | null;
   cardRef: RefObject<HTMLDivElement | null>;
 }) {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
   return (
     <div style={{ height: 0, overflow: "hidden" }}>
       <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
         <div ref={cardRef} className={body.className} style={{ width: "375px", backgroundColor: colors.canvas }}>
-          <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
-            <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
-              🏨 【{detail.propertyName}訂房確認單】
+          {/* 標題格式改成跟報價單一致：民宿名稱大字在上，「訂房確認單」
+              字距展開的小標在下，「預訂日期」疊在右邊——結構、間距、
+              防溢出的 min-height 安全邊界都跟報價單同一套做法，唯一
+              差異是背景色換成咖啡色系、副標籤從「包棟報價單」換成
+              「訂房確認單」、右邊只有一行「預訂日期」沒有「有效期限」
+              （確認單沒有報價那種期限概念）。 */}
+          <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
+            <p className={`${display.className} text-2xl italic`} style={{ color: "#FFFFFF" }}>
+              {detail.propertyName}私人會所
             </p>
+            <div className="relative mt-1" style={{ minHeight: "24px" }}>
+              <p className="tracking-[0.3em]" style={{ color: CONFIRM_LIGHT, fontSize: "16px" }}>
+                訂房確認單
+              </p>
+              <div className="absolute right-0 bottom-0 text-right text-[8px] leading-tight" style={{ color: CONFIRM_LIGHT }}>
+                <p>預訂日期：{formatSlashDate(todayStr)}</p>
+              </div>
+            </div>
           </div>
           <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
-            <p className="mt-3" style={{ color: colors.muted }}>
-              ━━━━━━━━━━━━━━
-            </p>
-            <p className="mt-2 font-bold">📅 預訂資訊</p>
+            <p className="mt-1 font-bold">📅 預訂資訊</p>
             <p className="mt-1">• 入住日期：{formatDateWithWeekday(detail.checkIn)}</p>
             <p>• 退房日期：{formatDateWithWeekday(detail.checkOut)}</p>
             <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
@@ -262,23 +305,47 @@ function ConfirmationImageCard({
             ) : (
               <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
             )}
+            {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成淺焦糖／
+                拿鐵色（CONFIRM_LIGHT），跟上面標題的深咖啡色（CONFIRM_DARK）
+                同一個色系、深淺搭配，取代原本文字版的訂金/尾款條列 */}
+            <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
+              <p className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                包棟總費用
+              </p>
+              <p className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                NT$ {detail.finalTotal.toLocaleString()}
+              </p>
+              {(() => {
+                const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
+                const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
+                return (
+                  <div className="mt-2 flex flex-col gap-1 border-t pt-2" style={{ borderColor: CONFIRM_ACCENT }}>
+                    <div className="flex items-baseline justify-between">
+                      <span style={{ color: CONFIRM_ACCENT }}>
+                        訂金已付
+                        {depositPayment?.paidAt ? `（收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")}）` : ""}
+                      </span>
+                      <span className="font-bold" style={{ color: CONFIRM_DARK }}>
+                        ${(depositPayment?.amount ?? 0).toLocaleString()}
+                      </span>
+                    </div>
+                    {balancePayment && (
+                      <div className="flex items-baseline justify-between">
+                        <span style={{ color: CONFIRM_ACCENT }}>剩餘尾款</span>
+                        <span className="font-bold" style={{ color: CONFIRM_DARK }}>
+                          ${balancePayment.amount.toLocaleString()}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
             {(() => {
-              const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
               const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
-              return (
-                <>
-                  <p className="mt-1">
-                    • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
-                    {depositPayment?.paidAt ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})` : ""}
-                  </p>
-                  {balancePayment && (
-                    <>
-                      <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
-                      <p>⚠️ 尾款請於入住前一星期匯款。</p>
-                    </>
-                  )}
-                </>
-              );
+              return balancePayment ? (
+                <p className="mt-2">⚠️ 尾款請於入住前一星期匯款。</p>
+              ) : null;
             })()}
             <p className="mt-2" style={{ color: colors.muted }}>
               ━━━━━━━━━━━━━━
@@ -321,7 +388,7 @@ function QuoteReceiptCard({
   return (
     <>
                     <div ref={cardRef} className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
+                      <div className="relative px-6 pb-5 pt-6 text-center" style={{ backgroundColor: colors.pine }}>
                         <p className={`${display.className} text-3xl italic`} style={{ color: colors.pineText }}>
                           {`${quote.messageContext.propertyName}私人會所`}
                         </p>
@@ -369,7 +436,7 @@ function QuoteReceiptCard({
                           深色標題區塊，已經有自己的 padding，兩個疊加
                           會讓「預訂資訊」上方空白感覺太大 */}
                       <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
-                        <ReceiptSectionHeader icon="📅" title="預訂資訊" />
+                        <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
                         <div className="flex flex-col gap-1.5 text-xs">
                           <PairedInfoRow
                             items={[
@@ -383,8 +450,19 @@ function QuoteReceiptCard({
                               { label: "入住人數", value: guestSummary(quote) },
                             ]}
                           />
-                          {roomAllocationSummaryItems(quote.roomAllocation).map((item, i) => (
-                            <InfoRow key={`room-${i}`} label={i === 0 ? "房型配置" : ""} value={item.text} />
+                          {groupRoomItems(roomAllocationSummaryItems(quote.roomAllocation)).map((group, gi) => (
+                            <div key={`room-${gi}`} className="flex items-baseline gap-3">
+                              <span className="shrink-0" style={{ width: "4.5em", color: colors.muted }}>
+                                {gi === 0 ? "房型配置" : ""}
+                              </span>
+                              <div className="flex flex-1 gap-4">
+                                {group.map((item, ii) => (
+                                  <span key={ii} className="flex-1" style={{ color: colors.ink }}>
+                                    {item.text}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
                           ))}
                           {addOnSummaryItems(quote).map((item, i) => (
                             <InfoRow key={`addon-${i}`} label={i === 0 ? "額外項目" : ""} value={item} />
@@ -489,12 +567,12 @@ function QuoteReceiptCard({
                               <p>
                                 {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計)：
                               </p>
+                              <p>{INFANT_NOTE}</p>
                               {baseGuestsReminderItems(quote).map((item, i) => (
                                 <p key={i}>
                                   ・{item.label}({item.note})：{item.required} 人
                                 </p>
                               ))}
-                              <p>{INFANT_NOTE}</p>
                             </div>
                           )}
                           {BOOKING_POLICY_NOTES.map((note, i) => {
@@ -1205,7 +1283,7 @@ export function QuotesSearch() {
 
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
-      <div className="w-full" style={{ maxWidth: "30rem", color: colors.ink }}>
+      <div className="w-full" style={{ maxWidth: "34rem", color: colors.ink }}>
         <Link href="/" className="text-xs" style={{ color: colors.blue }}>
           ← 返回首頁
         </Link>

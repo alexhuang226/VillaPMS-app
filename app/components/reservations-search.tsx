@@ -53,6 +53,15 @@ const colors = {
   gold: "#A67C3D",
 };
 
+/** 訂房確認單專用的咖啡色系——跟報價單的深綠(colors.pine)區分開來，
+ * 讓「已經確認的訂房」在視覺上跟「還在報價階段」的文件有明顯區別。
+ * 深焙咖啡色（標題）+ 淺焦糖／拿鐵色（金額强調框），走內斂沉穩、
+ * 不搶眼的路線。只用在訂房確認單這張卡片，不影響頁面其他地方
+ * 原本的綠色系。 */
+const CONFIRM_DARK = "#3E2B23";
+const CONFIRM_LIGHT = "#F1E4D3";
+const CONFIRM_ACCENT = "#8A6A4F";
+
 const PROPERTIES = [
   // 只此清綠原本用跟按鈕/標頭一樣的深綠（colors.pine），色塊太小
   // 一塊時顏色太深、不容易看清楚，這裡另外用一個淺一點的綠。
@@ -829,6 +838,13 @@ export function ReservationsSearch({
   function formatSlashDate(dateStr: string): string {
     const [y, m, d] = dateStr.split("-");
     return `${y}/${m}/${d}`;
+  }
+
+  /** 今天的日期字串（本地時區，不是 UTC）——訂房確認單的「預訂日期」
+   * 用，代表「這份確認單是什麼時候產生/分享的」 */
+  function todayYMD(): string {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   }
 
   /** 'YYYY-MM-DD' → '2026/08/29 (週四)'，入住/退房日期用——跟報價單
@@ -2091,16 +2107,24 @@ export function ReservationsSearch({
                               className={body.className}
                               style={{ width: "375px", backgroundColor: colors.canvas }}
                             >
-                              <div className="px-6 py-6 text-center" style={{ backgroundColor: colors.pine }}>
-                                <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
-                                  🏨 【{detail.propertyName}訂房確認單】
+                              <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
+                                <p className={`${display.className} text-2xl italic`} style={{ color: "#FFFFFF" }}>
+                                  {detail.propertyName}私人會所
                                 </p>
+                                <div className="relative mt-1" style={{ minHeight: "24px" }}>
+                                  <p className="tracking-[0.3em]" style={{ color: CONFIRM_LIGHT, fontSize: "16px" }}>
+                                    訂房確認單
+                                  </p>
+                                  <div
+                                    className="absolute right-0 bottom-0 text-right text-[8px] leading-tight"
+                                    style={{ color: CONFIRM_LIGHT }}
+                                  >
+                                    <p>預訂日期：{formatSlashDate(todayYMD())}</p>
+                                  </div>
+                                </div>
                               </div>
                               <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
-                                <p className="mt-3" style={{ color: colors.muted }}>
-                                  ━━━━━━━━━━━━━━
-                                </p>
-                                <p className="mt-2 font-bold">📅 預訂資訊</p>
+                                <p className="mt-1 font-bold">📅 預訂資訊</p>
                                 <p className="mt-1">• 入住日期：{formatDateWithWeekdayLocal(detail.checkIn)}</p>
                                 <p>• 退房日期：{formatDateWithWeekdayLocal(detail.checkOut)}</p>
                                 <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
@@ -2118,28 +2142,48 @@ export function ReservationsSearch({
                                     detail.roomAllocation.doublePlainCount}{" "}
                                   間房
                                 </p>
-                                <p className="mt-2" style={{ color: colors.muted }}>
-                                  ━━━━━━━━━━━━━━
-                                </p>
-                                <p className="mt-2 font-bold">💰 帳務明細</p>
-                                <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
+                                {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成
+                                    淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面標題的深
+                                    咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，取代
+                                    原本文字版的訂金/尾款條列 */}
+                                <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
+                                  <p className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                                    包棟總費用
+                                  </p>
+                                  <p className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                                    NT$ {detail.finalTotal.toLocaleString()}
+                                  </p>
+                                  {(() => {
+                                    const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
+                                    const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
+                                    return (
+                                      <div className="mt-2 flex flex-col gap-1 border-t pt-2" style={{ borderColor: CONFIRM_ACCENT }}>
+                                        <div className="flex items-baseline justify-between">
+                                          <span style={{ color: CONFIRM_ACCENT }}>
+                                            訂金已付
+                                            {depositPayment?.paidAt
+                                              ? `（收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")}）`
+                                              : ""}
+                                          </span>
+                                          <span className="font-bold" style={{ color: CONFIRM_DARK }}>
+                                            ${(depositPayment?.amount ?? 0).toLocaleString()}
+                                          </span>
+                                        </div>
+                                        {balancePayment && (
+                                          <div className="flex items-baseline justify-between">
+                                            <span style={{ color: CONFIRM_ACCENT }}>剩餘尾款</span>
+                                            <span className="font-bold" style={{ color: CONFIRM_DARK }}>
+                                              ${balancePayment.amount.toLocaleString()}
+                                            </span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
                                 {(() => {
-                                  const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
                                   const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
-                                  return (
-                                    <>
-                                      <p>
-                                        • 訂金已付：${(depositPayment?.amount ?? 0).toLocaleString()} 元
-                                        {depositPayment?.paidAt ? ` (收到日期：${depositPayment.paidAt.slice(5, 10).replace("-", "/")})` : ""}
-                                      </p>
-                                      {balancePayment && (
-                                        <>
-                                          <p>• 剩餘尾款：${balancePayment.amount.toLocaleString()}元</p>
-                                          <p>⚠️ 尾款請於入住前一星期匯款。</p>
-                                        </>
-                                      )}
-                                    </>
-                                  );
+                                  return balancePayment ? <p className="mt-2">⚠️ 尾款請於入住前一星期匯款。</p> : null;
                                 })()}
                                 <p className="mt-2" style={{ color: colors.muted }}>
                                   ━━━━━━━━━━━━━━
