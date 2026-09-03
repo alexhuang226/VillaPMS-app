@@ -24,9 +24,9 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, calculateAutoRoomAllocationAction, createReservationDirectlyAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
-import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
+import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -116,6 +116,21 @@ const PAYMENT_STATUS_LABEL: Record<string, string> = {
   void: "作廢",
   refunded: "已退款",
 };
+
+/** 應收帳款清單用——只顯示「入住日期在未來 10 天內」的應收款（含
+ * 已經入住但還沒收到尾款的，也就是入住日期已經過去的），詳細規則
+ * 說明見原本 receivables-list.tsx 的檔案開頭註解，這裡整合進訂單
+ * 管理頁面後沿用同一套邏輯。 */
+const RECEIVABLES_SHOW_WITHIN_DAYS = 10;
+const RECEIVABLES_OVERDUE_WITHIN_DAYS = 7; // 尾款提醒規則：入住前一週
+
+/** 今天算起，距離某個日期還剩幾天；已經過去回傳負數 */
+function daysUntil(dateStr: string): number {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(`${dateStr}T00:00:00`);
+  return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
 
 const BOOKING_SOURCE_OPTIONS = Object.entries(BOOKING_SOURCE_LABEL).map(([value, label]) => ({ value, label }));
 
@@ -403,6 +418,50 @@ export function ReservationsSearch({
   initialMonth?: number | null;
 }) {
   const router = useRouter();
+
+  // 應收帳款——整合進訂單管理頁面，用切換按鈕在「月曆檢視」跟
+  // 「應收帳款」兩個畫面之間切換，不是獨立頁面。資料是點切換過去
+  // 才查（見下面的 useEffect），不在頁面一開始就查，避免多一次
+  // 使用者可能根本用不到的查詢。
+  const [viewMode, setViewMode] = useState<"calendar" | "receivables">("calendar");
+  const [receivableRows, setReceivableRows] = useState<ReceivableSummary[] | null>(null);
+  const [isLoadingReceivables, setIsLoadingReceivables] = useState(false);
+  const [receivableError, setReceivableError] = useState<string | null>(null);
+  const [markingPaymentId, setMarkingPaymentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (viewMode !== "receivables" || receivableRows !== null) return;
+    let cancelled = false;
+    setIsLoadingReceivables(true);
+    setReceivableError(null);
+    listReceivablesAction()
+      .then((rows) => {
+        if (!cancelled) setReceivableRows(rows);
+      })
+      .catch((err) => {
+        if (!cancelled) setReceivableError(err instanceof Error ? err.message : "查詢失敗，請稍後再試");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingReceivables(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewMode, receivableRows]);
+
+  async function handleMarkReceivablePaid(paymentId: string) {
+    setMarkingPaymentId(paymentId);
+    setReceivableError(null);
+    try {
+      await markPaymentPaidAction(paymentId);
+      setReceivableRows((prev) => (prev ? prev.filter((r) => r.paymentId !== paymentId) : prev));
+    } catch (err) {
+      setReceivableError(err instanceof Error ? err.message : "標記失敗，請稍後再試");
+    } finally {
+      setMarkingPaymentId(null);
+    }
+  }
+
   const now = new Date();
   // 年/月直接用初始值（優先用 server component 傳進來的、沒有的話用
   // 現在的年月）當 useState 的初始值，不要另外開一個 useEffect 在
@@ -977,6 +1036,128 @@ export function ReservationsSearch({
           </h1>
         </header>
 
+        {/* 應收帳款整合進這個頁面，用切換按鈕在「月曆檢視」跟「應收
+            帳款」之間切換——月曆內容本身用 display:none 切換隱藏/
+            顯示，不是條件式掛載/卸載，這樣不用把後面一大段既有的
+            月曆／訂單詳情 JSX 整段包進條件判斷，改動範圍小很多、
+            比較不容易改壞。 */}
+        <div className="mb-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setViewMode("calendar")}
+            className="flex-1 border py-2 text-center text-xs tracking-wide"
+            style={
+              viewMode === "calendar"
+                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                : { borderColor: colors.line, color: colors.ink }
+            }
+          >
+            月曆檢視
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("receivables")}
+            className="flex-1 border py-2 text-center text-xs tracking-wide"
+            style={
+              viewMode === "receivables"
+                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                : { borderColor: colors.line, color: colors.ink }
+            }
+          >
+            應收帳款
+          </button>
+        </div>
+
+        {viewMode === "receivables" && (
+          <div>
+            <p className="mb-4 text-[11px]" style={{ color: colors.muted }}>
+              只顯示入住日期在未來 {RECEIVABLES_SHOW_WITHIN_DAYS} 天內（含已逾期）的應收款
+            </p>
+
+            {isLoadingReceivables && (
+              <p className="text-xs" style={{ color: colors.muted }}>
+                讀取中…
+              </p>
+            )}
+
+            {receivableError && (
+              <p role="alert" className="mb-4 border-l-2 pl-3 text-xs leading-relaxed" style={{ borderColor: colors.alert, color: colors.alert }}>
+                {receivableError}
+              </p>
+            )}
+
+            {!isLoadingReceivables &&
+              receivableRows &&
+              (() => {
+                const visibleRows = receivableRows
+                  .filter((r) => daysUntil(r.checkIn) <= RECEIVABLES_SHOW_WITHIN_DAYS)
+                  .sort((a, b) => daysUntil(a.checkIn) - daysUntil(b.checkIn));
+                const totalOutstanding = visibleRows.reduce((sum, r) => sum + r.amount, 0);
+
+                if (visibleRows.length === 0) {
+                  return (
+                    <p className="text-xs" style={{ color: colors.muted }}>
+                      未來 {RECEIVABLES_SHOW_WITHIN_DAYS} 天內沒有應收款項。
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    <div className="rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
+                      <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                        未收款總額（{visibleRows.length} 筆）
+                      </p>
+                      <p className={`${display.className} text-3xl italic`} style={{ color: colors.pine }}>
+                        NT$ {totalOutstanding.toLocaleString()}
+                      </p>
+                    </div>
+
+                    <div className="mt-4 flex flex-col gap-3">
+                      {visibleRows.map((row) => {
+                        const overdue = daysUntil(row.checkIn) < RECEIVABLES_OVERDUE_WITHIN_DAYS;
+                        return (
+                          <div key={row.paymentId} className="border p-3 text-xs" style={{ borderColor: overdue ? colors.alert : colors.line }}>
+                            <div className="flex items-baseline justify-between">
+                              <span className="font-semibold">{row.propertyName}</span>
+                              <span style={{ color: overdue ? colors.alert : colors.muted }}>
+                                入住：{row.checkIn}
+                                {overdue ? "（已逾期）" : ""}
+                              </span>
+                            </div>
+                            <p className="mt-1" style={{ color: colors.muted }}>
+                              {row.dueDate ? `到期：${row.dueDate}　` : ""}
+                              {row.reservationNo}
+                            </p>
+                            <p className="mt-1" style={{ color: colors.muted }}>
+                              {row.guestName || "（未填姓名）"}
+                              {row.guestPhone ? `　${row.guestPhone}` : ""}
+                            </p>
+                            <div className="mt-2 flex items-center justify-between">
+                              <span className="font-semibold">
+                                {PAYMENT_KIND_LABEL[row.paymentKind] ?? row.paymentKind}　NT$ {row.amount.toLocaleString()}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkReceivablePaid(row.paymentId)}
+                                disabled={markingPaymentId === row.paymentId}
+                                className="border px-3 py-1.5 text-xs tracking-wide transition-colors disabled:opacity-50"
+                                style={{ borderColor: colors.pine, color: colors.pine }}
+                              >
+                                {markingPaymentId === row.paymentId ? "處理中…" : "標記已收款"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
+          </div>
+        )}
+
+        <div style={{ display: viewMode === "calendar" ? undefined : "none" }}>
         {!isHousekeepingManager && (
           <div className="mb-4 flex gap-2">
             <Link
@@ -2236,6 +2417,7 @@ export function ReservationsSearch({
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );

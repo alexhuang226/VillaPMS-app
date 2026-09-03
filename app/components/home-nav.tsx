@@ -58,7 +58,6 @@ const NAV_ITEMS: NavItem[] = [
     description: "查已確認的訂房記錄與付款狀態",
     housekeepingManagerVisible: true,
   },
-  { href: "/receivables", icon: "💰", title: "查詢應收", description: "訂金／尾款收款狀況，標記已收款" },
   {
     href: "/expenses",
     icon: "🧾",

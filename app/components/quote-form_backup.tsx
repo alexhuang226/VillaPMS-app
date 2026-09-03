@@ -609,36 +609,38 @@ export function QuoteForm() {
    * 選單（LINE 會是選項之一，點下去就能直接傳給正在聊天的客人）；
    * 不支援時（多半是桌機瀏覽器）退回直接下載圖片檔，請自己傳給客人。
    */
-  /**
-   * 共用的截圖邏輯——回傳截好的圖片 blob，不管後續要分享還是複製到
-   * 剪貼簿，都是同一份「等字型/放大寬度重排版/截圖/改回寬度」的
-   * 流程，抽出來避免兩邊各寫一次、之後改一邊忘記改另一邊。
-   */
-  async function captureReceiptBlob(): Promise<Blob> {
-    if (!receiptRef.current) throw new Error("找不到報價單內容");
-    // 等 next/font 載入的字型（Fraunces/Work Sans）完全就緒再截圖，
-    // 不然截圖當下字型可能還沒套用完成，量到的高度跟實際排版後的
-    // 高度對不起來，會讓下方內容被裁掉。
-    if (typeof document !== "undefined" && document.fonts?.ready) {
-      await document.fonts.ready;
-    }
-
-    const node = receiptRef.current;
-    // ⚠️ 一般手機瀏覽器的畫面寬度（375～430px 左右）遠比整份收據
-    // 設計時假設的寬度（40rem／640px）窄很多——收據本身是用
-    // w-full + max-width 做響應式排版，在手機上會被壓縮到跟螢幕
-    // 一樣窄，這時候某些原本該在一行內顯示完的內容（例如銀行帳號
-    // 那一排）會被擠到換行。網頁上這樣顯示沒問題（響應式排版本來
-    // 就該這樣），但截圖的時候如果直接用 node.scrollWidth（當下
-    // 實際渲染的寬度），截出來的圖片就會是「手機螢幕寬度」的窄
-    // 版本，帶著這些不必要的換行。
-    // 這裡在截圖前，暫時把寬度強制改成比較寬的固定值，讓內容重新
-    // 排版成「設計寬度」該有的樣子，截圖後再把寬度改回去（清空
-    // inline style，讓它恢復成原本响應式的 w-full 行為），不影響
-    // 使用者接下來繼續操作頁面看到的畫面。
+  async function handleShareImage() {
+    if (!receiptRef.current) return;
+    setImageWorking(true);
+    setImageNote(null);
+    // 記錄有沒有真的動過寬度、原本的寬度是什麼，這樣不管中間哪個
+    // 步驟丟出例外，都能在最下面的 finally 保證改回去，不會把頁面
+    // 卡在被截圖用的暫時寬度
     let widthWasOverridden = false;
-    const originalWidth = node.style.width;
+    let originalWidth = "";
+
     try {
+      // 等 next/font 載入的字型（Fraunces/Work Sans）完全就緒再截圖，
+      // 不然截圖當下字型可能還沒套用完成，量到的高度跟實際排版後的
+      // 高度對不起來，會讓下方內容被裁掉。
+      if (typeof document !== "undefined" && document.fonts?.ready) {
+        await document.fonts.ready;
+      }
+
+      const node = receiptRef.current;
+      // ⚠️ 一般手機瀏覽器的畫面寬度（375～430px 左右）遠比整份收據
+      // 設計時假設的寬度（40rem／640px）窄很多——收據本身是用
+      // w-full + max-width 做響應式排版，在手機上會被壓縮到跟螢幕
+      // 一樣窄，這時候某些原本該在一行內顯示完的內容（例如銀行帳號
+      // 那一排）會被擠到換行。網頁上這樣顯示沒問題（響應式排版本來
+      // 就該這樣），但截圖的時候如果直接用 node.scrollWidth（當下
+      // 實際渲染的寬度），截出來的圖片就會是「手機螢幕寬度」的窄
+      // 版本，帶著這些不必要的換行。
+      // 這裡在截圖前，暫時把寬度強制改成比較寬的固定值，讓內容重新
+      // 排版成「設計寬度」該有的樣子，截圖後再把寬度改回去（清空
+      // inline style，讓它恢復成原本响應式的 w-full 行為），不影響
+      // 使用者接下來繼續操作頁面看到的畫面。
+      originalWidth = node.style.width;
       node.style.width = "480px";
       widthWasOverridden = true;
       // 改寬度後瀏覽器要重新排版才會反映到 scrollWidth/scrollHeight，
@@ -655,20 +657,7 @@ export function QuoteForm() {
         height: node.scrollHeight,
       });
       if (!blob) throw new Error("圖片產生失敗，請再試一次");
-      return blob;
-    } finally {
-      // 不管上面成功還是中途出錯，只要真的動過寬度就一定要改回去，
-      // 不然頁面會卡在被截圖用的暫時寬度，使用者接下來看到的畫面
-      // 會不正常
-      if (widthWasOverridden) node.style.width = originalWidth;
-    }
-  }
 
-  async function handleShareImage() {
-    setImageWorking(true);
-    setImageNote(null);
-    try {
-      const blob = await captureReceiptBlob();
       const propertyLabel =
         quote?.messageContext?.propertyName ??
         PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
@@ -697,33 +686,12 @@ export function QuoteForm() {
       if (err instanceof Error && err.name === "AbortError") return;
       setWarning(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
     } finally {
-      setImageWorking(false);
-    }
-  }
-
-  /**
-   * 複製圖片到剪貼簿——iOS 分享選單裡不是每個 App 都有做「分享目標」
-   * （例如 LINE 官方帳號管理員這個 App，一般 LINE 有出現在分享選單，
-   * 但官方帳號這個是另一個獨立 App，沒有支援分享選單），這是那些
-   * App 有沒有做這個功能的問題，不是這個網站的程式碼能控制的。
-   * 但這類 App 通常都支援「直接貼上剪貼簿裡的圖片」，所以提供這個
-   * 複製到剪貼簿的按鈕當作替代方案——複製後自己切換到對應的 App，
-   * 在對話框直接貼上，一樣不需要先存到相簿。
-   */
-  async function handleCopyImageToClipboard() {
-    setImageWorking(true);
-    setImageNote(null);
-    try {
-      if (typeof navigator.clipboard?.write !== "function" || typeof ClipboardItem === "undefined") {
-        setWarning("這個瀏覽器不支援複製圖片到剪貼簿，請改用「轉成圖片」分享");
-        return;
+      // 不管上面成功還是中途出錯，只要真的動過寬度就一定要改回去，
+      // 不然頁面會卡在被截圖用的暫時寬度，使用者接下來看到的畫面
+      // 會不正常
+      if (widthWasOverridden && receiptRef.current) {
+        receiptRef.current.style.width = originalWidth;
       }
-      const blob = await captureReceiptBlob();
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
-    } catch (err) {
-      setWarning(err instanceof Error ? err.message : "複製失敗，請稍後再試");
-    } finally {
       setImageWorking(false);
     }
   }
@@ -1272,21 +1240,6 @@ export function QuoteForm() {
                   style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
                 >
                   {imageWorking ? "圖片產生中…" : "轉成圖片分享"}
-                </button>
-                {/* 有些 App（例如 LINE 官方帳號管理員）沒有做「分享
-                    目標」，不會出現在上面那個分享選單裡——這是那些
-                    App 有沒有支援分享選單的問題，網站這邊沒辦法讓
-                    它們出現。這類 App 通常都支援直接貼上剪貼簿裡的
-                    圖片，所以另外提供這個複製到剪貼簿的按鈕當替代
-                    方案，一樣不用先存到相簿。 */}
-                <button
-                  type="button"
-                  onClick={handleCopyImageToClipboard}
-                  disabled={imageWorking}
-                  className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
-                  style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
-                >
-                  {imageWorking ? "圖片產生中…" : "複製圖片到剪貼簿"}
                 </button>
                 {imageNote && (
                   <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
