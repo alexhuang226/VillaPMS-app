@@ -687,14 +687,28 @@ export function QuoteForm() {
     setImageWorking(true);
     setImageNote(null);
     try {
-      const blob = await captureReceiptBlob();
       const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
       if (canCopyToClipboard) {
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        // ⚠️ Safari（尤其 iOS Safari）要求 clipboard.write() 必須在
+        // 使用者手勢（點擊）當下「立刻」同步呼叫，不能先 await 一堆
+        // 步驟（等字型、截圖這些都要花時間）才呼叫——中間只要斷過
+        // 一次 await，Safari 就會認定已經離開使用者操作的當下，直接
+        // 用權限錯誤擋下來（"The request is not allowed by the user
+        // agent..."）。
+        // 解法：不要先把圖片截好、re-await 出一個現成的 Blob 再傳給
+        // ClipboardItem，而是把「還沒完成的 Promise」直接傳進去——
+        // ClipboardItem 支援接收 Promise<Blob>，clipboard.write() 這
+        // 個呼叫本身可以立刻同步執行（延續使用者手勢），實際截圖這個
+        // 比較慢的非同步過程在背景進行，瀏覽器會等這個 Promise
+        // resolve 才真的把內容放進剪貼簿。
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": captureReceiptBlob() })]);
         setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
       } else {
         // 桌機或不支援剪貼簿圖片 API 的瀏覽器：退回成直接下載，至少
-        // 還能拿到圖片，不是完全沒有替代方案
+        // 還能拿到圖片，不是完全沒有替代方案。這條路徑沒有用到
+        // clipboard API，不受上面那個使用者手勢時效限制，可以正常
+        // await 截圖完成再繼續。
+        const blob = await captureReceiptBlob();
         const propertyLabel =
           quote?.messageContext?.propertyName ??
           PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
