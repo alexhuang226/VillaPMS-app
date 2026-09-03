@@ -683,6 +683,38 @@ export function QuoteForm() {
    * 複製到剪貼簿的按鈕當作替代方案——複製後自己切換到對應的 App，
    * 在對話框直接貼上，一樣不需要先存到相簿。
    */
+  /**
+   * 把截圖產生的 PNG blob 轉成 JPEG blob——有些 App（例如目前確認
+   * 有問題的 LINE 官方帳號管理員對話框）貼上剪貼簿圖片時，即使剪貼
+   * 簿裡確實有圖片內容，貼上動作卻完全沒反應，研判可能是那個 App
+   * 的貼上處理只認特定的圖片格式，PNG 不在其中。這裡額外多提供一份
+   * JPEG 版本一起放進剪貼簿，讓 App 自己選擇它認得的格式——這是
+   * 沒辦法直接在對方 App 上測試的情況下，能做的其中一種嘗試，不能
+   * 保證一定解決，需要實際測試確認。
+   *
+   * PNG 可能帶透明背景，轉 JPEG（不支援透明）前先鋪一層白底，避免
+   * 透明區域轉出來變黑色。
+   */
+  async function pngBlobToJpegBlob(pngBlobPromise: Promise<Blob>): Promise<Blob> {
+    const pngBlob = await pngBlobPromise;
+    const bitmap = await createImageBitmap(pngBlob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("圖片格式轉換失敗");
+    ctx.fillStyle = colors.canvas;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0);
+    return new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("圖片格式轉換失敗"))),
+        "image/jpeg",
+        0.92
+      );
+    });
+  }
+
   async function handleCopyImageToClipboard() {
     setImageWorking(true);
     setImageNote(null);
@@ -701,7 +733,17 @@ export function QuoteForm() {
         // 個呼叫本身可以立刻同步執行（延續使用者手勢），實際截圖這個
         // 比較慢的非同步過程在背景進行，瀏覽器會等這個 Promise
         // resolve 才真的把內容放進剪貼簿。
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": captureReceiptBlob() })]);
+        // 同時提供 PNG 跟從它轉出來的 JPEG 兩種格式——pngPromise 只
+        // 呼叫一次 captureReceiptBlob()（截圖過程本身比較花時間，
+        // 不想因為要多一種格式就整個重截一次），JPEG 版本是從同一份
+        // PNG 結果轉換出來的，兩者共用同一次截圖工作。
+        const pngPromise = captureReceiptBlob();
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "image/png": pngPromise,
+            "image/jpeg": pngBlobToJpegBlob(pngPromise),
+          }),
+        ]);
         setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
       } else {
         // 桌機或不支援剪貼簿圖片 API 的瀏覽器：退回成直接下載，至少
@@ -995,7 +1037,7 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-6 pt-7 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
@@ -1041,9 +1083,9 @@ export function QuoteForm() {
                   上方 padding 特意比其他方向小很多——上面接的是深色
                   標題區塊，已經有自己的 py-6，兩個 padding 疊加會讓
                   「預訂資訊」上方空白感覺太大 */}
-              <div className="px-6 pb-12 pt-1" style={{ color: colors.ink }}>
+              <div className="px-6 pb-9 pt-1" style={{ color: colors.ink }}>
                 <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
-                <div className="flex flex-col gap-1.5 text-xs">
+                <div className="flex flex-col gap-1.5 text-sm">
                   <PairedInfoRow
                     items={[
                       { label: "入住日期", value: formatDateWithWeekday(quote.request.checkIn) },
@@ -1080,7 +1122,7 @@ export function QuoteForm() {
                     的房型不用每行都重複日期，不加粗。 */}
                 <ReceiptSectionHeader icon="💰" title="費用明細" />
                 <div
-                  className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs"
+                  className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-sm"
                   style={{ color: colors.muted }}
                 >
                   {consolidatedAccommodationGroups(quote).map((group, gi) => (
@@ -1101,7 +1143,7 @@ export function QuoteForm() {
                           <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
                           {item.subLabel && (
                             <p
-                              className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}
+                              className={`col-span-4 -mt-0.5 text-[11px] ${group.dateRangeLabel ? "pl-3" : ""}`}
                               style={{ color: colors.muted }}
                             >
                               {item.subLabel}
@@ -1161,7 +1203,7 @@ export function QuoteForm() {
                     一行），省一點垂直空間 */}
                 <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
                   <div className="flex items-baseline justify-between">
-                    <span className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                    <span className="text-sm tracking-wide" style={{ color: colors.muted }}>
                       包棟總費用
                     </span>
                     <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
@@ -1169,7 +1211,7 @@ export function QuoteForm() {
                     </span>
                   </div>
                   <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
-                    <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                    <span style={{ color: colors.muted }} className="text-sm tracking-wide">
                       訂金
                     </span>
                     <span style={{ color: colors.ink }} className="text-sm font-semibold">
@@ -1177,7 +1219,7 @@ export function QuoteForm() {
                     </span>
                   </div>
                   <div className="mt-1 flex items-baseline justify-between">
-                    <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                    <span style={{ color: colors.muted }} className="text-sm tracking-wide">
                       尾款<span style={{ color: colors.alert }}>(入住前 1 週匯款)</span>
                     </span>
                     <span style={{ color: colors.ink }} className="text-sm font-semibold">
@@ -1198,7 +1240,7 @@ export function QuoteForm() {
                     <ReceiptSectionHeader icon="🏦" title="匯款帳號" note={`⚠️ ${BANK_TRANSFER_NOTE}`} />
                     <div className="flex gap-3 text-sm font-semibold">
                       <div className="flex-[3]">
-                        <p className="text-[10px]" style={{ color: colors.muted }}>
+                        <p className="text-[11px]" style={{ color: colors.muted }}>
                           銀行
                         </p>
                         <p style={{ color: colors.ink }}>
@@ -1206,7 +1248,7 @@ export function QuoteForm() {
                         </p>
                       </div>
                       <div className="flex-[2]">
-                        <p className="text-[10px]" style={{ color: colors.muted }}>
+                        <p className="text-[11px]" style={{ color: colors.muted }}>
                           帳號
                         </p>
                         <p className="text-base tracking-wide" style={{ color: colors.ink }}>
@@ -1218,7 +1260,7 @@ export function QuoteForm() {
                 )}
 
                 <ReceiptSectionHeader icon="📝" title="預訂須知" />
-                <div className="flex flex-col gap-3 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                <div className="flex flex-col gap-3 text-sm leading-relaxed" style={{ color: colors.muted }}>
                   {baseGuestsReminderItems(quote).length > 0 && (
                     <div>
                       <p>
