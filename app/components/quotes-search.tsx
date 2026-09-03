@@ -438,8 +438,8 @@ function QuoteReceiptCard({
   if (!quote.messageContext || !quote.roomAllocation) return null;
   return (
     <>
-                    <div ref={cardRef} className="mt-4 overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
-                      <div className="relative px-6 pb-4 pt-5 text-center" style={{ backgroundColor: colors.pine }}>
+                    <div ref={cardRef} className="overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
+                      <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
                         <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                           {`${quote.messageContext.propertyName}私人會所`}
                         </p>
@@ -486,7 +486,7 @@ function QuoteReceiptCard({
                       {/* 上方 padding 特意比其他方向小很多——上面接的是
                           深色標題區塊，已經有自己的 padding，兩個疊加
                           會讓「預訂資訊」上方空白感覺太大 */}
-                      <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
+                      <div className="px-6 pb-12 pt-1" style={{ color: colors.ink }}>
                         <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
                         <div className="flex flex-col gap-1.5 text-xs">
                           <PairedInfoRow
@@ -2217,7 +2217,9 @@ export function QuotesSearch() {
 
                 {showFullReceipt && (
                   <>
-                    <QuoteReceiptCard quote={selectedQuote} createdAt={selectedQuoteCreatedAt} isConfirmed={isConfirmed} />
+                    <div className="mt-4">
+                      <QuoteReceiptCard quote={selectedQuote} createdAt={selectedQuoteCreatedAt} isConfirmed={isConfirmed} />
+                    </div>
 
                     {!isConfirmed && (
                       <button

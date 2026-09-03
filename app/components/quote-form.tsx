@@ -611,8 +611,17 @@ export function QuoteForm() {
    */
   /**
    * 共用的截圖邏輯——回傳截好的圖片 blob，不管後續要分享還是複製到
-   * 剪貼簿，都是同一份「等字型/放大寬度重排版/截圖/改回寬度」的
-   * 流程，抽出來避免兩邊各寫一次、之後改一邊忘記改另一邊。
+   * 剪貼簿，都是同一份「複製一份離屏的副本/放寬副本的寬度/截圖/
+   * 清掉副本」的流程，抽出來避免兩邊各寫一次、之後改一邊忘記改
+   * 另一邊。
+   *
+   * ⚠️ 這裡截圖用的是 receiptRef 的「複製品」，不是直接改
+   * receiptRef 本身的寬度——原本的寫法是直接把畫面上看得到的
+   * receiptRef 暫時加寬到 480px、截圖後再改回來，這樣使用者按下
+   * 按鈕的瞬間會親眼看到報價單內容「忽然變寬、又彈回來」，因為
+   * 改的就是他們正在看的那個真實元素。改成用 cloneNode 複製一份
+   * 放到畫面外（position:absolute, left:-9999px），寬度只加在這份
+   * 看不到的複製品上，使用者看到的畫面全程不會有任何變化。
    */
   async function captureReceiptBlob(): Promise<Blob> {
     if (!receiptRef.current) throw new Error("找不到報價單內容");
@@ -623,81 +632,45 @@ export function QuoteForm() {
       await document.fonts.ready;
     }
 
-    const node = receiptRef.current;
     // ⚠️ 一般手機瀏覽器的畫面寬度（375～430px 左右）遠比整份收據
     // 設計時假設的寬度（40rem／640px）窄很多——收據本身是用
     // w-full + max-width 做響應式排版，在手機上會被壓縮到跟螢幕
     // 一樣窄，這時候某些原本該在一行內顯示完的內容（例如銀行帳號
     // 那一排）會被擠到換行。網頁上這樣顯示沒問題（響應式排版本來
-    // 就該這樣），但截圖的時候如果直接用 node.scrollWidth（當下
-    // 實際渲染的寬度），截出來的圖片就會是「手機螢幕寬度」的窄
-    // 版本，帶著這些不必要的換行。
-    // 這裡在截圖前，暫時把寬度強制改成比較寬的固定值，讓內容重新
-    // 排版成「設計寬度」該有的樣子，截圖後再把寬度改回去（清空
-    // inline style，讓它恢復成原本响應式的 w-full 行為），不影響
-    // 使用者接下來繼續操作頁面看到的畫面。
-    let widthWasOverridden = false;
-    const originalWidth = node.style.width;
+    // 就該這樣），但截圖的時候如果直接用實際渲染的寬度，截出來的
+    // 圖片就會是「手機螢幕寬度」的窄版本，帶著這些不必要的換行。
+    // 這裡把複製品的寬度強制改成比較寬的固定值，讓內容重新排版成
+    // 「設計寬度」該有的樣子再截圖。
+    const clone = receiptRef.current.cloneNode(true) as HTMLDivElement;
+    const offscreenWrapper = document.createElement("div");
+    offscreenWrapper.style.position = "absolute";
+    offscreenWrapper.style.left = "-9999px";
+    offscreenWrapper.style.top = "0";
+    clone.style.width = "480px";
+    offscreenWrapper.appendChild(clone);
+    document.body.appendChild(offscreenWrapper);
+
     try {
-      node.style.width = "480px";
-      widthWasOverridden = true;
-      // 改寬度後瀏覽器要重新排版才會反映到 scrollWidth/scrollHeight，
-      // 用兩次 requestAnimationFrame 確保至少經過一次繪製週期
+      // 剛插入 DOM，瀏覽器要先跑一次排版才會反映到 scrollWidth/
+      // scrollHeight，用兩次 requestAnimationFrame 確保至少經過
+      // 一次繪製週期
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
-      // 明確指定寬高，用 scrollWidth/scrollHeight（完整內容的實際尺寸，
-      // 不受目前畫面捲動位置影響）取代預設量法，避免圖片下緣被裁切。
+      // 明確指定寬高，用 scrollWidth/scrollHeight（完整內容的實際尺寸）
+      // 取代預設量法，避免圖片下緣被裁切。
       const { toBlob } = await import("html-to-image");
-      const blob = await toBlob(node, {
+      const blob = await toBlob(clone, {
         pixelRatio: 2, // 手機螢幕通常是高解析度，2x 避免圖片模糊
         backgroundColor: colors.canvas,
-        width: node.scrollWidth,
-        height: node.scrollHeight,
+        width: clone.scrollWidth,
+        height: clone.scrollHeight,
       });
       if (!blob) throw new Error("圖片產生失敗，請再試一次");
       return blob;
     } finally {
-      // 不管上面成功還是中途出錯，只要真的動過寬度就一定要改回去，
-      // 不然頁面會卡在被截圖用的暫時寬度，使用者接下來看到的畫面
-      // 會不正常
-      if (widthWasOverridden) node.style.width = originalWidth;
-    }
-  }
-
-  async function handleShareImage() {
-    setImageWorking(true);
-    setImageNote(null);
-    try {
-      const blob = await captureReceiptBlob();
-      const propertyLabel =
-        quote?.messageContext?.propertyName ??
-        PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
-        "報價單";
-      const file = new File([blob], `${propertyLabel}-報價單.png`, { type: "image/png" });
-
-      const canShareFiles =
-        typeof navigator.share === "function" &&
-        typeof navigator.canShare === "function" &&
-        navigator.canShare({ files: [file] });
-
-      if (canShareFiles) {
-        await navigator.share({ files: [file], title: `${propertyLabel} 包棟報價單` });
-      } else {
-        // 桌機或不支援分享 API 的瀏覽器：直接觸發下載
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = file.name;
-        link.click();
-        URL.revokeObjectURL(url);
-        setImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
-      }
-    } catch (err) {
-      // 使用者在分享選單按「取消」也會被視為 AbortError，不算真的失敗
-      if (err instanceof Error && err.name === "AbortError") return;
-      setWarning(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
-    } finally {
-      setImageWorking(false);
+      // 不管上面成功還是中途出錯，都要把這份離屏複製品從 DOM 移除，
+      // 不然每按一次按鈕就會多留一份垃圾節點在畫面外
+      document.body.removeChild(offscreenWrapper);
     }
   }
 
@@ -714,13 +687,26 @@ export function QuoteForm() {
     setImageWorking(true);
     setImageNote(null);
     try {
-      if (typeof navigator.clipboard?.write !== "function" || typeof ClipboardItem === "undefined") {
-        setWarning("這個瀏覽器不支援複製圖片到剪貼簿，請改用「轉成圖片」分享");
-        return;
-      }
       const blob = await captureReceiptBlob();
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-      setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
+      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+      if (canCopyToClipboard) {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
+      } else {
+        // 桌機或不支援剪貼簿圖片 API 的瀏覽器：退回成直接下載，至少
+        // 還能拿到圖片，不是完全沒有替代方案
+        const propertyLabel =
+          quote?.messageContext?.propertyName ??
+          PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
+          "報價單";
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${propertyLabel}-報價單.png`;
+        link.click();
+        URL.revokeObjectURL(url);
+        setImageNote("這個瀏覽器不支援複製圖片到剪貼簿，已改為下載圖片，請自行傳給客人");
+      }
     } catch (err) {
       setWarning(err instanceof Error ? err.message : "複製失敗，請稍後再試");
     } finally {
@@ -978,9 +964,15 @@ export function QuoteForm() {
 
         {quote && !warning && (
           <>
+            {/* receiptRef 本身不能帶 mt-6——html-to-image 截圖時，
+                元素自己的 margin 有時候會被算進截出來的圖片裡，變成
+                標題正上方一塊不該有的空白。用外面包一層 div 帶
+                margin，receiptRef 這個要被截圖的元素本身完全沒有
+                margin，避免這個問題。 */}
+            <div className="mt-6">
             <div
               ref={receiptRef}
-              className="mt-6 overflow-hidden"
+              className="overflow-hidden"
               style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}
             >
               {/* 標題：民宿名稱在上（大字），「包棟報價單」在下（16px）；
@@ -989,7 +981,7 @@ export function QuoteForm() {
                   沒辦法維持標題原本置中的樣子。絕對定位的元素不算進
                   正常排版的寬度計算，標題才能繼續用 text-center 對
                   整個標題區塊的寬度置中，不受這裡多加的內容影響。 */}
-              <div className="relative px-6 pb-4 pt-5 text-center" style={{ backgroundColor: colors.pine }}>
+              <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
                 <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                   {`${
                     quote.messageContext?.propertyName ??
@@ -1035,7 +1027,7 @@ export function QuoteForm() {
                   上方 padding 特意比其他方向小很多——上面接的是深色
                   標題區塊，已經有自己的 py-6，兩個 padding 疊加會讓
                   「預訂資訊」上方空白感覺太大 */}
-              <div className="px-6 pb-5 pt-1" style={{ color: colors.ink }}>
+              <div className="px-6 pb-12 pt-1" style={{ color: colors.ink }}>
                 <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
                 <div className="flex flex-col gap-1.5 text-xs">
                   <PairedInfoRow
@@ -1249,6 +1241,7 @@ export function QuoteForm() {
                 </div>
               </div>
             </div>
+            </div>
 
             {quote.messageContext ? (
               <div className="mt-5 flex flex-col gap-2">
@@ -1264,21 +1257,14 @@ export function QuoteForm() {
                 >
                   {copied ? "已複製 ✓" : "複製報價內容"}
                 </button>
-                <button
-                  type="button"
-                  onClick={handleShareImage}
-                  disabled={imageWorking}
-                  className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
-                  style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
-                >
-                  {imageWorking ? "圖片產生中…" : "轉成圖片分享"}
-                </button>
-                {/* 有些 App（例如 LINE 官方帳號管理員）沒有做「分享
-                    目標」，不會出現在上面那個分享選單裡——這是那些
-                    App 有沒有支援分享選單的問題，網站這邊沒辦法讓
-                    它們出現。這類 App 通常都支援直接貼上剪貼簿裡的
-                    圖片，所以另外提供這個複製到剪貼簿的按鈕當替代
-                    方案，一樣不用先存到相簿。 */}
+                {/* 原本另外有一個「轉成圖片分享」按鈕（走 iOS 分享
+                    選單），但有些 App（例如 LINE 官方帳號管理員）
+                    沒有做「分享目標」，不會出現在分享選單裡——這是
+                    那些 App 有沒有支援分享選單的問題，網站這邊沒
+                    辦法讓它們出現。改成只保留複製到剪貼簿這個方式：
+                    這類 App 通常都支援直接貼上剪貼簿裡的圖片，複製
+                    後自己切換過去貼上即可，一樣不用先存到相簿，而
+                    且不會有「這個 App 沒出現在分享選單」的問題。 */}
                 <button
                   type="button"
                   onClick={handleCopyImageToClipboard}
