@@ -24,7 +24,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReservationAction, updateReservationPaymentStatusAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReservationAction, updateReservationPaymentStatusAction, updateReservationStatusAction } from "@/app/actions/reservation";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 
@@ -438,6 +438,8 @@ export function ReservationsSearch({
   const [copyError, setCopyError] = useState<string | null>(null);
   const [isUpdatingPaymentStatus, setIsUpdatingPaymentStatus] = useState(false);
   const [paymentStatusError, setPaymentStatusError] = useState<string | null>(null);
+  const [isUpdatingOrderStatus, setIsUpdatingOrderStatus] = useState(false);
+  const [orderStatusError, setOrderStatusError] = useState<string | null>(null);
   const [imageWorking, setImageWorking] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
   const [imageNote, setImageNote] = useState<string | null>(null);
@@ -449,6 +451,12 @@ export function ReservationsSearch({
   const [editError, setEditError] = useState<string | null>(null);
   const [editFields, setEditFields] = useState<ReservationUpdateFields | null>(null);
   const [editExtraBedRoomOptions, setEditExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
+  // 追蹤「這次編輯期間，民宿有沒有真的被換過」——null 代表還沒有
+  // 任何一次 effect 執行過（剛開始編輯，room codes 是從既有訂單帶
+  // 進來的，不能清掉）；有值之後如果偵測到跟目前不一樣，才代表使用
+  // 者真的手動換了民宿，這時候才要清空加床房號（因為房號是各民宿
+  // 自己的，換民宿後舊房號不再適用）
+  const editPropertyCodeRef = useRef<string | null>(null);
 
   // 刪除訂單（測試訂單/建錯的訂單用，客人真的取消請改用編輯狀態）
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -571,6 +579,32 @@ export function ReservationsSearch({
     }
   }
 
+  /** 改整體訂單狀態（已確認/已取消/未到），在訂單詳情頁面直接可以
+   * 改，不用進到「編輯」表單——原本這個欄位只在編輯表單裡，現在
+   * 移到詳情頁面、放在付款狀況上方，快速切換模式跟付款狀況是同一套
+   * 做法。 */
+  async function handleChangeOrderStatus(newStatus: string) {
+    if (!selectedId) return;
+    setIsUpdatingOrderStatus(true);
+    setOrderStatusError(null);
+    try {
+      await updateReservationStatusAction(selectedId, newStatus);
+      const result = await getReservationDetailAction(selectedId);
+      if (result) setDetail(result);
+      // 訂單狀態會影響月曆上的顯示（例如已取消的訂單），改完要重新
+      // 查一次目前這個月的日曆，套用跟付款狀況同樣的短暫延遲再查詢
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (year !== null && month !== null) {
+        const rows = await fetchCalendarRange(year, month);
+        setReservations(rows);
+      }
+    } catch (err) {
+      setOrderStatusError(err instanceof Error ? err.message : "更新訂單狀態失敗，請稍後再試");
+    } finally {
+      setIsUpdatingOrderStatus(false);
+    }
+  }
+
   async function handleDeleteReservation() {
     if (!selectedId) return;
     setIsDeleting(true);
@@ -599,6 +633,9 @@ export function ReservationsSearch({
   function startEdit() {
     if (!detail) return;
     setEditError(null);
+    // 重設「編輯期間有沒有真的換過民宿」的追蹤——每次重新開始編輯
+    // 都要歸零，不然上一次編輯換過民宿的紀錄會誤判成這次也換過
+    editPropertyCodeRef.current = null;
 
     const extraBedFixedItem = detail.items.find((i) => i.itemType === "extra_bed_fixed");
     const extraBedTempItem = detail.items.find((i) => i.itemType === "extra_bed_temporary");
@@ -613,6 +650,7 @@ export function ReservationsSearch({
     const currentDepositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
 
     setEditFields({
+      propertyCode: detail.propertyCode as ReservationUpdateFields["propertyCode"],
       checkIn: detail.checkIn,
       checkOut: detail.checkOut,
       adults: detail.adults,
@@ -639,14 +677,33 @@ export function ReservationsSearch({
       earlyCheckin: Boolean(earlyCheckinItem),
     });
     setIsEditing(true);
+  }
 
-    // 加床位置選項要用民宿代碼查——編輯訂單不能換民宿，查一次就夠
-    getExtraBedRoomOptionsForCreateAction(detail.propertyCode as CreateReservationFields["propertyCode"])
-      .then((options) => setEditExtraBedRoomOptions(options))
+  // 加床位置選項要用民宿代碼查——編輯期間如果換了民宿（見上面
+  // editPropertyCodeRef 的說明），要重新查一次新民宿的房號選項，
+  // 並且清空原本選的房號（那些是舊民宿的房號，換民宿後不再適用）
+  useEffect(() => {
+    if (!editFields) return;
+    const isFirstRunForThisEdit = editPropertyCodeRef.current === null;
+    const propertyChanged = !isFirstRunForThisEdit && editPropertyCodeRef.current !== editFields.propertyCode;
+    editPropertyCodeRef.current = editFields.propertyCode;
+
+    let cancelled = false;
+    getExtraBedRoomOptionsForCreateAction(editFields.propertyCode as CreateReservationFields["propertyCode"])
+      .then((options) => {
+        if (!cancelled) setEditExtraBedRoomOptions(options);
+      })
       .catch(() => {
         // 查詢失敗不擋編輯，只是加床位置選單會是空的
       });
-  }
+
+    if (propertyChanged) {
+      setEditFields((prev) => (prev ? { ...prev, extraBedFixedRoomCodes: [], extraBedTempRoomCodes: [] } : prev));
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [editFields?.propertyCode]);
 
   function toggleEditExtraBedRoom(field: "extraBedFixedRoomCodes" | "extraBedTempRoomCodes", code: string) {
     setEditFields((prev) => {
@@ -1123,7 +1180,7 @@ export function ReservationsSearch({
                               >
                                 {property.shortLabel}
                                 {seg.reservation.hasBbq ? "🍖" : ""}
-                                {seg.reservation.balanceUnpaid ? " ⚠" : ""}
+                                {seg.reservation.balanceUnpaid ? " ⚠️" : ""}
                               </button>
                             );
                           })}
@@ -1166,7 +1223,7 @@ export function ReservationsSearch({
             {detail && (
               <div className="mt-4 border p-4" style={{ borderColor: colors.line }}>
                 <div className="flex items-baseline justify-between">
-                  <span className={`${display.className} text-xl italic`}>{detail.propertyName}</span>
+                  {!isEditing && <span className={`${display.className} text-xl italic`}>{detail.propertyName}</span>}
                   {!isEditing && !isHousekeepingManager && (
                     <div className="flex gap-3">
                       <button type="button" onClick={startEdit} className="text-xs" style={{ color: colors.blue }}>
@@ -1216,23 +1273,33 @@ export function ReservationsSearch({
 
                 {isEditing && editFields ? (
                   <div className="mt-3 flex flex-col gap-3 text-xs">
-                    <label className="flex flex-col gap-1">
-                      <span style={{ color: colors.muted }} className="text-[11px]">
-                        訂單狀態
-                      </span>
-                      <select
-                        value={editFields.status}
-                        onChange={(e) => updateEditField("status", e.target.value)}
-                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                        style={{ borderColor: colors.line, color: colors.ink }}
-                      >
-                        {Object.entries(STATUS_LABEL).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div>
+                      <p style={{ color: colors.muted }} className="mb-1 text-[11px]">
+                        民宿（客人有時候會中途換民宿，這裡可以直接改）
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {PROPERTIES.map((p) => {
+                          const active = editFields.propertyCode === p.code;
+                          return (
+                            <button
+                              key={p.code}
+                              type="button"
+                              onClick={() =>
+                                updateEditField("propertyCode", p.code as ReservationUpdateFields["propertyCode"])
+                              }
+                              className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                              style={
+                                active
+                                  ? { borderColor: p.color, backgroundColor: p.color, color: "#FFFFFF" }
+                                  : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                              }
+                            >
+                              {p.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex flex-col gap-1">
@@ -1581,22 +1648,55 @@ export function ReservationsSearch({
                   <div className="mt-3 flex flex-col gap-1.5 text-xs">
                     {!isHousekeepingManager && (
                       <>
-                        <p className="text-xs font-bold" style={{ color: colors.ink }}>
-                          付款狀況
-                        </p>
-                        <select
-                          value={detail.paymentStatus}
-                          onChange={(e) => handleChangePaymentStatus(e.target.value)}
-                          disabled={isUpdatingPaymentStatus}
-                          className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                              訂單狀態
+                            </p>
+                            <select
+                              value={detail.status}
+                              onChange={(e) => handleChangeOrderStatus(e.target.value)}
+                              disabled={isUpdatingOrderStatus}
+                              className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
+                              style={{ borderColor: colors.line, color: colors.ink }}
+                            >
+                              {Object.entries(STATUS_LABEL).map(([value, label]) => (
+                                <option key={value} value={value}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                            {isUpdatingOrderStatus && (
+                              <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
+                                更新中…
+                              </p>
+                            )}
+                            {orderStatusError && (
+                              <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
+                                {orderStatusError}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                              付款狀況
+                            </p>
+                            <select
+                              value={detail.paymentStatus}
+                              onChange={(e) => handleChangePaymentStatus(e.target.value)}
+                              disabled={isUpdatingPaymentStatus}
+                              className="mt-1 w-full border-b bg-transparent py-1.5 text-sm outline-none disabled:opacity-50"
+                              style={{ borderColor: colors.line, color: colors.ink }}
+                            >
+                              {Object.entries(RESERVATION_PAYMENT_STATUS_LABEL).map(([value, label]) => (
+                                <option key={value} value={value}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
                         {detail.status === "cancelled" && detail.paymentStatus === "deposit_forfeited" && (
                           <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.pine }}>
                             ⚠️

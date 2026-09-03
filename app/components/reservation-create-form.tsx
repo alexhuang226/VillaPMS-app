@@ -280,9 +280,12 @@ export function ReservationCreateForm() {
         guestPhone: createFields.guestPhone.trim(),
         finalTotal: Number(finalTotalRaw) || 0,
       });
-      // 建立成功後導回訂單管理頁面——導頁本身就會重新載入月曆資料，
-      // 不用像原本內嵌在同一頁那樣自己另外查一次
-      router.push("/reservations");
+      // 建立成功後導回訂單管理頁面，並且帶著這筆新訂單入住日期所在
+      // 的年/月——不然導回去預設看到的是「今天」那個月，如果訂單的
+      // 入住日期不在當月（新增訂單的入住日期預設就是下個月），使用
+      // 者存檔後還要自己手動切換月份才看得到剛剛新增的這筆。
+      const [checkInYear, checkInMonth] = createFields.checkIn.split("-");
+      router.push(`/reservations?year=${checkInYear}&month=${Number(checkInMonth)}`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "建立訂單失敗，請稍後再試");
     } finally {
@@ -584,9 +587,16 @@ export function ReservationCreateForm() {
           )}
 
           <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
-            ⚠️ 這裡建立的訂單不會產生訂金/尾款應收款記錄——OTA 平台
-            已經處理收款，避免「查詢應收」顯示這筆其實已經收到錢的
-            訂單還在等收款。
+            💡 這裡會依照上面填的「訂金金額」跟下面的「總金額」，實際
+            建立訂金／尾款的應收款記錄，「查詢應收」會顯示還沒收到的
+            款項、快到期的尾款也會提醒。
+            <br />
+            如果是 Airbnb 等平台的訂房，訂房平台已經處理收款，訂金／
+            尾款可以都填 0（或直接照平台顯示的金額填），不用特別去
+            對應「訂金」「尾款」的概念。
+            <br />
+            如果是補登記漏掉的訂單（不是走 OTA 平台），記得把訂金／
+            總金額都確實填上，不然這裡會漏掉、之後看不到尾款提醒。
           </p>
 
           <div className="border-t pt-3" style={{ borderColor: colors.line }}>

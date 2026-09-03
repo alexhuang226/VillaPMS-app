@@ -895,6 +895,21 @@ export async function markPaymentPaid(paymentId: string): Promise<void> {
  * - 退還訂金：訂金已退款、尾款作廢（不會再收，訂單通常已取消）
  * - 沒收訂金：訂金已收（客人付的訂金民宿留下當作取消費）、尾款作廢
  */
+/**
+ * 更新訂單整體狀態（confirmed/cancelled/no_show）——原本這個欄位只
+ * 能在「編輯」表單裡改，現在移到訂單詳情頁面直接可以快速切換，不用
+ * 進到編輯表單，跟 updateReservationPaymentStatus() 是同樣的「詳情
+ * 頁面快速切換」模式，但這裡單純只更新這一個欄位，不像付款狀況那樣
+ * 需要連動同步 payments 表。
+ */
+export async function updateReservationStatus(reservationId: string, status: string): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const { error } = await (supabase.from("reservations") as any).update({ status }).eq("id", reservationId);
+  if (error) {
+    throw new Error(`更新訂單狀態失敗：${error.message}`);
+  }
+}
+
 export async function updateReservationPaymentStatus(reservationId: string, paymentStatus: string): Promise<void> {
   const supabase = createServiceRoleClient();
 
@@ -1032,6 +1047,9 @@ export async function getReservationsForMonthCalendar(
  * 「總金額」欄位。
  */
 export interface ReservationUpdateFields extends ReservationAddOnFields {
+  /** 客人有時候會從一開始訂的民宿改訂另一間（例如原本訂只此清綠、
+   * 後來改成陌隱），編輯訂單時可以直接改這個欄位換民宿 */
+  propertyCode: PropertyCode;
   checkIn: string;
   checkOut: string;
   adults: number;
@@ -1056,9 +1074,13 @@ export interface ReservationUpdateFields extends ReservationAddOnFields {
 
 export async function updateReservation(reservationId: string, fields: ReservationUpdateFields): Promise<void> {
   const supabase = createServiceRoleClient();
+  // 客人可能中途換民宿，把表單填的民宿代碼轉成實際的 property_id
+  // 一起寫入，跟新增訂單同一套轉換方式
+  const newPropertyId = await getPropertyId(fields.propertyCode);
   // 同樣的型別檢查問題，見 getReservationDetail 裡 `as any` 那段的說明
   const { data: updatedRow, error } = await (supabase.from("reservations") as any)
     .update({
+      property_id: newPropertyId,
       check_in: fields.checkIn,
       check_out: fields.checkOut,
       adults: fields.adults,

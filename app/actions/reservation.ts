@@ -21,6 +21,7 @@ import {
   markPaymentPaid,
   updateReservation,
   updateReservationPaymentStatus,
+  updateReservationStatus,
 } from "@/lib/pricing/queries";
 import type {
   CalendarReservation,
@@ -61,6 +62,13 @@ export async function markPaymentPaidAction(paymentId: string): Promise<void> {
  */
 export async function updateReservationPaymentStatusAction(reservationId: string, paymentStatus: string): Promise<void> {
   return updateReservationPaymentStatus(reservationId, paymentStatus);
+}
+
+/** 訂單詳情頁面快速切換整體狀態（已確認/已取消/未到），不用進到
+ * 「編輯」表單——見 lib/pricing/queries.ts updateReservationStatus()
+ * 的說明。 */
+export async function updateReservationStatusAction(reservationId: string, status: string): Promise<void> {
+  return updateReservationStatus(reservationId, status);
 }
 
 /**
