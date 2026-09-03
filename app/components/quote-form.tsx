@@ -684,91 +684,82 @@ export function QuoteForm() {
    * 在對話框直接貼上，一樣不需要先存到相簿。
    */
   /**
-   * 把截圖產生的 PNG blob 轉成 JPEG blob——有些 App（例如目前確認
-   * 有問題的 LINE 官方帳號管理員對話框）貼上剪貼簿圖片時，即使剪貼
-   * 簿裡確實有圖片內容，貼上動作卻完全沒反應，研判可能是那個 App
-   * 的貼上處理只認特定的圖片格式，PNG 不在其中。這裡額外多提供一份
-   * JPEG 版本一起放進剪貼簿，讓 App 自己選擇它認得的格式——這是
-   * 沒辦法直接在對方 App 上測試的情況下，能做的其中一種嘗試，不能
-   * 保證一定解決，需要實際測試確認。
-   *
-   * PNG 可能帶透明背景，轉 JPEG（不支援透明）前先鋪一層白底，避免
-   * 透明區域轉出來變黑色。
+   * 下載圖片——原本有做過「複製到剪貼簿」的版本，但實測發現 LINE
+   * 官方帳號管理員這個 App 的聊天輸入框，貼上功能只接受文字，不
+   * 接受圖片（文字貼得上去、圖片完全沒反應），這是那個 App 本身的
+   * 功能限制，不是能靠程式碼繞過的問題。改回最單純、最不會有相容性
+   * 問題的下載方式：截圖後直接觸發下載到相簿/檔案，使用者自己選擇
+   * 要傳去哪個 App。複製到剪貼簿那個版本的程式碼先保留在下面用
+   * 註解隱藏起來，不是整個刪掉，之後如果想要重新啟用（例如給一般
+   * LINE 用，那個有測過是可以直接貼上的），可以直接把註解拿掉用。
    */
-  async function pngBlobToJpegBlob(pngBlobPromise: Promise<Blob>): Promise<Blob> {
-    const pngBlob = await pngBlobPromise;
-    const bitmap = await createImageBitmap(pngBlob);
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("圖片格式轉換失敗");
-    ctx.fillStyle = colors.canvas;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bitmap, 0, 0);
-    return new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error("圖片格式轉換失敗"))),
-        "image/jpeg",
-        0.92
-      );
-    });
-  }
-
-  async function handleCopyImageToClipboard() {
+  async function handleDownloadImage() {
     setImageWorking(true);
     setImageNote(null);
     try {
-      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
-      if (canCopyToClipboard) {
-        // ⚠️ Safari（尤其 iOS Safari）要求 clipboard.write() 必須在
-        // 使用者手勢（點擊）當下「立刻」同步呼叫，不能先 await 一堆
-        // 步驟（等字型、截圖這些都要花時間）才呼叫——中間只要斷過
-        // 一次 await，Safari 就會認定已經離開使用者操作的當下，直接
-        // 用權限錯誤擋下來（"The request is not allowed by the user
-        // agent..."）。
-        // 解法：不要先把圖片截好、re-await 出一個現成的 Blob 再傳給
-        // ClipboardItem，而是把「還沒完成的 Promise」直接傳進去——
-        // ClipboardItem 支援接收 Promise<Blob>，clipboard.write() 這
-        // 個呼叫本身可以立刻同步執行（延續使用者手勢），實際截圖這個
-        // 比較慢的非同步過程在背景進行，瀏覽器會等這個 Promise
-        // resolve 才真的把內容放進剪貼簿。
-        // 同時提供 PNG 跟從它轉出來的 JPEG 兩種格式——pngPromise 只
-        // 呼叫一次 captureReceiptBlob()（截圖過程本身比較花時間，
-        // 不想因為要多一種格式就整個重截一次），JPEG 版本是從同一份
-        // PNG 結果轉換出來的，兩者共用同一次截圖工作。
-        const pngPromise = captureReceiptBlob();
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "image/png": pngPromise,
-            "image/jpeg": pngBlobToJpegBlob(pngPromise),
-          }),
-        ]);
-        setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
-      } else {
-        // 桌機或不支援剪貼簿圖片 API 的瀏覽器：退回成直接下載，至少
-        // 還能拿到圖片，不是完全沒有替代方案。這條路徑沒有用到
-        // clipboard API，不受上面那個使用者手勢時效限制，可以正常
-        // await 截圖完成再繼續。
-        const blob = await captureReceiptBlob();
-        const propertyLabel =
-          quote?.messageContext?.propertyName ??
-          PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
-          "報價單";
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${propertyLabel}-報價單.png`;
-        link.click();
-        URL.revokeObjectURL(url);
-        setImageNote("這個瀏覽器不支援複製圖片到剪貼簿，已改為下載圖片，請自行傳給客人");
-      }
+      const blob = await captureReceiptBlob();
+      const propertyLabel =
+        quote?.messageContext?.propertyName ??
+        PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
+        "報價單";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${propertyLabel}-報價單.png`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setImageNote("已下載圖片，請自行傳給客人");
     } catch (err) {
-      setWarning(err instanceof Error ? err.message : "複製失敗，請稍後再試");
+      setWarning(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
     } finally {
       setImageWorking(false);
     }
   }
+
+  // async function handleCopyImageToClipboard() {
+  //   setImageWorking(true);
+  //   setImageNote(null);
+  //   try {
+  //     const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+  //     if (canCopyToClipboard) {
+  //       // ⚠️ Safari（尤其 iOS Safari）要求 clipboard.write() 必須在
+  //       // 使用者手勢（點擊）當下「立刻」同步呼叫，不能先 await 一堆
+  //       // 步驟（等字型、截圖這些都要花時間）才呼叫——中間只要斷過
+  //       // 一次 await，Safari 就會認定已經離開使用者操作的當下，直接
+  //       // 用權限錯誤擋下來（"The request is not allowed by the user
+  //       // agent..."）。
+  //       // 解法：不要先把圖片截好、re-await 出一個現成的 Blob 再傳給
+  //       // ClipboardItem，而是把「還沒完成的 Promise」直接傳進去——
+  //       // ClipboardItem 支援接收 Promise<Blob>，clipboard.write() 這
+  //       // 個呼叫本身可以立刻同步執行（延續使用者手勢），實際截圖這個
+  //       // 比較慢的非同步過程在背景進行，瀏覽器會等這個 Promise
+  //       // resolve 才真的把內容放進剪貼簿。
+  //       await navigator.clipboard.write([new ClipboardItem({ "image/png": captureReceiptBlob() })]);
+  //       setImageNote("已複製圖片到剪貼簿，可以直接切換到 LINE 等 App 貼上，不用先存到相簿");
+  //     } else {
+  //       // 桌機或不支援剪貼簿圖片 API 的瀏覽器：退回成直接下載，至少
+  //       // 還能拿到圖片，不是完全沒有替代方案。這條路徑沒有用到
+  //       // clipboard API，不受上面那個使用者手勢時效限制，可以正常
+  //       // await 截圖完成再繼續。
+  //       const blob = await captureReceiptBlob();
+  //       const propertyLabel =
+  //         quote?.messageContext?.propertyName ??
+  //         PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
+  //         "報價單";
+  //       const url = URL.createObjectURL(blob);
+  //       const link = document.createElement("a");
+  //       link.href = url;
+  //       link.download = `${propertyLabel}-報價單.png`;
+  //       link.click();
+  //       URL.revokeObjectURL(url);
+  //       setImageNote("這個瀏覽器不支援複製圖片到剪貼簿，已改為下載圖片，請自行傳給客人");
+  //     }
+  //   } catch (err) {
+  //     setWarning(err instanceof Error ? err.message : "複製失敗，請稍後再試");
+  //   } finally {
+  //     setImageWorking(false);
+  //   }
+  // }
 
   return (
     <div
@@ -1313,22 +1304,22 @@ export function QuoteForm() {
                 >
                   {copied ? "已複製 ✓" : "複製報價內容"}
                 </button>
-                {/* 原本另外有一個「轉成圖片分享」按鈕（走 iOS 分享
-                    選單），但有些 App（例如 LINE 官方帳號管理員）
-                    沒有做「分享目標」，不會出現在分享選單裡——這是
-                    那些 App 有沒有支援分享選單的問題，網站這邊沒
-                    辦法讓它們出現。改成只保留複製到剪貼簿這個方式：
-                    這類 App 通常都支援直接貼上剪貼簿裡的圖片，複製
-                    後自己切換過去貼上即可，一樣不用先存到相簿，而
-                    且不會有「這個 App 沒出現在分享選單」的問題。 */}
+                {/* 原本試過「轉成圖片分享」（走 iOS 分享選單）跟
+                    「複製圖片到剪貼簿」兩種方式，但都各自遇到問題：
+                    分享選單裡有些 App（例如 LINE 官方帳號管理員）
+                    沒有做「分享目標」不會出現；複製到剪貼簿的話，
+                    實測 LINE 官方帳號管理員的聊天輸入框貼上功能只
+                    接受文字、不接受圖片，這是那個 App 本身的功能
+                    限制，兩條路都繞不過去。改回最單純、相容性最好
+                    的下載方式，使用者自己選擇要傳去哪個 App。 */}
                 <button
                   type="button"
-                  onClick={handleCopyImageToClipboard}
+                  onClick={handleDownloadImage}
                   disabled={imageWorking}
                   className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
                   style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
                 >
-                  {imageWorking ? "圖片產生中…" : "複製圖片到剪貼簿"}
+                  {imageWorking ? "圖片產生中…" : "下載圖片"}
                 </button>
                 {imageNote && (
                   <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>

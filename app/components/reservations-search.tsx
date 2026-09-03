@@ -737,7 +737,10 @@ export function ReservationsSearch({
       const result = await getReservationDetailAction(selectedId);
       if (result) setDetail(result);
       // 付款狀況會影響月曆上的圖示（例如尾款未收的 ⚠ 提示），改完要
-      // 重新查一次目前這個月的日曆，不然月曆畫面不會馬上反映最新狀態
+      // 重新查一次目前這個月的日曆，不然月曆畫面不會馬上反映最新狀態。
+      // 套用跟新增/編輯/刪除訂單同樣的短暫延遲再查詢，理由一致（見
+      // 新增訂單那段程式碼的註解）。
+      await new Promise((resolve) => setTimeout(resolve, 400));
       if (year !== null && month !== null) {
         const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
@@ -758,7 +761,10 @@ export function ReservationsSearch({
       setSelectedId(null);
       setDetail(null);
       setShowDeleteConfirm(false);
-      // 刪除成功後重新查一次目前這個月的日曆，讓訂單馬上從列表消失
+      // 刪除成功後重新查一次目前這個月的日曆，讓訂單馬上從列表消失。
+      // 套用跟新增/編輯訂單同樣的短暫延遲再查詢，理由一致（見新增
+      // 訂單那段程式碼的註解）。
+      await new Promise((resolve) => setTimeout(resolve, 400));
       if (year !== null && month !== null) {
         const rows = await fetchCalendarRange(year, month);
         setReservations(rows);
@@ -876,6 +882,20 @@ export function ReservationsSearch({
       if (result) setDetail(result);
       setIsEditing(false);
       setEditFields(null);
+      // ⚠️ 上面只有重新整理「詳情頁面自己的內容」（detail），沒有
+      // 重新整理上方月曆用的 reservations——如果這次編輯改了會影響
+      // 月曆顯示的內容（例如把狀態改成「已取消」），月曆會繼續顯示
+      // 編輯前的舊資料，直到使用者換月份、切回來才會看到最新狀態。
+      // 跟新增訂單後同樣的道理，一併重新查一次目前這個月的月曆。
+      // 這裡也套用跟新增訂單同樣的短暫延遲再查詢——研判是剛寫入的
+      // 資料庫更新，緊接著馬上查詢時還沒完全反映出來，換月份時因為
+      // 隔了一段使用者操作的時間，這個延遲早就過了才不會遇到（詳細
+      // 說明見新增訂單那段程式碼的註解）。
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (year !== null && month !== null) {
+        const rows = await fetchCalendarRange(year, month);
+        setReservations(rows);
+      }
     } catch (err) {
       setEditError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
     } finally {
@@ -1618,7 +1638,13 @@ export function ReservationsSearch({
                   </div>
                   <div className="mt-1 flex flex-col gap-[3px]">
                     {(propertyFilter ? PROPERTIES.filter((p) => p.code === propertyFilter) : PROPERTIES).map((property) => {
-                      const propertyReservations = reservations.filter((r) => r.propertyCode === property.code);
+                      // 已取消的訂單不應該繼續佔用月曆上的格子——這
+                      // 個日期實際上是空的、可以重新接受訂房，如果
+                      // 已取消的訂單還畫在月曆上，會誤導成「這天已經
+                      // 被訂走了」
+                      const propertyReservations = reservations.filter(
+                        (r) => r.propertyCode === property.code && r.status !== "cancelled"
+                      );
                       const segments = computeWeekSegments(week, propertyReservations);
                       return (
                         <div
