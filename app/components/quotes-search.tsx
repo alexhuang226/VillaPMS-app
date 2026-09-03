@@ -281,9 +281,6 @@ function ConfirmationImageCard({
   quote: PackageQuote | null;
   cardRef: RefObject<HTMLDivElement | null>;
 }) {
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-
   return (
     <div style={{ height: 0, overflow: "hidden" }}>
       <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
@@ -303,7 +300,7 @@ function ConfirmationImageCard({
                 訂房確認單
               </p>
               <div className="absolute right-0 bottom-0 text-right text-[8px] leading-tight" style={{ color: CONFIRM_LIGHT }}>
-                <p>預訂日期：{formatSlashDate(todayStr)}</p>
+                <p>預訂日期：{formatSlashDate(detail.createdAt.slice(0, 10))}</p>
               </div>
             </div>
           </div>

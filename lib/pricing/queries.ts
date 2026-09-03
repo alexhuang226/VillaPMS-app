@@ -700,6 +700,9 @@ export interface ReservationDetail {
   roomLines: { quantity: number; notes: string | null }[];
   items: { itemType: string; description: string; quantity: number; amount: number; notes: string | null }[];
   payments: { paymentKind: string; amount: number; status: string; dueDate: string | null; paidAt: string | null }[];
+  /** 這筆訂單是什麼時候建立的（reservations.created_at），訂單詳情
+   * 頁面顯示用 */
+  createdAt: string;
 }
 
 export async function getReservationDetail(reservationId: string): Promise<ReservationDetail | null> {
@@ -708,7 +711,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
   const { data: rowData, error } = await supabase
     .from("reservations")
     .select(
-      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, payment_status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, guests(name, phone), properties(code, name, property_settings(address, parking_info, map_url))"
+      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, payment_status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, created_at, guests(name, phone), properties(code, name, property_settings(address, parking_info, map_url))"
     )
     .eq("id", reservationId)
     .maybeSingle();
@@ -791,6 +794,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
       dueDate: r.due_date ?? null,
       paidAt: r.paid_at ?? null,
     })),
+    createdAt: row.created_at as string,
   };
 }
 
