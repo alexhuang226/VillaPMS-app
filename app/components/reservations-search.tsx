@@ -25,8 +25,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { buildReservationConfirmationMessageAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReservationAction, updateReservationPaymentStatusAction, updateReservationStatusAction } from "@/app/actions/reservation";
+import { calculateQuoteAction } from "@/app/actions/quote";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
+import { addOnFeeBreakdown, consolidatedAccommodationGroups, extraBedTempLineItem } from "@/lib/pricing/quote-message";
+import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -452,6 +455,16 @@ export function ReservationsSearch({
   const [detail, setDetail] = useState<ReservationDetail | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // 「轉成圖片」的費用明細要跟報價單那邊同一套格式（單價×數量=小計），
+  // 但訂單本身（ReservationDetail）沒有存這種逐項計價資料，只有一筆
+  // finalTotal 總金額——所以額外用現有的計價引擎，拿這筆訂單目前的
+  // 民宿/日期/房型配置重新算一次，取得可以逐項顯示的 PackageQuote。
+  // ⚠️ 這是「重新算一次」不是「讀回原始報價」，如果這筆訂單後來手動
+  // 調整過金額（例如 OTA 訂房），算出來的細項總和可能跟 finalTotal
+  // 對不上——圖片裡的「包棟總費用」還是顯示 detail.finalTotal（真正
+  // 準確的數字），這個重新算出來的 quote 只用在費用明細那幾行的
+  // 逐項呈現，不會拿來取代總金額本身。
+  const [recalculatedQuote, setRecalculatedQuote] = useState<PackageQuote | null>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [isUpdatingPaymentStatus, setIsUpdatingPaymentStatus] = useState(false);
@@ -480,6 +493,63 @@ export function ReservationsSearch({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // 訂單詳情（detail）換了就重新算一次上面說明的 recalculatedQuote——
+  // 用這筆訂單目前的民宿/日期/房型配置/加購項目組出 StayRequest，丟
+  // 給計價引擎重新算一次，取得可以逐項顯示的費用明細。第二個參數
+  // true（allowBelowMinimumGuests）是必要的：不然只要這筆訂單的入住
+  // 人數低於基本人數（訂單本來就允許這種情況存在，見編輯報價單那邊
+  // 同樣的處理），算出來的 quote 金額會被引擎強制歸零，逐項明細也
+  // 會不完整。
+  useEffect(() => {
+    if (!detail) {
+      setRecalculatedQuote(null);
+      return;
+    }
+    let cancelled = false;
+    const extraBedFixedItem = detail.items.find((i) => i.itemType === "extra_bed_fixed");
+    const extraBedTempItem = detail.items.find((i) => i.itemType === "extra_bed_temporary");
+    const extraRoomItem = detail.items.find((i) => i.itemType === "other" && i.description === "加開房間");
+    const bbqItem = detail.items.find((i) => i.itemType === "bbq");
+    const foodTruckItem = detail.items.find((i) => i.itemType === "food_truck");
+    const earlyCheckinItem = detail.items.find((i) => i.itemType === "early_checkin");
+    const request: StayRequest = {
+      propertyCode: detail.propertyCode as StayRequest["propertyCode"],
+      checkIn: detail.checkIn,
+      checkOut: detail.checkOut,
+      adults: detail.adults,
+      children: detail.children,
+      infants: detail.infants,
+      pets: detail.pets,
+      visitorQty: detail.visitors,
+      extraBedFixedQty: extraBedFixedItem?.quantity ?? 0,
+      extraBedTempQty: extraBedTempItem?.quantity ?? 0,
+      extraRoomQty: extraRoomItem?.quantity ?? 0,
+      addOns: {
+        bbq: Boolean(bbqItem),
+        foodTruck: Boolean(foodTruckItem),
+        earlyCheckin: Boolean(earlyCheckinItem),
+      },
+      roomOverride: {
+        fourPersonSuiteCount: detail.roomAllocation.fourPersonSuiteCount,
+        fourPersonDowngradeCount: detail.roomAllocation.fourPersonDowngradeCount,
+        doubleSuiteCount: detail.roomAllocation.doubleSuiteCount,
+        doublePlainCount: detail.roomAllocation.doublePlainCount,
+      },
+    };
+    calculateQuoteAction(request, true)
+      .then((quote) => {
+        if (!cancelled) setRecalculatedQuote(quote);
+      })
+      .catch(() => {
+        // 重新計算失敗不擋畫面顯示，只是費用明細那幾行會退回顯示
+        // 「住宿總額：$finalTotal」這個最基本的版本（見下面的 fallback）
+        if (!cancelled) setRecalculatedQuote(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detail]);
 
   // 年/月留到 mount 後才設定成「今天」，避免 SSR 跟 client 算出的
   // 「今天」不一樣造成 hydration 不一致的警告/閃爍（跟 quote-form.tsx
@@ -1365,114 +1435,34 @@ export function ReservationsSearch({
                         房型配置
                       </p>
                       <div className="mt-1 grid grid-cols-2 gap-3">
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            四人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editFields.fourPersonSuiteCount}
-                            onChange={(e) => updateEditField("fourPersonSuiteCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            降規四人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editFields.fourPersonDowngradeCount}
-                            onChange={(e) => updateEditField("fourPersonDowngradeCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            雙人套房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editFields.doubleSuiteCount}
-                            onChange={(e) => updateEditField("doubleSuiteCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            雙人雅房
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editFields.doublePlainCount}
-                            onChange={(e) => updateEditField("doublePlainCount", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
+                        <NumberField
+                          label="四人套房"
+                          value={editFields.fourPersonSuiteCount}
+                          onChange={(v) => updateEditField("fourPersonSuiteCount", v)}
+                        />
+                        <NumberField
+                          label="降規四人套房"
+                          value={editFields.fourPersonDowngradeCount}
+                          onChange={(v) => updateEditField("fourPersonDowngradeCount", v)}
+                        />
+                        <NumberField
+                          label="雙人套房"
+                          value={editFields.doubleSuiteCount}
+                          onChange={(v) => updateEditField("doubleSuiteCount", v)}
+                        />
+                        <NumberField
+                          label="雙人雅房"
+                          value={editFields.doublePlainCount}
+                          onChange={(v) => updateEditField("doublePlainCount", v)}
+                        />
                       </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          大人
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.adults}
-                          onChange={(e) => updateEditField("adults", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          小孩
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.children}
-                          onChange={(e) => updateEditField("children", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          嬰幼兒
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.infants}
-                          onChange={(e) => updateEditField("infants", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          寵物
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.pets}
-                          onChange={(e) => updateEditField("pets", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
+                      <NumberField label="大人" value={editFields.adults} onChange={(v) => updateEditField("adults", v)} />
+                      <NumberField label="小孩" value={editFields.children} onChange={(v) => updateEditField("children", v)} />
+                      <NumberField label="嬰幼兒" value={editFields.infants} onChange={(v) => updateEditField("infants", v)} />
+                      <NumberField label="寵物" value={editFields.pets} onChange={(v) => updateEditField("pets", v)} />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -1493,19 +1483,7 @@ export function ReservationsSearch({
                           ))}
                         </select>
                       </label>
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          訪客
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.visitors}
-                          onChange={(e) => updateEditField("visitors", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
+                      <NumberField label="訪客" value={editFields.visitors} onChange={(v) => updateEditField("visitors", v)} />
                     </div>
 
                     <div>
@@ -1623,19 +1601,9 @@ export function ReservationsSearch({
                       <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
                         ⚠️ 改了入住/退房日期或房型配置後，「總金額」不會自動重算。
                       </p>
-                      <label className="mt-2 flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px]">
-                          總金額
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={editFields.finalTotal}
-                          onChange={(e) => updateEditField("finalTotal", Number(e.target.value))}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
+                      <div className="mt-2">
+                        <NumberField label="總金額" value={editFields.finalTotal} onChange={(v) => updateEditField("finalTotal", v)} />
+                      </div>
 
                       {/* 訂金金額——預設帶入目前已經記錄的金額（見
                           startEdit() 的說明），可以直接改；尾款會用
@@ -1942,16 +1910,69 @@ export function ReservationsSearch({
                                       },
                                     ]}
                                   />
-                                  <InfoRow
-                                    label="使用房數"
-                                    value={`${
-                                      detail.roomAllocation.fourPersonSuiteCount +
-                                      detail.roomAllocation.fourPersonDowngradeCount +
-                                      detail.roomAllocation.doubleSuiteCount +
-                                      detail.roomAllocation.doublePlainCount
-                                    } 間房`}
-                                  />
                                 </div>
+                                {/* 費用明細改成跟報價單「轉成圖片」同一套格式：
+                                    單價×數量(×晚數)=小計的表格對齊呈現，用
+                                    recalculatedQuote（見上面 useEffect 的說明，
+                                    用這筆訂單目前的資料重新算一次）。算不出來
+                                    的話（極少數情況，例如計價引擎查詢失敗）
+                                    退回顯示最基本的「住宿總額」，不會整段
+                                    空白看不到任何金額資訊。 */}
+                                <p className="mt-2 font-bold">💰 費用明細</p>
+                                {recalculatedQuote && consolidatedAccommodationGroups(recalculatedQuote).length > 0 ? (
+                                  <div className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5" style={{ color: colors.muted }}>
+                                    {consolidatedAccommodationGroups(recalculatedQuote).map((group, gi) => (
+                                      <div key={`day-${gi}`} className="contents">
+                                        {group.dateRangeLabel && (
+                                          <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
+                                            {group.dateRangeLabel}
+                                          </p>
+                                        )}
+                                        {group.items.map((item, i) => (
+                                          <div key={i} className="contents">
+                                            <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+                                            <span className="text-right tabular-nums">
+                                              NT${item.unitPrice.toLocaleString()}×{item.qty}
+                                              {group.nights > 1 ? `×${group.nights}晚` : ""}
+                                            </span>
+                                            <span>=</span>
+                                            <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                                            {item.subLabel && (
+                                              <p className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}>
+                                                {item.subLabel}
+                                              </p>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ))}
+                                    {(() => {
+                                      const extraBedTemp = extraBedTempLineItem(recalculatedQuote);
+                                      if (!extraBedTemp) return null;
+                                      return (
+                                        <div className="contents">
+                                          <span>{extraBedTemp.roomLabel}</span>
+                                          <span className="text-right tabular-nums">
+                                            NT${extraBedTemp.unitPrice.toLocaleString()}×{extraBedTemp.qty}
+                                            {extraBedTemp.nights > 1 ? `×${extraBedTemp.nights}晚` : ""}
+                                          </span>
+                                          <span>=</span>
+                                          <span className="text-right tabular-nums">NT${extraBedTemp.lineTotal.toLocaleString()}</span>
+                                        </div>
+                                      );
+                                    })()}
+                                    {addOnFeeBreakdown(recalculatedQuote).map((item, i) => (
+                                      <div key={`fee-${i}`} className="contents">
+                                        <span className="col-span-3">{item.label}</span>
+                                        <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="mt-1" style={{ color: colors.muted }}>
+                                    住宿總額：NT${detail.finalTotal.toLocaleString()}
+                                  </p>
+                                )}
                                 {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成
                                     淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面標題的深
                                     咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，取代

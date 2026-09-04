@@ -53,7 +53,10 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
 const PRICE_CATEGORIES = ["weekday", "peak", "holiday", "festival", "lunar_new_year", "new_year_eve"] as const;
 
-export async function calculateQuoteAction(request: StayRequest): Promise<PackageQuote> {
+export async function calculateQuoteAction(
+  request: StayRequest,
+  allowBelowMinimumGuests = false
+): Promise<PackageQuote> {
   const propertyId = await getPropertyId(request.propertyCode);
 
   // 先只查「人數是否達到包棟基本人數」所需要的最少資料
@@ -75,11 +78,16 @@ export async function calculateQuoteAction(request: StayRequest): Promise<Packag
     baseGuestsByDayType,
   });
 
-  if (minimumGuestsWarning) {
+  if (minimumGuestsWarning && !allowBelowMinimumGuests) {
     // 人數不足包棟基本人數：直接回傳警告，不再往下查房價/服務費用/
     // 房間數量，也不計算任何金額。
     return buildMinimumGuestsBlockedQuote(request, minimumGuestsWarning);
   }
+  // allowBelowMinimumGuests 開啟時（編輯已存在的報價單），就算人數
+  // 不足也不提早回傳——繼續往下查完整的計價資料，正常算出金額，
+  // minimumGuestsWarning 這個警告字串還是會透過 calculatePackageQuote
+  // 回傳，只是不會被拿來擋掉金額計算（見該函式 allowBelowMinimumGuests
+  // 參數的說明）。
 
   // 人數足夠，才繼續查完整的計價資料
   const [roomCounts, servicePrices, propertyDisplay, ...rateTables] = await Promise.all([
@@ -113,6 +121,7 @@ export async function calculateQuoteAction(request: StayRequest): Promise<Packag
     baseGuestsByDayType,
     rateTableByCategory,
     propertyDisplay,
+    allowBelowMinimumGuests,
   });
 }
 

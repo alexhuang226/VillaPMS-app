@@ -287,6 +287,17 @@ export function calculatePackageQuote(params: {
   depositOptions?: { rate?: number; roundingUnit?: number };
   /** 尾款須於入住前幾天匯款，預設 7 天，只用於 messageContext 顯示文字 */
   balanceDueDaysBeforeCheckIn?: number;
+  /**
+   * 編輯已存在的報價單時，有時候客人的入住人數比較少（一般不開放
+   * 訂房），但入住日期接近、不想讓房間空著，這種情況下民宿可能願意
+   * 就用客人實際的人數當計價基礎——設成 true 時，minimumGuestsWarning
+   * 這個警告只當作提醒顯示，不會把 blocked 判定為 true、不會把
+   * packageTotal/deposit/roomAllocation 強制歸零。預設 false（維持
+   * 原本「未達基本人數就不允許出價」的行為），只有編輯報價這個情境
+   * 會刻意打開。capacityWarning（床位不夠住）、roomConfigWarning
+   * （超過民宿實際房間數）不受這個參數影響，這兩個還是會照常擋。
+   */
+  allowBelowMinimumGuests?: boolean;
 }): PackageQuote {
   const {
     request,
@@ -298,6 +309,7 @@ export function calculatePackageQuote(params: {
     propertyDisplay,
     depositOptions,
     balanceDueDaysBeforeCheckIn = 7,
+    allowBelowMinimumGuests = false,
   } = params;
 
   // 嬰幼兒不佔床位、不計入人數上下限與房型分配計算，純記錄用途。
@@ -354,7 +366,9 @@ export function calculatePackageQuote(params: {
     baseGuestsByDayType,
   });
 
-  const blocked = Boolean(capacityWarning || minimumGuestsWarning || roomConfigWarning);
+  // allowBelowMinimumGuests 開啟時，minimumGuestsWarning 只當作提醒，
+  // 不計入 blocked——這樣金額還是會照常算出來，不會被強制歸零
+  const blocked = Boolean(capacityWarning || (!allowBelowMinimumGuests && minimumGuestsWarning) || roomConfigWarning);
 
   const accommodationTotal = blocked
     ? 0

@@ -1373,7 +1373,15 @@ export function QuotesSearch() {
     setIsRecalculating(true);
     setRecalculateError(null);
     try {
-      const newQuote = await calculateQuoteAction(editRequest);
+      // ⚠️ 第二個參數 true 是關鍵：不這樣做的話，只要人數低於基本
+      // 入住人數，calculateQuoteAction() 內部會直接短路回傳一個「金額
+      // 全部強制歸零、roomAllocation 也不完整」的結果，跟下面「不擋
+      // minimumGuestsWarning」這個註解講的意圖完全對不起來——不傳這個
+      // 參數的話，就算後面不去檢查 minimumGuestsWarning，算出來的
+      // newQuote 本身金額就已經是 0 了，之前就是因為漏了這一步，
+      // 才會在單純調整人數（沒有換民宿）時也誤判成「算出來是 0」被
+      // 擋下來。
+      const newQuote = await calculateQuoteAction(editRequest, true);
       // ⚠️ 這裡故意不擋 minimumGuestsWarning（基本入住人數不足的
       // 提醒）——編輯已經存在的報價單，常見情境是客人人數變少了
       // （原本訂 10 人、後來只剩 6 人要來），這種狀況下應該要能正常
@@ -1384,22 +1392,6 @@ export function QuotesSearch() {
       // 略過。
       if (newQuote.roomConfigWarning || newQuote.capacityWarning) {
         setRecalculateError(newQuote.roomConfigWarning || newQuote.capacityWarning || "重新試算失敗");
-        return;
-      }
-
-      // ⚠️ 額外的保險檢查：算出來的房間數量或總金額是 0，不管
-      // roomConfigWarning/capacityWarning 有沒有抓到，都不該讓這種
-      // 報價單存進去——實測發生過換民宿後房型配置沒有正確帶入，算出
-      // 0 間房、0 元，卻沒有觸發任何警告訊息就直接存檔的狀況，這裡
-      // 直接擋掉這種不合理的結果，不管背後確切成因是什麼。
-      const totalRoomCount = newQuote.roomAllocation
-        ? newQuote.roomAllocation.fourPersonSuiteCount +
-          newQuote.roomAllocation.fourPersonDowngradeCount +
-          newQuote.roomAllocation.doubleSuiteCount +
-          newQuote.roomAllocation.doublePlainCount
-        : 0;
-      if (totalRoomCount <= 0 || newQuote.packageTotal <= 0) {
-        setRecalculateError("算出來的房型數量或金額是 0，請確認房型配置是否正確填寫（換民宿後房型欄位需要重新設定）");
         return;
       }
 
@@ -1674,20 +1666,39 @@ export function QuotesSearch() {
                   {row.roomSummary ? (
                     (() => {
                       const items = row.roomSummary.split("、");
+                      // 降規四人套房後面會帶一段「(提供1床，以雙人套房
+                      // 計費)」的說明文字，原本整段接在房型名稱後面
+                      // 同一行——這裡拆開成兩行顯示，房型名稱後面的
+                      // 說明文字太長時容易跟旁邊金額擠在一起不好讀。
+                      const splitSuffix = (text: string): { main: string; suffix: string | null } => {
+                        const idx = text.indexOf(" (");
+                        if (idx === -1) return { main: text, suffix: null };
+                        return { main: text.slice(0, idx), suffix: text.slice(idx + 1) };
+                      };
                       return (
                         <div className="mt-1 flex flex-col" style={{ color: colors.muted }}>
-                          {items.map((item, i) =>
-                            i === items.length - 1 ? (
-                              <div key={i} className="flex items-baseline justify-between">
-                                <span>{item}</span>
-                                <span className="text-base font-semibold" style={{ color: colors.ink }}>
-                                  NT$ {row.totalAmount.toLocaleString()}
-                                </span>
+                          {items.map((item, i) => {
+                            const { main, suffix } = splitSuffix(item);
+                            if (i === items.length - 1) {
+                              return (
+                                <div key={i} className="flex flex-col">
+                                  <div className="flex items-baseline justify-between">
+                                    <span>{main}</span>
+                                    <span className="text-base font-semibold" style={{ color: colors.ink }}>
+                                      NT$ {row.totalAmount.toLocaleString()}
+                                    </span>
+                                  </div>
+                                  {suffix && <p className="text-[11px]">{suffix}</p>}
+                                </div>
+                              );
+                            }
+                            return (
+                              <div key={i}>
+                                <p>{main}</p>
+                                {suffix && <p className="text-[11px]">{suffix}</p>}
                               </div>
-                            ) : (
-                              <p key={i}>{item}</p>
-                            )
-                          )}
+                            );
+                          })}
                         </div>
                       );
                     })()
