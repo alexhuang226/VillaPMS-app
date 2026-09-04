@@ -143,13 +143,21 @@ export interface SaveQuoteResult {
  * 確定要訂，先不強迫櫃檯人員問這些；guest_id 留 null，等 /quotes
  * 那邊「確認訂房」時才收集，那時候才建立/連結客人資料。
  */
-export async function calculateAndSaveQuoteAction(request: StayRequest): Promise<SaveQuoteResult> {
-  const quote = await calculateQuoteAction(request);
-
-  if (quote.minimumGuestsWarning || quote.roomConfigWarning || quote.capacityWarning) {
-    return { quote, quoteId: null, quoteNo: null };
-  }
-
+/**
+ * 把已經算好、確定要存的報價（quote）存成一筆新的 quotes 記錄，不做
+ * 任何驗證——呼叫端要自己先決定要不要擋 minimumGuestsWarning /
+ * roomConfigWarning / capacityWarning。從 calculateAndSaveQuoteAction()
+ * 抽出來，因為「編輯報價內容時如果順便換了民宿，要另外存成一張新的
+ * 報價單（不要覆蓋原本那張，客人可能就是想比較兩間民宿的價格），
+ * 而編輯報價那邊刻意不擋 minimumGuestsWarning——如果直接呼叫
+ * calculateAndSaveQuoteAction()，裡面會重新檢查全部三種警告，等於
+ * 又把 minimumGuestsWarning 擋回來，跟編輯報價原本「不擋這個」的
+ * 行為不一致。
+ */
+export async function saveNewQuoteSnapshot(
+  request: StayRequest,
+  quote: PackageQuote
+): Promise<{ quoteId: string | null; quoteNo: string | null }> {
   try {
     const propertyId = await getPropertyId(request.propertyCode);
     const organizationId = await getSingleOrganizationId();
@@ -186,14 +194,25 @@ export async function calculateAndSaveQuoteAction(request: StayRequest): Promise
 
     if (error || !row) {
       console.error("儲存報價單快照失敗：", error);
-      return { quote, quoteId: null, quoteNo: null };
+      return { quoteId: null, quoteNo: null };
     }
 
-    return { quote, quoteId: row.id as string, quoteNo };
+    return { quoteId: row.id as string, quoteNo };
   } catch (err) {
     console.error("儲存報價單快照失敗：", err);
+    return { quoteId: null, quoteNo: null };
+  }
+}
+
+export async function calculateAndSaveQuoteAction(request: StayRequest): Promise<SaveQuoteResult> {
+  const quote = await calculateQuoteAction(request);
+
+  if (quote.minimumGuestsWarning || quote.roomConfigWarning || quote.capacityWarning) {
     return { quote, quoteId: null, quoteNo: null };
   }
+
+  const { quoteId, quoteNo } = await saveNewQuoteSnapshot(request, quote);
+  return { quote, quoteId, quoteNo };
 }
 
 /** 依姓名／電話／報價單編號搜尋以前的報價紀錄，search 留空回傳最近 100 筆 */
@@ -295,8 +314,14 @@ export async function updateQuoteSnapshotAction(
     }
 
     const supabase = createServiceRoleClient();
+    // 客人有時候會想比較兩間民宿的價格，編輯報價內容時可能會改
+    // propertyCode——這裡要把新的民宿代碼轉成 property_id 一起
+    // 更新，不然 quotes 表的 property_id 欄位會跟 request_snapshot/
+    // quote_snapshot 實際存的內容對不起來
+    const newPropertyId = await getPropertyId(request.propertyCode);
     const { error } = await (supabase.from("quotes") as any)
       .update({
+        property_id: newPropertyId,
         check_in: request.checkIn,
         check_out: request.checkOut,
         adults: request.adults,

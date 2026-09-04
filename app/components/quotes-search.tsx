@@ -22,6 +22,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
   calculateQuoteAction,
@@ -33,6 +34,7 @@ import {
   getReservationForQuoteAction,
   getSavedQuoteAction,
   searchQuotesAction,
+  saveNewQuoteSnapshot,
   updateQuoteSnapshotAction,
 } from "@/app/actions/quote";
 import type { BookingSource } from "@/app/actions/quote";
@@ -55,7 +57,7 @@ import {
   roomAllocationSummaryItems,
 } from "@/lib/pricing/quote-message";
 import type { ExtraBedRoomOption, QuoteSummary, ReservationDetail } from "@/lib/pricing/queries";
-import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
+import type { PackageQuote, PropertyCode, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -81,6 +83,12 @@ const colors = {
   alert: "#A23E2D",
   blue: "#2455A4",
 };
+
+const PROPERTY_OPTIONS: { value: PropertyCode; label: string }[] = [
+  { value: "zhici", label: "只此清綠" },
+  { value: "moyin", label: "陌隱" },
+  { value: "shuijing", label: "水景璞堤" },
+];
 
 const STATUS_LABEL: Record<string, string> = {
   draft: "草稿",
@@ -740,6 +748,7 @@ function QuoteReceiptCard({
 }
 
 export function QuotesSearch() {
+  const router = useRouter();
   const now = new Date();
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
@@ -784,9 +793,6 @@ export function QuotesSearch() {
   const [imageNote, setImageNote] = useState<string | null>(null);
   const confirmationCardRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
-  // 展開查看完整報價內容（複製/轉圖片用）——預設不顯示，避免每次
-  // 點一筆報價都要滑過一大串內容才看得到確認訂房的按鈕
-  const [showFullReceipt, setShowFullReceipt] = useState(false);
 
   // 清除舊報價記錄用
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -795,7 +801,6 @@ export function QuotesSearch() {
   const [clearError, setClearError] = useState<string | null>(null);
 
   // 刪除單一報價單用
-  const [showDeleteQuoteConfirm, setShowDeleteQuoteConfirm] = useState(false);
   const [isDeletingQuote, setIsDeletingQuote] = useState(false);
   const [deleteQuoteError, setDeleteQuoteError] = useState<string | null>(null);
   /** 搜尋結果列表直接刪除用——不用先點進詳細內容。存的是目前正在
@@ -1099,7 +1104,6 @@ export function QuotesSearch() {
         setSelectedId(null);
         setSelectedQuote(null);
       }
-      setShowDeleteQuoteConfirm(false);
       setDeletingRowId(null);
       if (results) {
         const rows = await searchQuotesAction({
@@ -1173,15 +1177,23 @@ export function QuotesSearch() {
     setDetailError(null);
     setConfirmedReservationNo(null);
     setCopied(false);
-    setShowFullReceipt(false);
     setConfirmGuestName("");
     setConfirmBookingSource("line_official");
     setConfirmInvoiceTitle("");
     setConfirmInvoiceTaxId("");
     setExtraBedRoomOptions([]);
     setSelectedExtraBedRoomIds([]);
-    setShowDeleteQuoteConfirm(false);
     setDeleteQuoteError(null);
+    // ⚠️ 這三個是「編輯報價內容」表單自己的狀態——如果使用者編輯到
+    // 一半，沒按「取消」或「重新試算並更新」，直接切去看另一筆報價
+    // 單，這幾個 state 沒有跟著重設的話，會帶著上一筆報價單編輯到
+    // 一半的內容（包含還沒存檔的欄位變動），疊在這筆新選到的報價單
+    // 上面顯示出來，變成看到的編輯表單資料是錯的、對不上目前這筆
+    // 報價單。選擇新的報價單時一律強制退出編輯模式、清空編輯表單，
+    // 不管上一筆是不是正在編輯中。
+    setIsEditingQuote(false);
+    setEditRequest(null);
+    setRecalculateError(null);
     setIsLoadingDetail(true);
 
     try {
@@ -1272,6 +1284,15 @@ export function QuotesSearch() {
       // 收款日期、地址等資料在 PackageQuote 裡沒有，要另外查）
       const detailResult = await getReservationDetailAction(result.reservationId);
       if (detailResult) setConfirmedDetail(detailResult);
+      // 確認訂房後直接導去訂單管理的月曆，並且帶著這筆訂房入住日期
+      // 所在的年/月——不然要另外切到訂單管理、還要自己手動找月份
+      // 才看得到剛確認的這筆。要再複製確認內容/轉圖片的話，訂單
+      // 管理本身的訂單詳情頁面也有同樣的按鈕，從那邊點進這筆訂單
+      // 一樣找得到，不會因為導頁而少了這個功能。
+      if (detailResult) {
+        const [checkInYear, checkInMonth] = detailResult.checkIn.split("-");
+        router.push(`/reservations?year=${checkInYear}&month=${Number(checkInMonth)}`);
+      }
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : "確認訂房失敗，請稍後再試");
     } finally {
@@ -1314,6 +1335,25 @@ export function QuotesSearch() {
     setEditRequest((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
+  /**
+   * 換民宿時保留原本填的房型數量——客人可能就是想比較「同樣的房型
+   * 組合」在兩間民宿的價格差異，所以不清空 roomOverride，讓使用者
+   * 換民宿後還看得到原本填的數字。
+   *
+   * ⚠️ 這代表換完民宿後，這組數字對新民宿來說有可能已經不合理
+   * （例如超過新民宿實際的房間數、或床位數不夠住這麼多人）——這裡
+   * 故意不主動檢查或清空，而是交給「重新試算並更新」按下去時，
+   * handleRecalculate() 裡本來就有的 roomConfigWarning（有沒有超過
+   * 這間民宿實際房間數）跟 capacityWarning（床位數夠不夠住）這兩個
+   * 檢查去把關——兩個檢查都已經是各自民宿實際的房間/床位數字去驗證，
+   * 不用另外寫一次。如果數字對新民宿不合理，重新試算時就會被擋下來、
+   * 顯示對應的錯誤訊息，使用者自己決定要調整房型數量還是換回原本
+   * 的民宿。
+   */
+  function handleEditPropertyChange(propertyCode: PropertyCode) {
+    setEditRequest((prev) => (prev ? { ...prev, propertyCode } : prev));
+  }
+
   function updateEditRoomOverride(field: keyof NonNullable<StayRequest["roomOverride"]>, value: number) {
     setEditRequest((prev) => (prev ? { ...prev, roomOverride: { ...prev.roomOverride, [field]: value } } : prev));
   }
@@ -1329,17 +1369,58 @@ export function QuotesSearch() {
    * 而確認到舊的報價。
    */
   async function handleRecalculate() {
-    if (!selectedId || !editRequest) return;
+    if (!selectedId || !editRequest || !selectedQuote) return;
     setIsRecalculating(true);
     setRecalculateError(null);
     try {
       const newQuote = await calculateQuoteAction(editRequest);
-      if (newQuote.minimumGuestsWarning || newQuote.roomConfigWarning || newQuote.capacityWarning) {
-        setRecalculateError(
-          newQuote.minimumGuestsWarning || newQuote.roomConfigWarning || newQuote.capacityWarning || "重新試算失敗"
-        );
+      // ⚠️ 這裡故意不擋 minimumGuestsWarning（基本入住人數不足的
+      // 提醒）——編輯已經存在的報價單，常見情境是客人人數變少了
+      // （原本訂 10 人、後來只剩 6 人要來），這種狀況下應該要能正常
+      // 更新報價反映實際情況，不該被「未達最低人數」這個檢查擋下來，
+      // 這個檢查比較適合用在一開始製作報價的時候。roomConfigWarning
+      // （房型配置有問題）跟 capacityWarning（超過可容納人數）這兩個
+      // 還是繼續擋，這兩個是真正會讓算出來的報價不合理的錯誤，不能
+      // 略過。
+      if (newQuote.roomConfigWarning || newQuote.capacityWarning) {
+        setRecalculateError(newQuote.roomConfigWarning || newQuote.capacityWarning || "重新試算失敗");
         return;
       }
+
+      // ⚠️ 額外的保險檢查：算出來的房間數量或總金額是 0，不管
+      // roomConfigWarning/capacityWarning 有沒有抓到，都不該讓這種
+      // 報價單存進去——實測發生過換民宿後房型配置沒有正確帶入，算出
+      // 0 間房、0 元，卻沒有觸發任何警告訊息就直接存檔的狀況，這裡
+      // 直接擋掉這種不合理的結果，不管背後確切成因是什麼。
+      const totalRoomCount = newQuote.roomAllocation
+        ? newQuote.roomAllocation.fourPersonSuiteCount +
+          newQuote.roomAllocation.fourPersonDowngradeCount +
+          newQuote.roomAllocation.doubleSuiteCount +
+          newQuote.roomAllocation.doublePlainCount
+        : 0;
+      if (totalRoomCount <= 0 || newQuote.packageTotal <= 0) {
+        setRecalculateError("算出來的房型數量或金額是 0，請確認房型配置是否正確填寫（換民宿後房型欄位需要重新設定）");
+        return;
+      }
+
+      // 客人有時候會想比較兩間民宿的價格——如果編輯時把民宿換掉了，
+      // 不能直接覆蓋原本這張報價單（原本那張可能還要留著給客人比較），
+      // 改成另外存一張新的報價單，原本那張維持不變。民宿沒有變的話，
+      // 維持原本「就地更新」的行為。
+      if (editRequest.propertyCode !== selectedQuote.request.propertyCode) {
+        const { quoteId: newQuoteId } = await saveNewQuoteSnapshot(editRequest, newQuote);
+        if (!newQuoteId) {
+          setRecalculateError("儲存新報價單失敗，請稍後再試");
+          return;
+        }
+        setIsEditingQuote(false);
+        setEditRequest(null);
+        // 直接切換去看剛存好的新報價單，讓使用者看得到換民宿後的結果，
+        // 原本那張報價單不受影響、還在搜尋結果裡找得到
+        await handleSelect({ id: newQuoteId, status: "sent" } as QuoteSummary);
+        return;
+      }
+
       const result = await updateQuoteSnapshotAction(selectedId, editRequest, newQuote);
       if (!result.success) {
         setRecalculateError(result.message ?? "更新報價內容失敗，請稍後再試");
@@ -1582,26 +1663,42 @@ export function QuotesSearch() {
                     <span style={{ color: colors.muted }}>{STATUS_LABEL[row.status] ?? row.status}</span>
                   </div>
                   <p className="mt-1" style={{ color: colors.muted }}>
-                    {row.checkIn} ～ {row.checkOut}
+                    {formatDateWithWeekday(row.checkIn)} ～ {formatDateWithWeekday(row.checkOut)}
                   </p>
-                  {row.roomSummary && (
-                    <p className="mt-1" style={{ color: colors.muted }}>
-                      {row.roomSummary}
-                    </p>
-                  )}
-                  <div className="mt-1 flex items-baseline justify-between">
-                    <span>
-                      {row.adults}大 {row.children}小
-                    </span>
-                    <span className="font-semibold">NT$ {row.totalAmount.toLocaleString()}</span>
-                  </div>
                   <div className="mt-1 flex items-baseline justify-between" style={{ color: colors.muted }}>
                     <span>
-                      {row.guestName || "（未填姓名）"}
-                      {row.guestPhone ? `　${row.guestPhone}` : ""}
+                      {row.adults}大{row.children > 0 ? ` ${row.children}小` : ""}
                     </span>
                     <span>{row.quoteNo}</span>
                   </div>
+                  {row.roomSummary ? (
+                    (() => {
+                      const items = row.roomSummary.split("、");
+                      return (
+                        <div className="mt-1 flex flex-col" style={{ color: colors.muted }}>
+                          {items.map((item, i) =>
+                            i === items.length - 1 ? (
+                              <div key={i} className="flex items-baseline justify-between">
+                                <span>{item}</span>
+                                <span className="text-base font-semibold" style={{ color: colors.ink }}>
+                                  NT$ {row.totalAmount.toLocaleString()}
+                                </span>
+                              </div>
+                            ) : (
+                              <p key={i}>{item}</p>
+                            )
+                          )}
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    // 極少數情況房型摘要是空字串（理論上不該發生，但保守
+                    // 起見還是處理一下）——這種狀況下還是要顯示金額，不能
+                    // 讓金額整個消失不見
+                    <div className="mt-1 text-right">
+                      <span className="text-base font-semibold">NT$ {row.totalAmount.toLocaleString()}</span>
+                    </div>
+                  )}
                 </button>
 
                 {/* 直接在列表這裡就能複製內容/轉圖片/刪除，不用先點進
@@ -1615,7 +1712,13 @@ export function QuotesSearch() {
                     className="text-[11px] disabled:opacity-50"
                     style={{ color: colors.blue }}
                   >
-                    {copyingRowId === row.id ? "複製中…" : copiedRowId === row.id ? "已複製 ✓" : "複製內容"}
+                    {copyingRowId === row.id
+                      ? "複製中…"
+                      : copiedRowId === row.id
+                        ? "已複製 ✓"
+                        : row.status === "accepted"
+                          ? "📋 複製訂單內容"
+                          : "📋 複製報價單內容"}
                   </button>
                   {row.status === "accepted" ? (
                     <button
@@ -1625,7 +1728,7 @@ export function QuotesSearch() {
                       className="text-[11px] disabled:opacity-50"
                       style={{ color: colors.blue }}
                     >
-                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 訂單圖片"}
+                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 儲存訂單圖片"}
                     </button>
                   ) : (
                     <button
@@ -1635,7 +1738,7 @@ export function QuotesSearch() {
                       className="text-[11px] disabled:opacity-50"
                       style={{ color: colors.blue }}
                     >
-                      {imagingQuoteRowId === row.id ? "圖片產生中…" : "🖼️ 報價圖片"}
+                      {imagingQuoteRowId === row.id ? "圖片產生中…" : "🖼️ 儲存報價單圖片"}
                     </button>
                   )}
                 </div>
@@ -1788,75 +1891,49 @@ export function QuotesSearch() {
                     {formatDateWithWeekday(selectedQuote.request.checkOut)}（{daysNightsLabel(selectedQuote.nights)}）
                   </p>
                   <p className="mt-1">{guestSummary(selectedQuote)}</p>
-                  <div className="mt-1 flex flex-col gap-0.5" style={{ color: colors.muted }}>
-                    {roomAllocationSummaryItems(selectedQuote.roomAllocation).map((item, i) => (
-                      <p key={i}>{item.text}</p>
-                    ))}
-                  </div>
-                  <p className={`${display.className} mt-2 text-3xl italic`} style={{ color: colors.pine }}>
-                    NT$ {selectedQuote.packageTotal.toLocaleString()}
-                  </p>
+                  {(() => {
+                    const roomItems = roomAllocationSummaryItems(selectedQuote.roomAllocation);
+                    return (
+                      <div className="mt-1 flex flex-col gap-0.5" style={{ color: colors.muted }}>
+                        {roomItems.map((item, i) =>
+                          i === roomItems.length - 1 ? (
+                            <div key={i} className="flex items-baseline justify-between">
+                              <span>{item.text}</span>
+                              <span
+                                className={`${display.className} text-2xl italic`}
+                                style={{ color: colors.pine }}
+                              >
+                                NT$ {selectedQuote.packageTotal.toLocaleString()}
+                              </span>
+                            </div>
+                          ) : (
+                            <p key={i}>{item.text}</p>
+                          )
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {!isConfirmed && !isEditingQuote && (
-                  <button
-                    type="button"
-                    onClick={startEditQuote}
-                    className="mt-2 text-xs"
-                    style={{ color: colors.blue }}
-                  >
-                    編輯報價內容（例如入住人數有變動）
-                  </button>
-                )}
-
-                {!isEditingQuote && !showDeleteQuoteConfirm && (
-                  <button
-                    type="button"
-                    onClick={() => setShowDeleteQuoteConfirm(true)}
-                    className="mt-2 block text-xs"
-                    style={{ color: colors.alert }}
-                  >
-                    刪除這張報價單
-                  </button>
-                )}
-
-                {showDeleteQuoteConfirm && (
-                  <div className="mt-2 border-l-2 pl-3" style={{ borderColor: colors.alert }}>
-                    <p className="text-xs leading-relaxed" style={{ color: colors.alert }}>
-                      確定要刪除這張報價單嗎？無法復原。
-                      {isConfirmed && (
-                        <>
-                          <br />
-                          這張報價已經確認轉為正式訂單——刪除報價單本身不會影響訂單，訂單記錄會繼續保留，只是之後沒辦法再從這裡查回當初的報價內容。
-                        </>
-                      )}
-                    </p>
-                    {deleteQuoteError && (
-                      <p role="alert" className="mt-2 text-xs" style={{ color: colors.alert }}>
-                        {deleteQuoteError}
-                      </p>
-                    )}
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowDeleteQuoteConfirm(false)}
-                        disabled={isDeletingQuote}
-                        className="border px-3 py-1.5 text-xs disabled:opacity-50"
-                        style={{ borderColor: colors.line, color: colors.ink }}
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteQuote()}
-                        disabled={isDeletingQuote}
-                        className="px-3 py-1.5 text-xs disabled:opacity-50"
-                        style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
-                      >
-                        {isDeletingQuote ? "刪除中…" : "確定刪除"}
-                      </button>
-                    </div>
-                  </div>
+                  <>
+                    <button
+                      type="button"
+                      onClick={startEditQuote}
+                      className="mt-2 text-xs"
+                      style={{ color: colors.blue }}
+                    >
+                      編輯報價內容（例如入住人數有變動）
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCopy}
+                      className="mt-3 w-full py-2.5 text-xs tracking-wide transition-opacity"
+                      style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                    >
+                      {copied ? "已複製 ✓" : "複製報價內容"}
+                    </button>
+                  </>
                 )}
 
                 {!isConfirmed && isEditingQuote && editRequest && (
@@ -1864,6 +1941,33 @@ export function QuotesSearch() {
                     <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
                       改完欄位後按「重新試算」，會用新的內容重新計算金額並直接更新這張報價單，不用重新走一次完整報價流程。
                     </p>
+
+                    <div>
+                      <p style={{ color: colors.muted }} className="mb-1 text-[11px]">
+                        民宿（客人有時候會想比較兩間民宿的價格，這裡可以直接改——房型數量會保留原本填的數字，重新試算時會依新民宿檢查是否合理）
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {PROPERTY_OPTIONS.map((p) => {
+                          const active = editRequest.propertyCode === p.value;
+                          return (
+                            <button
+                              key={p.value}
+                              type="button"
+                              onClick={() => handleEditPropertyChange(p.value)}
+                              className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+                              style={
+                                active
+                                  ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                                  : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+                              }
+                            >
+                              {p.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex flex-col gap-1">
                         <span style={{ color: colors.muted }} className="text-[11px]">
@@ -2044,6 +2148,31 @@ export function QuotesSearch() {
                         style={{ borderColor: colors.line, color: colors.ink }}
                       />
                     </label>
+
+                    {/* 編輯時先看目前這張報價單的訂金/包棟總費用當
+                        參考——這是還沒按「重新試算並更新」之前的
+                        數字，改完欄位、按下按鈕後才會用新的內容重新
+                        計算並覆蓋 */}
+                    {selectedQuote && (
+                      <div className="flex gap-4 border-t pt-3" style={{ borderColor: colors.line }}>
+                        <div className="flex-1">
+                          <p className="text-[11px]" style={{ color: colors.muted }}>
+                            目前訂金
+                          </p>
+                          <p className="font-semibold" style={{ color: colors.ink }}>
+                            NT$ {selectedQuote.deposit.toLocaleString()}
+                          </p>
+                        </div>
+                        <div className="flex-1">
+                          <p className="text-[11px]" style={{ color: colors.muted }}>
+                            目前包棟總費用
+                          </p>
+                          <p className="font-semibold" style={{ color: colors.ink }}>
+                            NT$ {selectedQuote.packageTotal.toLocaleString()}
+                          </p>
+                        </div>
+                      </div>
+                    )}
 
                     {recalculateError && (
                       <p role="alert" className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
@@ -2239,30 +2368,30 @@ export function QuotesSearch() {
 
                 {/* 已確認訂房才會有這兩個按鈕：複製真正的訂房確認內容、
                     轉成圖片分享給客人——放在「顯示完整報價內容」上面，
-                    不用先展開那一大串內容才找得到 */}
+                    不用先展開那一大串內容才找得到。並排＋實心背景色，
+                    跟上方「編輯報價內容」下面的「複製報價內容」按鈕
+                    是同一套深綠實心的樣式語彙。 */}
                 {isConfirmed && confirmedDetail && (
                   <div className="mt-5 flex flex-col gap-2">
-                    <button
-                      type="button"
-                      onClick={handleCopyConfirmation}
-                      className="w-full border py-2.5 text-xs tracking-wide transition-colors"
-                      style={
-                        copied
-                          ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                          : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                      }
-                    >
-                      {copied ? "已複製 ✓" : "複製訂房確認內容"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleShareConfirmationImage}
-                      disabled={imageWorking}
-                      className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
-                      style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
-                    >
-                      {imageWorking ? "圖片產生中…" : "🖼️ 訂單圖片"}
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCopyConfirmation}
+                        className="flex-1 py-2.5 text-xs tracking-wide transition-opacity"
+                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                      >
+                        {copied ? "已複製 ✓" : "📋 複製訂單內容"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleShareConfirmationImage}
+                        disabled={imageWorking}
+                        className="flex-1 py-2.5 text-xs tracking-wide transition-opacity disabled:opacity-50"
+                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                      >
+                        {imageWorking ? "圖片產生中…" : "🖼️ 儲存訂單圖片"}
+                      </button>
+                    </div>
                     {imageError && (
                       <p className="text-[11px]" style={{ color: colors.alert }}>
                         {imageError}
@@ -2287,40 +2416,6 @@ export function QuotesSearch() {
                         已知問題。 */}
                     <ConfirmationImageCard detail={confirmedDetail} quote={selectedQuote} cardRef={confirmationCardRef} />
                   </div>
-                )}
-
-                {/* 完整報價內容預設收起來，只有要複製文字/轉圖片分享給
-                    客人的時候才需要展開 */}
-                <button
-                  type="button"
-                  onClick={() => setShowFullReceipt((v) => !v)}
-                  className="mt-5 text-xs"
-                  style={{ color: colors.blue }}
-                >
-                  {showFullReceipt ? "收起完整報價內容 ▲" : "顯示完整報價內容（可複製文字）▼"}
-                </button>
-
-                {showFullReceipt && (
-                  <>
-                    <div className="mt-4">
-                      <QuoteReceiptCard quote={selectedQuote} createdAt={selectedQuoteCreatedAt} isConfirmed={isConfirmed} />
-                    </div>
-
-                    {!isConfirmed && (
-                      <button
-                        type="button"
-                        onClick={handleCopy}
-                        className="mt-5 w-full border py-2.5 text-xs tracking-wide transition-colors"
-                        style={
-                          copied
-                            ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                            : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                        }
-                      >
-                        {copied ? "已複製 ✓" : "複製報價內容"}
-                      </button>
-                    )}
-                  </>
                 )}
               </>
             )}
