@@ -356,6 +356,24 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** 訂房確認單的入住/退房日期、預訂天數/入住人數並排用——跟報價單
+ * quote-form.tsx / quotes-search.tsx 的 PairedInfoRow 是同一種寫法，
+ * 這個檔案原本沒有這個元件，這次補上讓確認單格式能跟報價單一致 */
+function PairedInfoRow({ items }: { items: { label: string; value: string }[] }) {
+  return (
+    <div className="flex gap-4">
+      {items.map((item, i) => (
+        <div key={i} className="flex-1">
+          <p className="text-[10px]" style={{ color: colors.muted }}>
+            {item.label}
+          </p>
+          <p style={{ color: colors.ink }}>{item.value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function ReservationsSearch({
   isHousekeepingManager = false,
   initialReservations = null,
@@ -782,13 +800,27 @@ export function ReservationsSearch({
   async function handleCopyConfirmation() {
     if (!selectedId) return;
     setCopyError(null);
+    // 同一個 async function 包起來——讓 clipboard.write() 可以立刻
+    // 同步呼叫，實際查詢在背景進行，避免 Safari（尤其 iOS Safari）
+    // 判定已經離開使用者點擊的當下而擋下權限（"The request is not
+    // allowed by the user agent..."），跟 quote-form.tsx 的
+    // captureReceiptBlob、quotes-search.tsx 的 handleCopyConfirmation
+    // 是同一個原理
+    async function buildText(): Promise<string> {
+      const result = await buildReservationConfirmationMessageAction(selectedId!);
+      if (!result.success) throw new Error(result.message);
+      return result.text;
+    }
     try {
-      const result = await buildReservationConfirmationMessageAction(selectedId);
-      if (!result.success) {
-        setCopyError(result.message);
-        return;
+      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+      if (canCopyToClipboard) {
+        const textPromise = buildText();
+        await navigator.clipboard.write([
+          new ClipboardItem({ "text/plain": textPromise.then((text) => new Blob([text], { type: "text/plain" })) }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(await buildText());
       }
-      await navigator.clipboard.writeText(result.text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -1874,11 +1906,11 @@ export function ReservationsSearch({
                               className={body.className}
                               style={{ width: "375px", backgroundColor: colors.canvas }}
                             >
-                              <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
+                              <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
                                 <p className={`${display.className} text-2xl italic`} style={{ color: "#FFFFFF" }}>
                                   {detail.propertyName}私人會所
                                 </p>
-                                <div className="relative mt-1" style={{ minHeight: "24px" }}>
+                                <div className="relative mt-1" style={{ minHeight: "32px" }}>
                                   <p className="tracking-[0.3em]" style={{ color: CONFIRM_LIGHT, fontSize: "16px" }}>
                                     訂房確認單
                                   </p>
@@ -1890,36 +1922,49 @@ export function ReservationsSearch({
                                   </div>
                                 </div>
                               </div>
-                              <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
+                              <div className="px-6 pb-5 pt-1 text-xs leading-relaxed" style={{ color: colors.ink }}>
                                 <p className="mt-1 font-bold">📅 預訂資訊</p>
-                                <p className="mt-1">• 入住日期：{formatDateWithWeekdayLocal(detail.checkIn)}</p>
-                                <p>• 退房日期：{formatDateWithWeekdayLocal(detail.checkOut)}</p>
-                                <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
-                                <p>
-                                  • 入住人數：{detail.adults}大
-                                  {detail.children ? ` ${detail.children}小` : ""}
-                                  {detail.infants ? ` ${detail.infants}幼` : ""}
-                                  {detail.pets ? ` ${detail.pets}寵` : ""}
-                                </p>
-                                <p>
-                                  • 使用房數：
-                                  {detail.roomAllocation.fourPersonSuiteCount +
-                                    detail.roomAllocation.fourPersonDowngradeCount +
-                                    detail.roomAllocation.doubleSuiteCount +
-                                    detail.roomAllocation.doublePlainCount}{" "}
-                                  間房
-                                </p>
+                                <div className="mt-1 flex flex-col gap-1.5">
+                                  <PairedInfoRow
+                                    items={[
+                                      { label: "入住日期", value: formatDateWithWeekdayLocal(detail.checkIn) },
+                                      { label: "退房日期", value: formatDateWithWeekdayLocal(detail.checkOut) },
+                                    ]}
+                                  />
+                                  <PairedInfoRow
+                                    items={[
+                                      { label: "預訂天數", value: nightsLabel(detail.checkIn, detail.checkOut) },
+                                      {
+                                        label: "入住人數",
+                                        value: `${detail.adults}大${detail.children ? ` ${detail.children}小` : ""}${
+                                          detail.infants ? ` ${detail.infants}幼` : ""
+                                        }${detail.pets ? ` ${detail.pets}寵` : ""}`,
+                                      },
+                                    ]}
+                                  />
+                                  <InfoRow
+                                    label="使用房數"
+                                    value={`${
+                                      detail.roomAllocation.fourPersonSuiteCount +
+                                      detail.roomAllocation.fourPersonDowngradeCount +
+                                      detail.roomAllocation.doubleSuiteCount +
+                                      detail.roomAllocation.doublePlainCount
+                                    } 間房`}
+                                  />
+                                </div>
                                 {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成
                                     淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面標題的深
                                     咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，取代
                                     原本文字版的訂金/尾款條列 */}
                                 <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
-                                  <p className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
-                                    包棟總費用
-                                  </p>
-                                  <p className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
-                                    NT$ {detail.finalTotal.toLocaleString()}
-                                  </p>
+                                  <div className="flex items-baseline justify-between">
+                                    <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                                      包棟總費用
+                                    </span>
+                                    <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                                      NT$ {detail.finalTotal.toLocaleString()}
+                                    </span>
+                                  </div>
                                   {(() => {
                                     const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
                                     const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");

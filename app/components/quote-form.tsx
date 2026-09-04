@@ -693,7 +693,17 @@ export function QuoteForm() {
    * 註解隱藏起來，不是整個刪掉，之後如果想要重新啟用（例如給一般
    * LINE 用，那個有測過是可以直接貼上的），可以直接把註解拿掉用。
    */
-  async function handleDownloadImage() {
+  /** 產生圖片——跟訂單管理「轉成圖片」按鈕（handleShareConfirmationImage）
+   * 同一套行為：先試 iOS/Android 系統分享選單（navigator.share 帶
+   * 檔案），支援的話會出現分享選單，使用者自己選要傳去哪個 App；
+   * 不支援分享 API 的瀏覽器（通常是桌機）才退回直接下載。跟訂單
+   * 管理不同的地方只有截圖的來源：這裡截的是畫面上真的看得到的
+   * 報價單（receiptRef），訂單管理那邊截的是本來就一直藏在畫面外
+   * 的訂房確認單卡片——所以這裡繼續用 captureReceiptBlob()（截圖前
+   * 先複製一份離屏的副本、放寬副本寬度再截圖），避免使用者按下
+   * 按鈕的瞬間看到報價單內容忽然變寬、又彈回來，這個顧慮訂單管理
+   * 那邊不需要處理。 */
+  async function handleShareImage() {
     setImageWorking(true);
     setImageNote(null);
     try {
@@ -702,14 +712,25 @@ export function QuoteForm() {
         quote?.messageContext?.propertyName ??
         PROPERTY_OPTIONS.find((opt) => opt.value === form.propertyCode)?.label ??
         "報價單";
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${propertyLabel}-報價單.png`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setImageNote("已下載圖片，請自行傳給客人");
+      const file = new File([blob], `${propertyLabel}-報價單.png`, { type: "image/png" });
+      const canShareFiles =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title: `${propertyLabel} 報價單` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+        setImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
+      }
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setWarning(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
     } finally {
       setImageWorking(false);
@@ -1304,22 +1325,22 @@ export function QuoteForm() {
                 >
                   {copied ? "已複製 ✓" : "複製報價內容"}
                 </button>
-                {/* 原本試過「轉成圖片分享」（走 iOS 分享選單）跟
-                    「複製圖片到剪貼簿」兩種方式，但都各自遇到問題：
-                    分享選單裡有些 App（例如 LINE 官方帳號管理員）
-                    沒有做「分享目標」不會出現；複製到剪貼簿的話，
-                    實測 LINE 官方帳號管理員的聊天輸入框貼上功能只
-                    接受文字、不接受圖片，這是那個 App 本身的功能
-                    限制，兩條路都繞不過去。改回最單純、相容性最好
-                    的下載方式，使用者自己選擇要傳去哪個 App。 */}
+                {/* 跟訂單管理「轉成圖片」按鈕統一成同一套行為：先試
+                    系統分享選單，使用者自己選擇要傳去哪個 App；不
+                    支援分享 API 的瀏覽器（多半是桌機）才退回直接
+                    下載。之前試過「複製圖片到剪貼簿」，但實測 LINE
+                    官方帳號管理員的聊天輸入框貼上功能只接受文字、
+                    不接受圖片，這是那個 App 本身的功能限制，不是
+                    程式碼能繞過的問題，所以改回跟訂單管理一致的
+                    分享／下載模式。 */}
                 <button
                   type="button"
-                  onClick={handleDownloadImage}
+                  onClick={handleShareImage}
                   disabled={imageWorking}
                   className="w-full border py-2.5 text-xs tracking-wide transition-colors disabled:opacity-50"
                   style={{ borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }}
                 >
-                  {imageWorking ? "圖片產生中…" : "下載圖片"}
+                  {imageWorking ? "圖片產生中…" : "🖼️ 轉成圖片"}
                 </button>
                 {imageNote && (
                   <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>

@@ -38,7 +38,6 @@ import {
 import type { BookingSource } from "@/app/actions/quote";
 import { buildReservationConfirmationMessageAction, getReservationDetailAction } from "@/app/actions/reservation";
 import {
-  accommodationDayGroups,
   addOnFeeBreakdown,
   addOnSummaryItems,
   BANK_TRANSFER_NOTE,
@@ -290,12 +289,16 @@ function ConfirmationImageCard({
               防溢出的 min-height 安全邊界都跟報價單同一套做法，唯一
               差異是背景色換成咖啡色系、副標籤從「包棟報價單」換成
               「訂房確認單」、右邊只有一行「預訂日期」沒有「有效期限」
-              （確認單沒有報價那種期限概念）。 */}
-          <div className="relative px-6 pb-6 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
+              （確認單沒有報價那種期限概念）。min-height/padding 這次
+              跟著報價單最新的版本一起調整（32px + pb-7/pt-8），理由
+              一致：中文字元實際行高在不同裝置上算出來會有落差，抓
+              比較寬鬆的安全值比較不容易再出現文字疊出標題外面的
+              問題。 */}
+          <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: CONFIRM_DARK }}>
             <p className={`${display.className} text-2xl italic`} style={{ color: "#FFFFFF" }}>
               {detail.propertyName}私人會所
             </p>
-            <div className="relative mt-1" style={{ minHeight: "24px" }}>
+            <div className="relative mt-1" style={{ minHeight: "32px" }}>
               <p className="tracking-[0.3em]" style={{ color: CONFIRM_LIGHT, fontSize: "16px" }}>
                 訂房確認單
               </p>
@@ -304,65 +307,122 @@ function ConfirmationImageCard({
               </div>
             </div>
           </div>
-          <div className="px-6 py-5 text-xs leading-relaxed" style={{ color: colors.ink }}>
+          {/* 內容格式改成跟報價單一致：入住/退房日期並排、預訂天數/
+              入住人數並排、房型配置改成「使用房數」摘要（詳細房型
+              在下面費用明細裡看得到，不用兩個地方都列一次）。上方
+              padding 也比照報價單縮小（pt-1），理由一致：上面接的是
+              深色標題區塊，兩個 padding 疊加會讓這裡上方空白感覺
+              太大。 */}
+          <div className="px-6 pb-5 pt-1 text-xs leading-relaxed" style={{ color: colors.ink }}>
             <p className="mt-1 font-bold">📅 預訂資訊</p>
-            <p className="mt-1">• 入住日期：{formatDateWithWeekday(detail.checkIn)}</p>
-            <p>• 退房日期：{formatDateWithWeekday(detail.checkOut)}</p>
-            <p>• 預訂天數：{nightsLabel(detail.checkIn, detail.checkOut)}</p>
-            <p>
-              • 入住人數：{detail.adults}大
-              {detail.children ? ` ${detail.children}小` : ""}
-              {detail.infants ? ` ${detail.infants}幼` : ""}
-              {detail.pets ? ` ${detail.pets}寵` : ""}
-            </p>
-            <p>• 房型配置：</p>
-            {roomAllocationSummaryItems(detail.roomAllocation).map((item, i) => (
-              <p key={i} className="pl-3">
-                └ {item.text}
-              </p>
-            ))}
+            <div className="mt-1 flex flex-col gap-1.5">
+              <PairedInfoRow
+                items={[
+                  { label: "入住日期", value: formatDateWithWeekday(detail.checkIn) },
+                  { label: "退房日期", value: formatDateWithWeekday(detail.checkOut) },
+                ]}
+              />
+              <PairedInfoRow
+                items={[
+                  { label: "預訂天數", value: nightsLabel(detail.checkIn, detail.checkOut) },
+                  {
+                    label: "入住人數",
+                    value: `${detail.adults}大${detail.children ? ` ${detail.children}小` : ""}${
+                      detail.infants ? ` ${detail.infants}幼` : ""
+                    }${detail.pets ? ` ${detail.pets}寵` : ""}`,
+                  },
+                ]}
+              />
+              <InfoRow
+                label="使用房數"
+                value={`${
+                  detail.roomAllocation.fourPersonSuiteCount +
+                  detail.roomAllocation.fourPersonDowngradeCount +
+                  detail.roomAllocation.doubleSuiteCount +
+                  detail.roomAllocation.doublePlainCount
+                } 間房（詳見下方費用明細）`}
+              />
+            </div>
             <p className="mt-2" style={{ color: colors.muted }}>
               ━━━━━━━━━━━━━━
             </p>
             <p className="mt-2 font-bold">💰 費用明細</p>
             {quote ? (
-              <>
-                {accommodationDayGroups(quote).map((group, gi) => (
-                  <div key={`day-${gi}`}>
-                    {group.dateLabel && (
-                      <p className="mt-1" style={{ color: colors.ink }}>
-                        {group.dateLabel}
+              <div className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5" style={{ color: colors.muted }}>
+                {consolidatedAccommodationGroups(quote).map((group, gi) => (
+                  <div key={`day-${gi}`} className="contents">
+                    {group.dateRangeLabel && (
+                      <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
+                        {group.dateRangeLabel}
                       </p>
                     )}
                     {group.items.map((item, i) => (
-                      <p key={i} className={group.dateLabel ? "pl-3" : undefined}>
-                        • {item.roomLabel}：${item.unitPrice.toLocaleString()}×{item.qty} = $
-                        {item.lineTotal.toLocaleString()}
-                      </p>
+                      <div key={i} className="contents">
+                        <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+                        <span className="text-right tabular-nums">
+                          NT${item.unitPrice.toLocaleString()}×{item.qty}
+                          {group.nights > 1 ? `×${group.nights}晚` : ""}
+                        </span>
+                        <span>=</span>
+                        <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+                        {item.subLabel && (
+                          <p className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}>{item.subLabel}</p>
+                        )}
+                      </div>
                     ))}
                   </div>
                 ))}
+                {(() => {
+                  const extraBedTemp = extraBedTempLineItem(quote);
+                  if (!extraBedTemp) return null;
+                  return (
+                    <div className="contents">
+                      <span>{extraBedTemp.roomLabel}</span>
+                      <span className="text-right tabular-nums">
+                        NT${extraBedTemp.unitPrice.toLocaleString()}×{extraBedTemp.qty}
+                        {extraBedTemp.nights > 1 ? `×${extraBedTemp.nights}晚` : ""}
+                      </span>
+                      <span>=</span>
+                      <span className="text-right tabular-nums">NT${extraBedTemp.lineTotal.toLocaleString()}</span>
+                    </div>
+                  );
+                })()}
                 {addOnFeeBreakdown(quote).map((item, i) => (
-                  <p key={`fee-${i}`}>
-                    • {item.label}：${item.amount.toLocaleString()}
-                  </p>
+                  <div key={`fee-${i}`} className="contents">
+                    <span className="col-span-3">{item.label}</span>
+                    <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
+                  </div>
                 ))}
-                {quote.discountAmount > 0 && <p>• 優惠折扣：－${quote.discountAmount.toLocaleString()}</p>}
-                {quote.invoiceTaxAmount > 0 && <p>• 發票稅金(8%)：${quote.invoiceTaxAmount.toLocaleString()}</p>}
-              </>
+                {quote.discountAmount > 0 && (
+                  <div className="contents">
+                    <span className="col-span-3">優惠折扣</span>
+                    <span className="text-right tabular-nums">－NT${quote.discountAmount.toLocaleString()}</span>
+                  </div>
+                )}
+                {quote.invoiceTaxAmount > 0 && (
+                  <div className="contents">
+                    <span className="col-span-3">發票稅金(8%)</span>
+                    <span className="text-right tabular-nums">NT${quote.invoiceTaxAmount.toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
             ) : (
               <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
             )}
-            {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成淺焦糖／
-                拿鐵色（CONFIRM_LIGHT），跟上面標題的深咖啡色（CONFIRM_DARK）
-                同一個色系、深淺搭配，取代原本文字版的訂金/尾款條列 */}
+            {/* 包棟總費用——標籤/金額改成同一列（原本是標籤一行、大字
+                金額另外一行），跟報價單最新的版本一致，省一點垂直
+                空間。背景換成淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面
+                標題的深咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，
+                取代原本文字版的訂金/尾款條列 */}
             <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
-              <p className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
-                包棟總費用
-              </p>
-              <p className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
-                NT$ {detail.finalTotal.toLocaleString()}
-              </p>
+              <div className="flex items-baseline justify-between">
+                <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                  包棟總費用
+                </span>
+                <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                  NT$ {detail.finalTotal.toLocaleString()}
+                </span>
+              </div>
               {(() => {
                 const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
                 const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
@@ -826,36 +886,53 @@ export function QuotesSearch() {
    * 報價複製真正的訂房確認內容，還沒確認的複製報價內容，邏輯跟
    * handleSelect() 載入詳細內容時判斷 saved.status 是否為 accepted
    * 一致。 */
+  /** 準備要複製的文字內容——包成獨立的 async function，回傳
+   * Promise<string>，讓呼叫端可以直接把這個 Promise（不等它）傳給
+   * ClipboardItem，不用先 await 完才呼叫 clipboard 相關 API。 */
+  async function buildCopyTextForRow(row: QuoteSummary): Promise<string> {
+    if (row.status === "accepted") {
+      const reservation = await getReservationForQuoteAction(row.id);
+      if (!reservation) throw new Error("找不到對應的訂房記錄");
+      const result = await buildReservationConfirmationMessageAction(reservation.id);
+      if (!result.success) throw new Error(result.message);
+      return result.text;
+    }
+    const saved = await getSavedQuoteAction(row.id);
+    if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
+      throw new Error("找不到這張報價單的完整內容");
+    }
+    return buildQuoteMessage(saved.quote);
+  }
+
   async function handleCopyForRow(row: QuoteSummary) {
     setCopyingRowId(row.id);
     setRowCopyError(null);
     setRowCopyErrorId(null);
     try {
-      let text: string;
-      if (row.status === "accepted") {
-        const reservation = await getReservationForQuoteAction(row.id);
-        if (!reservation) {
-          setRowCopyError("找不到對應的訂房記錄");
-          setRowCopyErrorId(row.id);
-          return;
-        }
-        const result = await buildReservationConfirmationMessageAction(reservation.id);
-        if (!result.success) {
-          setRowCopyError(result.message);
-          setRowCopyErrorId(row.id);
-          return;
-        }
-        text = result.text;
+      // ⚠️ Safari（尤其 iOS Safari）要求剪貼簿相關 API 必須在使用者
+      // 手勢（點擊）當下立刻同步呼叫，不能先 await 一堆步驟（查訂房
+      // 記錄、組文字內容）才呼叫，中間只要斷過一次 await，Safari 就
+      // 會認定已經離開使用者操作的當下，直接用權限錯誤擋下來
+      // （"The request is not allowed by the user agent..."）。
+      // 解法：不要先把文字準備好、拿到現成的字串才傳給
+      // navigator.clipboard，而是把「還沒完成的 Promise」直接傳給
+      // ClipboardItem——clipboard.write() 這個呼叫本身可以立刻同步
+      // 執行（延續使用者手勢），實際查詢/組字串這些比較慢的非同步
+      // 過程在背景進行，瀏覽器會等 Promise resolve 才真的把內容放
+      // 進剪貼簿。跟 quote-form.tsx 的 captureReceiptBlob 是同一個
+      // 原理。
+      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+      if (canCopyToClipboard) {
+        const textPromise = buildCopyTextForRow(row);
+        await navigator.clipboard.write([
+          new ClipboardItem({ "text/plain": textPromise.then((text) => new Blob([text], { type: "text/plain" })) }),
+        ]);
       } else {
-        const saved = await getSavedQuoteAction(row.id);
-        if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
-          setRowCopyError("找不到這張報價單的完整內容");
-          setRowCopyErrorId(row.id);
-          return;
-        }
-        text = buildQuoteMessage(saved.quote);
+        // 不支援這個新版 API 的瀏覽器，退回舊式 writeText——這條路徑
+        // 通常是桌機瀏覽器，不受上面那個使用者手勢時效限制，直接
+        // await 沒問題
+        await navigator.clipboard.writeText(await buildCopyTextForRow(row));
       }
-      await navigator.clipboard.writeText(text);
       setCopiedRowId(row.id);
       setTimeout(() => setCopiedRowId(null), 2000);
     } catch (err) {
@@ -1298,13 +1375,24 @@ export function QuotesSearch() {
    * 這裡分開成獨立的函式/按鈕。 */
   async function handleCopyConfirmation() {
     if (!confirmedReservationId) return;
+    // 同一個 async function 包起來，理由跟 handleCopyForRow 上面的
+    // buildCopyTextForRow 一致：讓 clipboard.write() 可以立刻同步
+    // 呼叫，實際查詢在背景進行
+    async function buildText(): Promise<string> {
+      const result = await buildReservationConfirmationMessageAction(confirmedReservationId!);
+      if (!result.success) throw new Error(result.message);
+      return result.text;
+    }
     try {
-      const result = await buildReservationConfirmationMessageAction(confirmedReservationId);
-      if (!result.success) {
-        setDetailError(result.message);
-        return;
+      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
+      if (canCopyToClipboard) {
+        const textPromise = buildText();
+        await navigator.clipboard.write([
+          new ClipboardItem({ "text/plain": textPromise.then((text) => new Blob([text], { type: "text/plain" })) }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(await buildText());
       }
-      await navigator.clipboard.writeText(result.text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
