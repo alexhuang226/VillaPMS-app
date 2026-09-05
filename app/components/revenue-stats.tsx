@@ -58,7 +58,7 @@ function formatMoney(amount: number): string {
   return Math.round(amount).toLocaleString();
 }
 
-export function RevenueStats() {
+export function RevenueStats({ isHousekeepingManager = false }: { isHousekeepingManager?: boolean }) {
   const [year, setYear] = useState<number | null>(null);
   const [stats, setStats] = useState<YearlyRevenueStats | null>(null);
   const [expenses, setExpenses] = useState<MonthlyPropertyExpense[]>([]);
@@ -79,16 +79,22 @@ export function RevenueStats() {
     setError(null);
     // 費用統計是這次新加的功能，故意讓它「安全失敗」（查詢失敗的話
     // 就當作沒有費用資料，不影響營收數字本身）——營收統計原本就是
-    // 已經在用的報表，不該因為新功能查詢失敗就整頁掛掉
-    Promise.all([
-      getYearlyExpensesByPropertyAction(year).catch(() => []),
-      getYearlyUnassignedExpensesAction(year).catch(() => ({ totalAmount: 0, byMonth: [] })),
-    ]).then(([expensesData, unassignedData]) => {
-      if (!cancelled) {
-        setExpenses(expensesData);
-        setUnassignedExpenses(unassignedData);
-      }
-    });
+    // 已經在用的報表，不該因為新功能查詢失敗就整頁掛掉。
+    // 管家看得到這個頁面，但費用/毛利這些數字職務上不需要知道、
+    // 畫面上也不會顯示（見下面 JSX 的 isHousekeepingManager 判斷），
+    // 這裡乾脆連查都不查，不要讓管家的瀏覽器多一次沒必要的財務資料
+    // 查詢。
+    if (!isHousekeepingManager) {
+      Promise.all([
+        getYearlyExpensesByPropertyAction(year).catch(() => []),
+        getYearlyUnassignedExpensesAction(year).catch(() => ({ totalAmount: 0, byMonth: [] })),
+      ]).then(([expensesData, unassignedData]) => {
+        if (!cancelled) {
+          setExpenses(expensesData);
+          setUnassignedExpenses(unassignedData);
+        }
+      });
+    }
     getYearlyRevenueStatsAction(year)
       .then((data) => {
         if (!cancelled) setStats(data);
@@ -167,81 +173,103 @@ export function RevenueStats() {
 
         {stats && !isLoading && (
           <>
-            {/* 年度總覽 */}
+            {/* 年度總覽——管家看到的版本只留住房率，用同樣的「大字
+                強調」樣式呈現（原本這個位置放的是總營收），營收/
+                費用/毛利這些金額數字管家職務上不需要知道，直接不
+                顯示，不是用模糊/馬賽克那種「看得到但看不清楚」的
+                處理方式。 */}
             <div className="rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
-              <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                {stats.year} 年三間民宿總營收
-              </p>
-              <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
-                {formatMoney(stats.totalRevenue)}
-              </p>
-              <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
-                <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                  總住房率
-                </span>
-                <span style={{ color: colors.ink }} className="text-sm font-semibold">
-                  {formatPercent(stats.totalOccupancyRate)}
-                </span>
-              </div>
-              <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
-                住房率＝三間民宿全年訂房晚數合計／（3 間 × 全年天數）
-              </p>
-              {(() => {
-                const totalExpense = expenses.reduce((sum, e) => sum + e.totalAmount, 0);
-                const totalProfit = stats.totalRevenue - totalExpense - unassignedExpenses.totalAmount;
-                return (
-                  <>
-                    <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
-                      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                        總費用（含不指定民宿）
-                      </span>
-                      <span style={{ color: colors.ink }} className="text-sm font-semibold">
-                        {formatMoney(totalExpense + unassignedExpenses.totalAmount)}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex items-baseline justify-between">
-                      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
-                        總毛利（營收－費用）
-                      </span>
-                      <span
-                        className="text-sm font-semibold"
-                        style={{ color: totalProfit >= 0 ? colors.pine : colors.alert }}
-                      >
-                        {formatMoney(totalProfit)}
-                      </span>
-                    </div>
-                    {unassignedExpenses.totalAmount > 0 && (
-                      <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
-                        其中 {formatMoney(unassignedExpenses.totalAmount)} 是不指定民宿的費用（例如同時涵蓋好幾間的薪資），沒有分攤到下方個別民宿的毛利明細裡
-                      </p>
-                    )}
-                  </>
-                );
-              })()}
+              {isHousekeepingManager ? (
+                <>
+                  <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                    {stats.year} 年三間民宿總住房率
+                  </p>
+                  <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
+                    {formatPercent(stats.totalOccupancyRate)}
+                  </p>
+                  <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
+                    住房率＝三間民宿全年訂房晚數合計／（3 間 × 全年天數）
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                    {stats.year} 年三間民宿總營收
+                  </p>
+                  <p className={`${display.className} text-4xl italic`} style={{ color: colors.pine }}>
+                    {formatMoney(stats.totalRevenue)}
+                  </p>
+                  <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                    <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                      總住房率
+                    </span>
+                    <span style={{ color: colors.ink }} className="text-sm font-semibold">
+                      {formatPercent(stats.totalOccupancyRate)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
+                    住房率＝三間民宿全年訂房晚數合計／（3 間 × 全年天數）
+                  </p>
+                  {(() => {
+                    const totalExpense = expenses.reduce((sum, e) => sum + e.totalAmount, 0);
+                    const totalProfit = stats.totalRevenue - totalExpense - unassignedExpenses.totalAmount;
+                    return (
+                      <>
+                        <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                          <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                            總費用（含不指定民宿）
+                          </span>
+                          <span style={{ color: colors.ink }} className="text-sm font-semibold">
+                            {formatMoney(totalExpense + unassignedExpenses.totalAmount)}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex items-baseline justify-between">
+                          <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+                            總毛利（營收－費用）
+                          </span>
+                          <span
+                            className="text-sm font-semibold"
+                            style={{ color: totalProfit >= 0 ? colors.pine : colors.alert }}
+                          >
+                            {formatMoney(totalProfit)}
+                          </span>
+                        </div>
+                        {unassignedExpenses.totalAmount > 0 && (
+                          <p className="mt-1 text-[10px]" style={{ color: colors.muted }}>
+                            其中 {formatMoney(unassignedExpenses.totalAmount)} 是不指定民宿的費用（例如同時涵蓋好幾間的薪資），沒有分攤到下方個別民宿的毛利明細裡
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </>
+              )}
             </div>
 
-            {/* 每月總營收長條圖 */}
-            <div className="mt-6">
-              <p className="text-xs font-bold" style={{ color: colors.ink }}>
-                每月總營收
-              </p>
-              <div className="mt-3 flex items-end gap-1" style={{ height: "140px" }}>
-                {stats.monthlyTotalRevenue.map((m) => {
-                  const heightPct = m.revenue > 0 ? Math.max((m.revenue / maxMonthlyRevenue) * 100, 3) : 0;
-                  return (
-                    <div key={m.month} className="flex h-full flex-1 flex-col items-center justify-end gap-1">
-                      <span className="text-[8px] leading-none" style={{ color: colors.muted }}>
-                        {m.revenue > 0 ? Math.round(m.revenue / 1000) + "k" : ""}
-                      </span>
-                      <div className="w-full" style={{ height: `${heightPct}%`, backgroundColor: colors.pine, minHeight: m.revenue > 0 ? "2px" : "0" }} />
-                      <span className="text-[9px] leading-none" style={{ color: colors.muted }}>
-                        {m.month}
-                      </span>
-                    </div>
-                  );
-                })}
+            {/* 每月總營收長條圖——管家不用看金額，整個區塊不顯示 */}
+            {!isHousekeepingManager && (
+              <div className="mt-6">
+                <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                  每月總營收
+                </p>
+                <div className="mt-3 flex items-end gap-1" style={{ height: "140px" }}>
+                  {stats.monthlyTotalRevenue.map((m) => {
+                    const heightPct = m.revenue > 0 ? Math.max((m.revenue / maxMonthlyRevenue) * 100, 3) : 0;
+                    return (
+                      <div key={m.month} className="flex h-full flex-1 flex-col items-center justify-end gap-1">
+                        <span className="text-[8px] leading-none" style={{ color: colors.muted }}>
+                          {m.revenue > 0 ? Math.round(m.revenue / 1000) + "k" : ""}
+                        </span>
+                        <div className="w-full" style={{ height: `${heightPct}%`, backgroundColor: colors.pine, minHeight: m.revenue > 0 ? "2px" : "0" }} />
+                        <span className="text-[9px] leading-none" style={{ color: colors.muted }}>
+                          {m.month}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* 每月總住房率長條圖——跟上面營收長條圖同一套視覺風格，
                 只是這裡高度直接用百分比（0~100%），不用像營收那樣
@@ -275,43 +303,47 @@ export function RevenueStats() {
                 不用像下面「每月各民宿明細」那樣要分別展開每個月、
                 每間民宿才看得到。這裡的費用是「這個月全部民宿加總
                 ＋不指定民宿」的總額，不分民宿，跟下面明細表「單一
-                民宿」層級的費用是不同層次的數字。 */}
-            <div className="mt-6">
-              <p className="text-xs font-bold" style={{ color: colors.ink }}>
-                每月總覽
-              </p>
-              <table className="mt-2 w-full text-[11px]">
-                <thead>
-                  <tr style={{ color: colors.muted }}>
-                    <th className="pb-1 text-center font-normal">月份</th>
-                    <th className="pb-1 text-center font-normal">營收</th>
-                    <th className="pb-1 text-center font-normal">費用</th>
-                    <th className="pb-1 text-center font-normal">毛利</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
-                    const monthRevenue = stats.monthlyTotalRevenue.find((m) => m.month === monthNum)?.revenue ?? 0;
-                    const monthPropertyExpense = expenses
-                      .filter((e) => e.month === monthNum)
-                      .reduce((sum, e) => sum + e.totalAmount, 0);
-                    const monthUnassignedExpense = unassignedExpenses.byMonth.find((m) => m.month === monthNum)?.amount ?? 0;
-                    const monthExpense = monthPropertyExpense + monthUnassignedExpense;
-                    const monthProfit = monthRevenue - monthExpense;
-                    return (
-                      <tr key={monthNum} className="border-t" style={{ borderColor: colors.line }}>
-                        <td className="py-1">{monthNum} 月</td>
-                        <td className="py-1 text-right tabular-nums">{formatMoney(monthRevenue)}</td>
-                        <td className="py-1 text-right tabular-nums">{formatMoney(monthExpense)}</td>
-                        <td className="py-1 text-right tabular-nums" style={{ color: monthProfit >= 0 ? colors.pine : colors.alert }}>
-                          {formatMoney(monthProfit)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                民宿」層級的費用是不同層次的數字。這整張表全部都是
+                金額數字、沒有住房率欄位，管家不用看，整個區塊不
+                顯示。 */}
+            {!isHousekeepingManager && (
+              <div className="mt-6">
+                <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                  每月總覽
+                </p>
+                <table className="mt-2 w-full text-[11px]">
+                  <thead>
+                    <tr style={{ color: colors.muted }}>
+                      <th className="pb-1 text-center font-normal">月份</th>
+                      <th className="pb-1 text-center font-normal">營收</th>
+                      <th className="pb-1 text-center font-normal">費用</th>
+                      <th className="pb-1 text-center font-normal">毛利</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
+                      const monthRevenue = stats.monthlyTotalRevenue.find((m) => m.month === monthNum)?.revenue ?? 0;
+                      const monthPropertyExpense = expenses
+                        .filter((e) => e.month === monthNum)
+                        .reduce((sum, e) => sum + e.totalAmount, 0);
+                      const monthUnassignedExpense = unassignedExpenses.byMonth.find((m) => m.month === monthNum)?.amount ?? 0;
+                      const monthExpense = monthPropertyExpense + monthUnassignedExpense;
+                      const monthProfit = monthRevenue - monthExpense;
+                      return (
+                        <tr key={monthNum} className="border-t" style={{ borderColor: colors.line }}>
+                          <td className="py-1">{monthNum} 月</td>
+                          <td className="py-1 text-right tabular-nums">{formatMoney(monthRevenue)}</td>
+                          <td className="py-1 text-right tabular-nums">{formatMoney(monthExpense)}</td>
+                          <td className="py-1 text-right tabular-nums" style={{ color: monthProfit >= 0 ? colors.pine : colors.alert }}>
+                            {formatMoney(monthProfit)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* 每月各民宿明細 */}
             <div className="mt-6">
@@ -359,9 +391,13 @@ export function RevenueStats() {
                         <thead>
                           <tr style={{ color: colors.muted }}>
                             <th className="pb-1 text-center font-normal">民宿</th>
-                            <th className="pb-1 text-center font-normal">營收</th>
-                            <th className="pb-1 text-center font-normal">費用</th>
-                            <th className="pb-1 text-center font-normal">毛利</th>
+                            {!isHousekeepingManager && (
+                              <>
+                                <th className="pb-1 text-center font-normal">營收</th>
+                                <th className="pb-1 text-center font-normal">費用</th>
+                                <th className="pb-1 text-center font-normal">毛利</th>
+                              </>
+                            )}
                             <th className="pb-1 text-center font-normal">訂房天數</th>
                             <th className="pb-1 text-center font-normal">住房率</th>
                           </tr>
@@ -373,11 +409,15 @@ export function RevenueStats() {
                             return (
                               <tr key={r.propertyCode}>
                                 <td className="py-0.5">{r.propertyName}</td>
-                                <td className="py-0.5 text-right tabular-nums">{formatMoney(r.revenue)}</td>
-                                <td className="py-0.5 text-right tabular-nums">{formatMoney(propertyExpense)}</td>
-                                <td className="py-0.5 text-right tabular-nums" style={{ color: propertyProfit >= 0 ? colors.pine : colors.alert }}>
-                                  {formatMoney(propertyProfit)}
-                                </td>
+                                {!isHousekeepingManager && (
+                                  <>
+                                    <td className="py-0.5 text-right tabular-nums">{formatMoney(r.revenue)}</td>
+                                    <td className="py-0.5 text-right tabular-nums">{formatMoney(propertyExpense)}</td>
+                                    <td className="py-0.5 text-right tabular-nums" style={{ color: propertyProfit >= 0 ? colors.pine : colors.alert }}>
+                                      {formatMoney(propertyProfit)}
+                                    </td>
+                                  </>
+                                )}
                                 <td className="py-0.5 text-right tabular-nums">{r.nightsBooked} 天</td>
                                 <td className="py-0.5 text-right tabular-nums">{formatPercent(r.occupancyRate)}</td>
                               </tr>
@@ -385,27 +425,35 @@ export function RevenueStats() {
                           })}
                           <tr className="border-t font-bold" style={{ borderColor: colors.line, color: colors.pine }}>
                             <td className="py-0.5">合計</td>
-                            <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalRevenue)}</td>
-                            <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalExpense)}</td>
-                            <td
-                              className="py-0.5 text-right tabular-nums"
-                              style={{ color: monthTotalRevenue - monthTotalExpense >= 0 ? colors.pine : colors.alert }}
-                            >
-                              {formatMoney(monthTotalRevenue - monthTotalExpense)}
-                            </td>
+                            {!isHousekeepingManager && (
+                              <>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalRevenue)}</td>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(monthTotalExpense)}</td>
+                                <td
+                                  className="py-0.5 text-right tabular-nums"
+                                  style={{ color: monthTotalRevenue - monthTotalExpense >= 0 ? colors.pine : colors.alert }}
+                                >
+                                  {formatMoney(monthTotalRevenue - monthTotalExpense)}
+                                </td>
+                              </>
+                            )}
                             <td className="py-0.5 text-right tabular-nums">{monthTotalNights} 天</td>
                             <td className="py-0.5 text-right tabular-nums">{formatPercent(monthOccupancyRate)}</td>
                           </tr>
                           <tr style={{ color: colors.muted }}>
                             <td className="py-0.5">累計</td>
-                            <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeRevenue)}</td>
-                            <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeExpense)}</td>
-                            <td
-                              className="py-0.5 text-right tabular-nums"
-                              style={{ color: cumulativeRevenue - cumulativeExpense >= 0 ? colors.pine : colors.alert }}
-                            >
-                              {formatMoney(cumulativeRevenue - cumulativeExpense)}
-                            </td>
+                            {!isHousekeepingManager && (
+                              <>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeRevenue)}</td>
+                                <td className="py-0.5 text-right tabular-nums">{formatMoney(cumulativeExpense)}</td>
+                                <td
+                                  className="py-0.5 text-right tabular-nums"
+                                  style={{ color: cumulativeRevenue - cumulativeExpense >= 0 ? colors.pine : colors.alert }}
+                                >
+                                  {formatMoney(cumulativeRevenue - cumulativeExpense)}
+                                </td>
+                              </>
+                            )}
                             <td className="py-0.5 text-right tabular-nums">{cumulativeNights} 天</td>
                             <td className="py-0.5 text-right tabular-nums">{formatPercent(cumulativeOccupancyRate)}</td>
                           </tr>

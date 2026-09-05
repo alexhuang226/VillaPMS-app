@@ -47,21 +47,36 @@ function todayYMD(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
-const EMPTY_FIELDS = {
-  propertyId: "" as string, // 空字串代表「不指定民宿」，送出前轉成 null
-  expenseDate: todayYMD(),
-  category: EXPENSE_CATEGORIES[0],
-  amount: "",
-  notes: "",
-};
+// 管家不該看到薪資／房租這些跟人事、租約有關的費用分類——伺服器端
+// 的過濾在 app/actions/expense.ts（真正防止資料外流的地方），這裡
+// 是前端表單自己再過濾一次分類選單，避免管家新增了一筆自己之後
+// 反而看不到的記錄。兩份清單要維持一致，之後如果要多藏哪個分類，
+// 兩邊都要一起改。
+const CATEGORIES_HIDDEN_FROM_HOUSEKEEPING_MANAGER = ["房租", "薪資"];
 
-export function ExpenseManager() {
+function visibleCategories(isHousekeepingManager: boolean): string[] {
+  return isHousekeepingManager
+    ? EXPENSE_CATEGORIES.filter((c) => !CATEGORIES_HIDDEN_FROM_HOUSEKEEPING_MANAGER.includes(c))
+    : EXPENSE_CATEGORIES;
+}
+
+function emptyFields(isHousekeepingManager: boolean) {
+  return {
+    propertyId: "" as string, // 空字串代表「不指定民宿」，送出前轉成 null
+    expenseDate: todayYMD(),
+    category: visibleCategories(isHousekeepingManager)[0],
+    amount: "",
+    notes: "",
+  };
+}
+
+export function ExpenseManager({ isHousekeepingManager = false }: { isHousekeepingManager?: boolean }) {
   const [expenses, setExpenses] = useState<ExpenseDetail[] | null>(null);
   const [properties, setProperties] = useState<PropertySettingsDetail[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [fields, setFields] = useState(EMPTY_FIELDS);
+  const [fields, setFields] = useState(() => emptyFields(isHousekeepingManager));
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -90,7 +105,7 @@ export function ExpenseManager() {
     }
   }
 
-  function updateField<K extends keyof typeof EMPTY_FIELDS>(key: K, value: (typeof EMPTY_FIELDS)[K]) {
+  function updateField<K extends keyof ReturnType<typeof emptyFields>>(key: K, value: ReturnType<typeof emptyFields>[K]) {
     setFields((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -182,7 +197,7 @@ export function ExpenseManager() {
                 className="w-full border-b bg-transparent py-1 text-sm outline-none"
                 style={{ borderColor: colors.line, color: colors.ink }}
               >
-                {EXPENSE_CATEGORIES.map((c) => (
+                {visibleCategories(isHousekeepingManager).map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>

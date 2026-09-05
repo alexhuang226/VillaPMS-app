@@ -55,6 +55,11 @@ const HOUSEKEEPING_MANAGER_ALLOWED_PREFIXES = [
   "/employees",
   "/holidays",
   "/expenses",
+  // 管家可以看營收統計頁面，但畫面內容會被過濾成只留住房率相關的
+  // 部分（見 revenue-stats.tsx 的 isHousekeepingManager 判斷）——
+  // 營收/費用/毛利這些金額數字，管家的職務不需要知道，路徑本身
+  // 開放給他們是為了讓他們能看到住房率，不是要開放全部財務資料。
+  "/revenue",
   "/change-password",
   "/login",
 ];

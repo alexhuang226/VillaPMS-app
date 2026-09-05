@@ -89,7 +89,13 @@ const NAV_ITEMS: NavItem[] = [
     description: "查看/新增/編輯節日，一鍵批次匯入整年",
     housekeepingManagerVisible: true,
   },
-  { href: "/revenue", icon: "📊", title: "營收統計", description: "年度總營收、住房率、每月明細" },
+  {
+    href: "/revenue",
+    icon: "📊",
+    title: "營收統計",
+    description: "年度總營收、住房率、每月明細",
+    housekeepingManagerVisible: true,
+  },
 ];
 
 export function HomeNav({

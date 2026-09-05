@@ -15,9 +15,22 @@ import type {
   MonthlyPropertyExpense,
   YearlyUnassignedExpenses,
 } from "@/lib/expenses/queries";
+import { getCurrentEmployeePosition } from "@/lib/auth/current-employee";
+
+/** 管家不該看到薪資／房租這些跟人事、租約有關的費用記錄——用分類
+ * 名稱過濾，不用另外加欄位或改資料庫結構。之後如果還想多藏別的
+ * 分類，這裡加一個字串就好。這個過濾一定要放在伺服器端（在把資料
+ * 回傳給前端「之前」就先擋掉），不能只在畫面上不顯示，不然管家
+ * 打開瀏覽器開發工具還是看得到這些資料。 */
+const CATEGORIES_HIDDEN_FROM_HOUSEKEEPING_MANAGER = ["房租", "薪資"];
 
 export async function listExpensesAction(limit?: number): Promise<ExpenseDetail[]> {
-  return listExpenses(limit);
+  const rows = await listExpenses(limit);
+  const position = await getCurrentEmployeePosition();
+  if (position === "管家") {
+    return rows.filter((r) => !CATEGORIES_HIDDEN_FROM_HOUSEKEEPING_MANAGER.includes(r.category));
+  }
+  return rows;
 }
 
 /**

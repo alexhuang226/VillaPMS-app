@@ -1047,33 +1047,37 @@ export function ReservationsSearch({
             帳款」之間切換——月曆內容本身用 display:none 切換隱藏/
             顯示，不是條件式掛載/卸載，這樣不用把後面一大段既有的
             月曆／訂單詳情 JSX 整段包進條件判斷，改動範圍小很多、
-            比較不容易改壞。 */}
-        <div className="mb-4 flex gap-2">
-          <button
-            type="button"
-            onClick={() => setViewMode("calendar")}
-            className="flex-1 border py-2 text-center text-xs tracking-wide"
-            style={
-              viewMode === "calendar"
-                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                : { borderColor: colors.line, color: colors.ink }
-            }
-          >
-            月曆檢視
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewMode("receivables")}
-            className="flex-1 border py-2 text-center text-xs tracking-wide"
-            style={
-              viewMode === "receivables"
-                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                : { borderColor: colors.line, color: colors.ink }
-            }
-          >
-            應收帳款
-          </button>
-        </div>
+            比較不容易改壞。管家不用看應收帳款（金額相關），這組
+            切換按鈕整個不顯示——預設 viewMode 本來就是 "calendar"，
+            按鈕不見了也不會卡在應收帳款畫面出不來。 */}
+        {!isHousekeepingManager && (
+          <div className="mb-4 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setViewMode("calendar")}
+              className="flex-1 border py-2 text-center text-xs tracking-wide"
+              style={
+                viewMode === "calendar"
+                  ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                  : { borderColor: colors.line, color: colors.ink }
+              }
+            >
+              月曆檢視
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("receivables")}
+              className="flex-1 border py-2 text-center text-xs tracking-wide"
+              style={
+                viewMode === "receivables"
+                  ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                  : { borderColor: colors.line, color: colors.ink }
+              }
+            >
+              應收帳款
+            </button>
+          </div>
+        )}
 
         {viewMode === "receivables" && (
           <div>
