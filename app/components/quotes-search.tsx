@@ -1904,23 +1904,41 @@ export function QuotesSearch() {
                   <p className="mt-1">{guestSummary(selectedQuote)}</p>
                   {(() => {
                     const roomItems = roomAllocationSummaryItems(selectedQuote.roomAllocation);
+                    // 降規四人套房後面帶的「(提供1床，以雙人套房計費)」
+                    // 說明文字拆到下一行——跟搜尋結果列表同一套處理，
+                    // 避免這行文字太長跟旁邊金額擠在一起
+                    const splitSuffix = (text: string): { main: string; suffix: string | null } => {
+                      const idx = text.indexOf(" (");
+                      if (idx === -1) return { main: text, suffix: null };
+                      return { main: text.slice(0, idx), suffix: text.slice(idx + 1) };
+                    };
                     return (
                       <div className="mt-1 flex flex-col gap-0.5" style={{ color: colors.muted }}>
-                        {roomItems.map((item, i) =>
-                          i === roomItems.length - 1 ? (
-                            <div key={i} className="flex items-baseline justify-between">
-                              <span>{item.text}</span>
-                              <span
-                                className={`${display.className} text-2xl italic`}
-                                style={{ color: colors.pine }}
-                              >
-                                NT$ {selectedQuote.packageTotal.toLocaleString()}
-                              </span>
+                        {roomItems.map((item, i) => {
+                          const { main, suffix } = splitSuffix(item.text);
+                          if (i === roomItems.length - 1) {
+                            return (
+                              <div key={i} className="flex flex-col">
+                                <div className="flex items-baseline justify-between">
+                                  <span>{main}</span>
+                                  <span
+                                    className={`${display.className} text-2xl italic`}
+                                    style={{ color: colors.pine }}
+                                  >
+                                    NT$ {selectedQuote.packageTotal.toLocaleString()}
+                                  </span>
+                                </div>
+                                {suffix && <p className="text-[11px]">{suffix}</p>}
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={i}>
+                              <p>{main}</p>
+                              {suffix && <p className="text-[11px]">{suffix}</p>}
                             </div>
-                          ) : (
-                            <p key={i}>{item.text}</p>
-                          )
-                        )}
+                          );
+                        })}
                       </div>
                     );
                   })()}

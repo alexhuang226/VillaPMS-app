@@ -109,6 +109,21 @@ export function RevenueStats() {
 
   const maxMonthlyRevenue = stats ? Math.max(1, ...stats.monthlyTotalRevenue.map((m) => m.revenue)) : 1;
 
+  // 每月總住房率——跟下面「每月各民宿明細」小計那一段用的是同一個
+  // 公式（三間合計訂房晚數 / (3 間 × 這個月天數)），只是這裡另外
+  // 算一次、整理成 12 個月的陣列給上面新加的長條圖用，不影響下面
+  // 明細表原本自己的計算（那邊繼續維持原本各自獨立算，避免為了共用
+  // 這個值而動到已經在正常運作的明細表邏輯）。
+  const monthlyOccupancyRates = stats
+    ? Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
+        const rows = stats.monthlyByProperty.filter((e) => e.month === monthNum);
+        const monthTotalNights = rows.reduce((sum, r) => sum + r.nightsBooked, 0);
+        const daysInThisMonth = new Date(stats.year, monthNum, 0).getDate();
+        const occupancyRate = rows.length > 0 && daysInThisMonth > 0 ? monthTotalNights / (rows.length * daysInThisMonth) : 0;
+        return { month: monthNum, occupancyRate };
+      })
+    : [];
+
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
       <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
@@ -219,6 +234,34 @@ export function RevenueStats() {
                         {m.revenue > 0 ? Math.round(m.revenue / 1000) + "k" : ""}
                       </span>
                       <div className="w-full" style={{ height: `${heightPct}%`, backgroundColor: colors.pine, minHeight: m.revenue > 0 ? "2px" : "0" }} />
+                      <span className="text-[9px] leading-none" style={{ color: colors.muted }}>
+                        {m.month}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 每月總住房率長條圖——跟上面營收長條圖同一套視覺風格，
+                只是這裡高度直接用百分比（0~100%），不用像營收那樣
+                另外算 maxMonthlyRevenue 當比例基準 */}
+            <div className="mt-6">
+              <p className="text-xs font-bold" style={{ color: colors.ink }}>
+                每月總住房率
+              </p>
+              <div className="mt-3 flex items-end gap-1" style={{ height: "140px" }}>
+                {monthlyOccupancyRates.map((m) => {
+                  const heightPct = m.occupancyRate > 0 ? Math.max(m.occupancyRate * 100, 3) : 0;
+                  return (
+                    <div key={m.month} className="flex h-full flex-1 flex-col items-center justify-end gap-1">
+                      <span className="text-[8px] leading-none" style={{ color: colors.muted }}>
+                        {m.occupancyRate > 0 ? formatPercent(m.occupancyRate) : ""}
+                      </span>
+                      <div
+                        className="w-full"
+                        style={{ height: `${heightPct}%`, backgroundColor: colors.blue, minHeight: m.occupancyRate > 0 ? "2px" : "0" }}
+                      />
                       <span className="text-[9px] leading-none" style={{ color: colors.muted }}>
                         {m.month}
                       </span>
