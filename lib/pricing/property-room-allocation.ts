@@ -94,15 +94,22 @@ export function allocateDoublePlainRoom(
  *
  * 有 override 時會額外驗證：
  * 1. 每個房型的數量有沒有超過該民宿實際房間數（PropertyRoomCounts）
- * 2. 選擇的房型組合，本身可容納人數是否 >= 入住的大人+小孩人數
+ * 2. 選擇的房型組合「加上加固定床／加臨時床」之後，可容納人數是否
+ *    >= 入住的大人+小孩人數
  * 任一項不符合，就回傳 warning 訊息，呼叫端應該視同
  * capacityWarning／minimumGuestsWarning 一樣擋下報價金額計算。
+ *
+ * `extraBeds` 是選填的：不傳（例如「新增訂單」表單只想拿自動分配
+ * 結果、沒有 override）時，第 2 項檢查根本不會執行（沒有 override
+ * 就提早 return）；有 override 又有加床時一定要傳進來，否則第 2 項
+ * 檢查會漏算加床、把「靠加床補足床位」的合法組合誤判成床位不夠。
  */
 export function resolveRoomAllocation(
   propertyCode: PropertyCode,
   totalGuests: number,
   roomCounts: PropertyRoomCounts,
-  override?: RoomAllocationOverride
+  override?: RoomAllocationOverride,
+  extraBeds?: { extraBedFixedQty: number; extraBedTempQty: number }
 ): { allocation: RoomAllocationResult; warning: string | null } {
   const auto = allocateFourPersonRooms(propertyCode, totalGuests);
   const autoDoublePlain = allocateDoublePlainRoom(propertyCode, totalGuests);
@@ -146,17 +153,27 @@ export function resolveRoomAllocation(
     );
   }
 
-  // 手動選擇的房型組合，本身可容納的人數（不含加床）是否足夠這次入住
-  // 的大人+小孩人數。這是「房型選擇」層級的檢查，跟 calculate-package-
-  // total.ts 的 checkCapacity()（會把加床也算進容量）是兩件事：即使
-  // 之後可以靠加床補足床位，選出來的房型本身住不下這麼多人，也應該先
-  // 提醒櫃檯人員「這個房型組合本身不夠住」。
+  // 手動選擇的房型組合「加上加固定床／加臨時床」之後，可容納的人數
+  // 是否足夠這次入住的大人+小孩人數。加床本來就是用來補足床位的
+  // 手段，這裡如果不把加床算進去，就會出現「櫃檯已經加了臨時床、
+  // 床位其實夠住，卻還是被這個檢查擋下來、跳出『所選房型合計可住 N
+  // 人，低於入住人數』」的矛盾。床位權重跟 calculate-package-total.ts
+  // 的 checkCapacity() 一致：四人套房每間 4 人，其餘房型與每張加床
+  // 都以 2 人計。
+  const extraBedFixedQty = extraBeds?.extraBedFixedQty ?? 0;
+  const extraBedTempQty = extraBeds?.extraBedTempQty ?? 0;
   const selectedRoomCapacity =
     4 * allocation.fullPriceCount +
-    2 * (allocation.downgradeCount + allocation.doubleSuiteCount + allocation.doublePlainCount);
+    2 *
+      (allocation.downgradeCount +
+        allocation.doubleSuiteCount +
+        allocation.doublePlainCount +
+        extraBedFixedQty +
+        extraBedTempQty);
   if (totalGuests > selectedRoomCapacity) {
+    const withBeds = extraBedFixedQty + extraBedTempQty > 0 ? "（含加床）" : "";
     problems.push(
-      `所選房型合計可住 ${selectedRoomCapacity} 人，低於入住人數（大人+小孩）${totalGuests} 人`
+      `所選房型${withBeds}合計可住 ${selectedRoomCapacity} 人，低於入住人數（大人+小孩）${totalGuests} 人`
     );
   }
 

@@ -325,7 +325,10 @@ export function calculatePackageQuote(params: {
     request.propertyCode,
     totalGuests,
     roomCounts,
-    request.roomOverride
+    request.roomOverride,
+    // 手動覆寫房型時，「所選房型是否住得下」的檢查也要把加床算進去，
+    // 否則靠加臨時床／加固定床補足床位的合法組合會被誤判成床位不夠
+    { extraBedFixedQty, extraBedTempQty }
   );
 
   // 加床數量驗證（加固定床不能超過降規房間數；加臨時床有各民宿固定
