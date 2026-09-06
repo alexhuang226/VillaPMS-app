@@ -22,14 +22,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import {
   calculateQuoteAction,
   clearOldQuotesAction,
-  confirmReservationFromQuoteAction,
   deleteQuoteAction,
-  getExtraBedRoomOptionsAction,
   getQuoteCheckInDatesInRangeAction,
   getReservationForQuoteAction,
   getSavedQuoteAction,
@@ -37,7 +34,6 @@ import {
   saveNewQuoteSnapshot,
   updateQuoteSnapshotAction,
 } from "@/app/actions/quote";
-import type { BookingSource } from "@/app/actions/quote";
 import { buildReservationConfirmationMessageAction, getReservationDetailAction } from "@/app/actions/reservation";
 import {
   addOnFeeBreakdown,
@@ -54,9 +50,8 @@ import {
   formatDateWithWeekday,
   guestSummary,
   INFANT_NOTE,
-  roomAllocationSummaryItems,
 } from "@/lib/pricing/quote-message";
-import type { ExtraBedRoomOption, QuoteSummary, ReservationDetail } from "@/lib/pricing/queries";
+import type { QuoteSummary, ReservationDetail } from "@/lib/pricing/queries";
 import type { PackageQuote, PropertyCode, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
@@ -98,23 +93,6 @@ const STATUS_LABEL: Record<string, string> = {
   rejected: "已婉拒",
   cancelled: "已取消",
 };
-
-/** 確認訂房時的付款狀況選項——預設「已收訂金」，實務上職員按這個
- * 按鈕的當下，客人通常都已經付了訂金（不然不會走到這一步確認）*/
-const CONFIRM_PAYMENT_STATUS_LABEL: Record<string, string> = {
-  deposit_paid: "已收訂金",
-  balance_paid: "已收全額（含尾款）",
-  pending_deposit: "尚未收款",
-};
-
-const BOOKING_SOURCE_OPTIONS: { value: BookingSource; label: string }[] = [
-  { value: "line_official", label: "LINE官方" },
-  { value: "airbnb", label: "Airbnb" },
-  { value: "walk_in", label: "現場" },
-  { value: "phone", label: "電話" },
-  { value: "other_ota", label: "其他OTA" },
-  { value: "other", label: "其他" },
-];
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
@@ -489,21 +467,37 @@ function ConfirmationImageCard({
  * cardRef 是選填的——詳情頁面原本的用法只是單純顯示在畫面上，不需要
  * 截圖，只有列表的隱藏卡片才需要傳 ref 進來。
  */
-function QuoteReceiptCard({
+export function QuoteReceiptCard({
   quote,
   createdAt,
   isConfirmed,
   cardRef,
+  preview,
 }: {
   quote: PackageQuote;
   createdAt: string | null;
   isConfirmed: boolean;
   cardRef?: RefObject<HTMLDivElement | null>;
+  /** 職員核對用的精簡版面（報價記錄查詢的詳情畫面）：標題只留一行
+   * （民宿名 + 「包棟報價單」，不要深綠大標／私人會所／報價日期），
+   * 內距收緊，且不顯示「匯款帳號」「預訂須知」——那幾段是給客人看
+   * 的。存成圖片傳給客人的那份不傳這個 prop，維持完整版面。 */
+  preview?: boolean;
 }) {
   if (!quote.messageContext || !quote.roomAllocation) return null;
   return (
     <>
                     <div ref={cardRef} className="overflow-hidden" style={{ backgroundColor: colors.surface, border: `1px solid ${colors.line}` }}>
+                      {preview ? (
+                        <div className="border-b px-4 py-2" style={{ borderColor: colors.line }}>
+                          <span className="text-sm font-bold" style={{ color: colors.ink }}>
+                            {quote.messageContext.propertyName}
+                          </span>
+                          <span className="ml-2 text-[11px]" style={{ color: colors.muted }}>
+                            {isConfirmed ? "訂房確認單" : "包棟報價單"}
+                          </span>
+                        </div>
+                      ) : (
                       <div className="relative px-6 pb-7 pt-8 text-center" style={{ backgroundColor: colors.pine }}>
                         <p className={`${display.className} text-2xl italic`} style={{ color: colors.pineText }}>
                           {`${quote.messageContext.propertyName}私人會所`}
@@ -547,11 +541,13 @@ function QuoteReceiptCard({
                           )}
                         </div>
                       </div>
+                      )}
 
                       {/* 上方 padding 特意比其他方向小很多——上面接的是
                           深色標題區塊，已經有自己的 padding，兩個疊加
-                          會讓「預訂資訊」上方空白感覺太大 */}
-                      <div className="px-6 pb-12 pt-1" style={{ color: colors.ink }}>
+                          會讓「預訂資訊」上方空白感覺太大。preview（職員
+                          核對版）標題只是一行淺色小字，內距整個收緊。 */}
+                      <div className={preview ? "px-4 pb-4 pt-2" : "px-6 pb-12 pt-1"} style={{ color: colors.ink }}>
                         <ReceiptSectionHeader icon="📅" title="預訂資訊" noBorder />
                         <div className="flex flex-col gap-1.5 text-xs">
                           <PairedInfoRow
@@ -683,63 +679,67 @@ function QuoteReceiptCard({
                           </div>
                         </div>
 
-                        {quote.messageContext.bank && (
+                        {!preview && (
                           <>
-                            <ReceiptSectionHeader icon="🏦" title="匯款帳號" note={`⚠️ ${BANK_TRANSFER_NOTE}`} />
-                            <div className="flex gap-3 text-sm font-semibold">
-                              <div className="flex-[3]">
-                                <p className="text-[10px]" style={{ color: colors.muted }}>
-                                  銀行
-                                </p>
-                                <p style={{ color: colors.ink }}>
-                                  {quote.messageContext.bank.name}（{quote.messageContext.bank.branch}）
-                                </p>
-                              </div>
-                              <div className="flex-[2]">
-                                <p className="text-[10px]" style={{ color: colors.muted }}>
-                                  帳號
-                                </p>
-                                <p className="text-base tracking-wide" style={{ color: colors.ink }}>
-                                  {quote.messageContext.bank.accountNumber}
-                                </p>
-                              </div>
+                            {quote.messageContext.bank && (
+                              <>
+                                <ReceiptSectionHeader icon="🏦" title="匯款帳號" note={`⚠️ ${BANK_TRANSFER_NOTE}`} />
+                                <div className="flex gap-3 text-sm font-semibold">
+                                  <div className="flex-[3]">
+                                    <p className="text-[10px]" style={{ color: colors.muted }}>
+                                      銀行
+                                    </p>
+                                    <p style={{ color: colors.ink }}>
+                                      {quote.messageContext.bank.name}（{quote.messageContext.bank.branch}）
+                                    </p>
+                                  </div>
+                                  <div className="flex-[2]">
+                                    <p className="text-[10px]" style={{ color: colors.muted }}>
+                                      帳號
+                                    </p>
+                                    <p className="text-base tracking-wide" style={{ color: colors.ink }}>
+                                      {quote.messageContext.bank.accountNumber}
+                                    </p>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+
+                            <ReceiptSectionHeader icon="📝" title="預訂須知" />
+                            <div className="flex flex-col gap-3 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                              {baseGuestsReminderItems(quote).length > 0 && (
+                                <div>
+                                  <p>
+                                    {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計，{INFANT_NOTE})：
+                                  </p>
+                                  {baseGuestsReminderItems(quote).map((item, i) => (
+                                    <p key={i}>
+                                      ・{item.label}({item.note})：{item.required} 人
+                                    </p>
+                                  ))}
+                                </div>
+                              )}
+                              {BOOKING_POLICY_NOTES.map((note, i) => {
+                                const highlight = "入住前 30 天";
+                                const parts = note.split(highlight);
+                                return (
+                                  <p key={i}>
+                                    {BOOKING_POLICY_ICONS[i]}
+                                    {parts.length === 2 ? (
+                                      <>
+                                        {parts[0]}
+                                        <strong style={{ color: colors.alert }}>{highlight}</strong>
+                                        {parts[1]}
+                                      </>
+                                    ) : (
+                                      note
+                                    )}
+                                  </p>
+                                );
+                              })}
                             </div>
                           </>
                         )}
-
-                        <ReceiptSectionHeader icon="📝" title="預訂須知" />
-                        <div className="flex flex-col gap-3 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
-                          {baseGuestsReminderItems(quote).length > 0 && (
-                            <div>
-                              <p>
-                                {BASE_GUESTS_ICON} 包棟基本人數(未達以低消計，{INFANT_NOTE})：
-                              </p>
-                              {baseGuestsReminderItems(quote).map((item, i) => (
-                                <p key={i}>
-                                  ・{item.label}({item.note})：{item.required} 人
-                                </p>
-                              ))}
-                            </div>
-                          )}
-                          {BOOKING_POLICY_NOTES.map((note, i) => {
-                            const highlight = "入住前 30 天";
-                            const parts = note.split(highlight);
-                            return (
-                              <p key={i}>
-                                {BOOKING_POLICY_ICONS[i]}
-                                {parts.length === 2 ? (
-                                  <>
-                                    {parts[0]}
-                                    <strong style={{ color: colors.alert }}>{highlight}</strong>
-                                    {parts[1]}
-                                  </>
-                                ) : (
-                                  note
-                                )}
-                              </p>
-                            );
-                          })}
-                        </div>
                       </div>
                     </div>
 
@@ -748,7 +748,6 @@ function QuoteReceiptCard({
 }
 
 export function QuotesSearch() {
-  const router = useRouter();
   const now = new Date();
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth() + 1);
@@ -774,17 +773,9 @@ export function QuotesSearch() {
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalculateError, setRecalculateError] = useState<string | null>(null);
 
-  // 這些都是「確認訂房」這個階段才收集的資料，報價階段沒有問過
-  const [confirmGuestName, setConfirmGuestName] = useState("");
-  const [confirmBookingSource, setConfirmBookingSource] = useState<BookingSource>("line_official");
-  const [confirmPaymentStatus, setConfirmPaymentStatus] = useState("deposit_paid");
-  const [confirmDepositAmount, setConfirmDepositAmount] = useState("");
-  const [confirmInvoiceTitle, setConfirmInvoiceTitle] = useState("");
-  const [confirmInvoiceTaxId, setConfirmInvoiceTaxId] = useState("");
-  const [extraBedRoomOptions, setExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
-  const [selectedExtraBedRoomIds, setSelectedExtraBedRoomIds] = useState<string[]>([]);
-
-  const [isConfirming, setIsConfirming] = useState(false);
+  // 「轉成訂單」現在是獨立頁面（/quotes/[id]/convert），報價詳情這裡
+  // 不再內嵌確認訂房表單。這幾個 state 只保留給「已經轉過訂單」的
+  // 報價：詳情頁要顯示訂房編號、複製訂單內容、儲存訂單圖片。
   const [confirmedReservationNo, setConfirmedReservationNo] = useState<string | null>(null);
   const [confirmedReservationId, setConfirmedReservationId] = useState<string | null>(null);
   const [confirmedDetail, setConfirmedDetail] = useState<ReservationDetail | null>(null);
@@ -800,40 +791,16 @@ export function QuotesSearch() {
   const [clearResultMessage, setClearResultMessage] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
 
-  // 刪除單一報價單用
+  // 刪除單一報價單用（詳情頁面右上角的「刪除」）
   const [isDeletingQuote, setIsDeletingQuote] = useState(false);
   const [deleteQuoteError, setDeleteQuoteError] = useState<string | null>(null);
-  /** 搜尋結果列表直接刪除用——不用先點進詳細內容。存的是目前正在
-   * 顯示刪除確認的那一列報價單 id，null 代表沒有任何一列在確認中 */
-  const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
+  const [showDetailDeleteConfirm, setShowDetailDeleteConfirm] = useState(false);
 
-  // 搜尋結果列表直接複製內容/轉圖片用——一樣不用先點進詳細內容
-  const [copyingRowId, setCopyingRowId] = useState<string | null>(null);
-  const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
-  const [rowCopyError, setRowCopyError] = useState<string | null>(null);
-  /** 錯誤訊息屬於哪一列，避免一列複製失敗，錯誤卻顯示在其他列下面 */
-  const [rowCopyErrorId, setRowCopyErrorId] = useState<string | null>(null);
-  const [imagingRowId, setImagingRowId] = useState<string | null>(null);
-  const [rowImageError, setRowImageError] = useState<string | null>(null);
-  const [rowImageNote, setRowImageNote] = useState<string | null>(null);
-  const [rowImageMessageId, setRowImageMessageId] = useState<string | null>(null);
-  /** 目前正在轉圖片的那一列的訂單詳情/報價內容——驅動下面單獨的
-   * ConfirmationImageCard 隱藏卡片。跟詳情頁面自己的 confirmedDetail/
-   * selectedQuote 是分開的兩組狀態，故意不共用，避免使用者同時在
-   * 詳情頁面操作、又點列表的轉圖片按鈕時，兩邊的圖片內容互相干擾。 */
-  const [rowImageDetail, setRowImageDetail] = useState<ReservationDetail | null>(null);
-  const [rowImageQuote, setRowImageQuote] = useState<PackageQuote | null>(null);
-  const rowImageCardRef = useRef<HTMLDivElement>(null);
-  // 搜尋結果列表「報價圖片」用（還沒確認訂房的報價，圖片內容是完整
-  // 報價收據，不是訂房確認單）——跟上面的訂房確認單圖片是分開的兩組
-  // 狀態，因為卡片內容/版型完全不同（QuoteReceiptCard vs
-  // ConfirmationImageCard）
-  const [imagingQuoteRowId, setImagingQuoteRowId] = useState<string | null>(null);
-  const [rowQuoteImageError, setRowQuoteImageError] = useState<string | null>(null);
-  const [rowQuoteImageNote, setRowQuoteImageNote] = useState<string | null>(null);
-  const [rowQuoteImageMessageId, setRowQuoteImageMessageId] = useState<string | null>(null);
-  const [rowQuoteImageData, setRowQuoteImageData] = useState<{ quote: PackageQuote; createdAt: string } | null>(null);
-  const rowQuoteImageCardRef = useRef<HTMLDivElement>(null);
+  // 詳情頁面「儲存報價單圖片」用——隱藏的 QuoteReceiptCard 截圖
+  const [quoteImageWorking, setQuoteImageWorking] = useState(false);
+  const [quoteImageError, setQuoteImageError] = useState<string | null>(null);
+  const [quoteImageNote, setQuoteImageNote] = useState<string | null>(null);
+  const quoteImageCardRef = useRef<HTMLDivElement>(null);
 
   // 這個月哪些日期有報價單，換月份時重新查一次，月曆格子要填色標示
   useEffect(() => {
@@ -887,93 +854,22 @@ export function QuotesSearch() {
     }
   }
 
-  /** 搜尋結果列表直接複製內容——不用先點進詳細內容。已確認訂房的
-   * 報價複製真正的訂房確認內容，還沒確認的複製報價內容，邏輯跟
-   * handleSelect() 載入詳細內容時判斷 saved.status 是否為 accepted
-   * 一致。 */
-  /** 準備要複製的文字內容——包成獨立的 async function，回傳
-   * Promise<string>，讓呼叫端可以直接把這個 Promise（不等它）傳給
-   * ClipboardItem，不用先 await 完才呼叫 clipboard 相關 API。 */
-  async function buildCopyTextForRow(row: QuoteSummary): Promise<string> {
-    if (row.status === "accepted") {
-      const reservation = await getReservationForQuoteAction(row.id);
-      if (!reservation) throw new Error("找不到對應的訂房記錄");
-      const result = await buildReservationConfirmationMessageAction(reservation.id);
-      if (!result.success) throw new Error(result.message);
-      return result.text;
-    }
-    const saved = await getSavedQuoteAction(row.id);
-    if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
-      throw new Error("找不到這張報價單的完整內容");
-    }
-    return buildQuoteMessage(saved.quote);
-  }
-
-  async function handleCopyForRow(row: QuoteSummary) {
-    setCopyingRowId(row.id);
-    setRowCopyError(null);
-    setRowCopyErrorId(null);
+  /** 詳情頁面「儲存報價單圖片」——把隱藏的 QuoteReceiptCard 截圖，
+   * 內容來源是 selectedQuote / selectedQuoteCreatedAt。跟已確認訂房的
+   * 「儲存訂單圖片」（handleShareConfirmationImage）是兩種不同版型。 */
+  async function handleSaveQuoteImage() {
+    if (!selectedQuote || !selectedQuote.messageContext || !selectedQuote.roomAllocation) return;
+    setQuoteImageWorking(true);
+    setQuoteImageError(null);
+    setQuoteImageNote(null);
     try {
-      // ⚠️ Safari（尤其 iOS Safari）要求剪貼簿相關 API 必須在使用者
-      // 手勢（點擊）當下立刻同步呼叫，不能先 await 一堆步驟（查訂房
-      // 記錄、組文字內容）才呼叫，中間只要斷過一次 await，Safari 就
-      // 會認定已經離開使用者操作的當下，直接用權限錯誤擋下來
-      // （"The request is not allowed by the user agent..."）。
-      // 解法：不要先把文字準備好、拿到現成的字串才傳給
-      // navigator.clipboard，而是把「還沒完成的 Promise」直接傳給
-      // ClipboardItem——clipboard.write() 這個呼叫本身可以立刻同步
-      // 執行（延續使用者手勢），實際查詢/組字串這些比較慢的非同步
-      // 過程在背景進行，瀏覽器會等 Promise resolve 才真的把內容放
-      // 進剪貼簿。跟 quote-form.tsx 的 captureReceiptBlob 是同一個
-      // 原理。
-      const canCopyToClipboard = typeof navigator.clipboard?.write === "function" && typeof ClipboardItem !== "undefined";
-      if (canCopyToClipboard) {
-        const textPromise = buildCopyTextForRow(row);
-        await navigator.clipboard.write([
-          new ClipboardItem({ "text/plain": textPromise.then((text) => new Blob([text], { type: "text/plain" })) }),
-        ]);
-      } else {
-        // 不支援這個新版 API 的瀏覽器，退回舊式 writeText——這條路徑
-        // 通常是桌機瀏覽器，不受上面那個使用者手勢時效限制，直接
-        // await 沒問題
-        await navigator.clipboard.writeText(await buildCopyTextForRow(row));
-      }
-      setCopiedRowId(row.id);
-      setTimeout(() => setCopiedRowId(null), 2000);
-    } catch (err) {
-      setRowCopyError(err instanceof Error ? err.message : "複製失敗，請稍後再試");
-      setRowCopyErrorId(row.id);
-    } finally {
-      setCopyingRowId(null);
-    }
-  }
-
-  /** 搜尋結果列表直接產生「報價圖片」——給還沒確認訂房的報價用，
-   * 圖片內容是完整報價收據（QuoteReceiptCard），跟已確認訂房的
-   * 「訂房確認單」圖片（handleImageForRow）是兩種不同版型，各自
-   * 對應各自的按鈕。 */
-  async function handleQuoteImageForRow(row: QuoteSummary) {
-    setImagingQuoteRowId(row.id);
-    setRowQuoteImageError(null);
-    setRowQuoteImageNote(null);
-    setRowQuoteImageMessageId(null);
-    try {
-      const saved = await getSavedQuoteAction(row.id);
-      if (!saved || !saved.quote.messageContext || !saved.quote.roomAllocation) {
-        setRowQuoteImageError("找不到這張報價單的完整內容");
-        setRowQuoteImageMessageId(row.id);
-        return;
-      }
-      setRowQuoteImageData({ quote: saved.quote, createdAt: saved.createdAt });
-
-      // 等 React 把上面的 state 實際畫進 DOM，理由跟 handleImageForRow
-      // 的說明一致
+      // 等 React 把 QuoteReceiptCard 畫進 DOM、字型載入完成再截圖
+      // （中文字寬度才會抓對）——兩次 rAF 是可靠的「等畫面更新」寫法
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (typeof document !== "undefined" && document.fonts?.ready) {
         await document.fonts.ready;
       }
-
-      const node = rowQuoteImageCardRef.current;
+      const node = quoteImageCardRef.current;
       if (!node) throw new Error("圖片產生失敗，請再試一次");
       const { toBlob } = await import("html-to-image");
       const blob = await toBlob(node, {
@@ -984,14 +880,15 @@ export function QuotesSearch() {
       });
       if (!blob) throw new Error("圖片產生失敗，請再試一次");
 
-      const file = new File([blob], `${row.propertyName}-報價單.png`, { type: "image/png" });
+      const propertyName = selectedQuote.messageContext.propertyName;
+      const file = new File([blob], `${propertyName}-報價單.png`, { type: "image/png" });
       const canShareFiles =
         typeof navigator.share === "function" &&
         typeof navigator.canShare === "function" &&
         navigator.canShare({ files: [file] });
 
       if (canShareFiles) {
-        await navigator.share({ files: [file], title: `${row.propertyName} 報價單` });
+        await navigator.share({ files: [file], title: `${propertyName} 報價單` });
       } else {
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -999,112 +896,33 @@ export function QuotesSearch() {
         link.download = file.name;
         link.click();
         URL.revokeObjectURL(url);
-        setRowQuoteImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
-        setRowQuoteImageMessageId(row.id);
+        setQuoteImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
       }
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
-      setRowQuoteImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
-      setRowQuoteImageMessageId(row.id);
+      setQuoteImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
     } finally {
-      setImagingQuoteRowId(null);
-      setRowQuoteImageData(null);
+      setQuoteImageWorking(false);
     }
   }
 
-  /** 搜尋結果列表直接轉圖片——只有已確認訂房的報價才有這個按鈕
-   * （理由跟詳情頁面的「轉成圖片」按鈕一致：圖片內容是訂房確認單，
-   * 需要實際收款資料，還沒確認訂房的報價沒有這些資料）。 */
-  async function handleImageForRow(row: QuoteSummary) {
-    setImagingRowId(row.id);
-    setRowImageError(null);
-    setRowImageNote(null);
-    setRowImageMessageId(null);
-    try {
-      const reservation = await getReservationForQuoteAction(row.id);
-      if (!reservation) {
-        setRowImageError("找不到對應的訂房記錄");
-        setRowImageMessageId(row.id);
-        return;
-      }
-      const [detail, saved] = await Promise.all([getReservationDetailAction(reservation.id), getSavedQuoteAction(row.id)]);
-      if (!detail) {
-        setRowImageError("找不到訂單詳情");
-        setRowImageMessageId(row.id);
-        return;
-      }
-      setRowImageDetail(detail);
-      setRowImageQuote(saved?.quote ?? null);
-
-      // 等 React 把上面兩個 state 實際畫進 DOM，隱藏卡片才會顯示這一列
-      // 的內容，不是舊資料——用兩次 requestAnimationFrame 確保瀏覽器
-      // 已經完成一次繪製，這是常見、可靠的「等 state 更新反映到畫面上」
-      // 寫法，比用固定的 setTimeout 延遲更準確。
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      if (typeof document !== "undefined" && document.fonts?.ready) {
-        await document.fonts.ready;
-      }
-
-      const node = rowImageCardRef.current;
-      if (!node) throw new Error("圖片產生失敗，請再試一次");
-      const { toBlob } = await import("html-to-image");
-      const blob = await toBlob(node, {
-        pixelRatio: 2,
-        backgroundColor: colors.canvas,
-        width: node.scrollWidth,
-        height: node.scrollHeight,
-      });
-      if (!blob) throw new Error("圖片產生失敗，請再試一次");
-
-      const file = new File([blob], `${detail.propertyName}-訂房確認單.png`, { type: "image/png" });
-      const canShareFiles =
-        typeof navigator.share === "function" &&
-        typeof navigator.canShare === "function" &&
-        navigator.canShare({ files: [file] });
-
-      if (canShareFiles) {
-        await navigator.share({ files: [file], title: `${detail.propertyName} 訂房確認單` });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = file.name;
-        link.click();
-        URL.revokeObjectURL(url);
-        setRowImageNote("已下載圖片，請自行傳給客人（這個瀏覽器不支援直接分享）");
-        setRowImageMessageId(row.id);
-      }
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") return;
-      setRowImageError(err instanceof Error ? err.message : "圖片產生失敗，請稍後再試");
-      setRowImageMessageId(row.id);
-    } finally {
-      setImagingRowId(null);
-      setRowImageDetail(null);
-      setRowImageQuote(null);
-    }
-  }
-
-  /** 刪除目前選取的這一張報價單，避免類似/重複的報價單越積越多 */
-  async function handleDeleteQuote(quoteId?: string) {
-    const targetId = quoteId ?? selectedId;
-    if (!targetId) return;
+  /** 刪除目前選取的這一張報價單（詳情頁面右上角的「刪除」），避免
+   * 類似/重複的報價單越積越多 */
+  async function handleDeleteQuote() {
+    if (!selectedId) return;
     setIsDeletingQuote(true);
     setDeleteQuoteError(null);
 
     try {
-      const result = await deleteQuoteAction(targetId);
+      const result = await deleteQuoteAction(selectedId);
       if (!result.success) {
         setDeleteQuoteError(result.message);
         return;
       }
-      // 刪除成功，回到搜尋結果列表，重新查一次確保這筆記錄不會再
-      // 顯示出來
-      if (targetId === selectedId) {
-        setSelectedId(null);
-        setSelectedQuote(null);
-      }
-      setDeletingRowId(null);
+      // 刪除成功，回到搜尋結果列表，重新查一次確保這筆記錄不會再顯示
+      setSelectedId(null);
+      setSelectedQuote(null);
+      setShowDetailDeleteConfirm(false);
       if (results) {
         const rows = await searchQuotesAction({
           checkInDate: checkInDate || undefined,
@@ -1176,21 +994,15 @@ export function QuotesSearch() {
     setSelectedQuoteCreatedAt(null);
     setDetailError(null);
     setConfirmedReservationNo(null);
+    setConfirmedDetail(null);
     setCopied(false);
-    setConfirmGuestName("");
-    setConfirmBookingSource("line_official");
-    setConfirmInvoiceTitle("");
-    setConfirmInvoiceTaxId("");
-    setExtraBedRoomOptions([]);
-    setSelectedExtraBedRoomIds([]);
     setDeleteQuoteError(null);
-    // ⚠️ 這三個是「編輯報價內容」表單自己的狀態——如果使用者編輯到
-    // 一半，沒按「取消」或「重新試算並更新」，直接切去看另一筆報價
-    // 單，這幾個 state 沒有跟著重設的話，會帶著上一筆報價單編輯到
-    // 一半的內容（包含還沒存檔的欄位變動），疊在這筆新選到的報價單
-    // 上面顯示出來，變成看到的編輯表單資料是錯的、對不上目前這筆
-    // 報價單。選擇新的報價單時一律強制退出編輯模式、清空編輯表單，
-    // 不管上一筆是不是正在編輯中。
+    setShowDetailDeleteConfirm(false);
+    setQuoteImageError(null);
+    setQuoteImageNote(null);
+    // ⚠️「編輯報價內容」表單自己的狀態——選新的報價單時一律強制退出
+    // 編輯模式、清空編輯表單，不然會帶著上一筆還沒存檔的欄位變動疊在
+    // 這筆新選到的報價單上面顯示，變成編輯表單資料對不上目前這筆。
     setIsEditingQuote(false);
     setEditRequest(null);
     setRecalculateError(null);
@@ -1205,13 +1017,10 @@ export function QuotesSearch() {
       setSelectedQuote(saved.quote);
       setSelectedStatus(saved.status);
       setSelectedQuoteCreatedAt(saved.createdAt);
-      setConfirmPaymentStatus("deposit_paid");
-      setConfirmDepositAmount(String(saved.quote.deposit));
 
       if (saved.status === "accepted") {
         // 已經確認過訂房了，查出實際的訂房編號＋完整訂單詳情顯示給
-        // 使用者看，不用再走一次確認流程——訂單詳情是複製訂房確認
-        // 內容/轉圖片要用的
+        // 使用者看——訂單詳情是複製訂房確認內容/轉圖片要用的
         const reservation = await getReservationForQuoteAction(row.id);
         if (reservation) {
           setConfirmedReservationNo(reservation.reservationNo);
@@ -1219,11 +1028,6 @@ export function QuotesSearch() {
           const detailResult = await getReservationDetailAction(reservation.id);
           if (detailResult) setConfirmedDetail(detailResult);
         }
-      } else if ((saved.request.extraBedTempQty ?? 0) > 0) {
-        // 如果這張報價有加臨時床，先把這間民宿「可以加床」的房號選項
-        // 查出來，確認訂房時要指定放在哪個房號
-        const options = await getExtraBedRoomOptionsAction(saved.request.propertyCode);
-        setExtraBedRoomOptions(options);
       }
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : "讀取報價單失敗，請稍後再試");
@@ -1232,83 +1036,13 @@ export function QuotesSearch() {
     }
   }
 
-  function toggleExtraBedRoom(roomId: string) {
-    setSelectedExtraBedRoomIds((prev) =>
-      prev.includes(roomId) ? prev.filter((id) => id !== roomId) : [...prev, roomId]
-    );
-  }
-
-  async function handleConfirmReservation() {
-    if (!selectedId || !selectedQuote) return;
-
-    if (!confirmGuestName.trim()) {
-      setDetailError("請先填寫客人姓名再確認訂房");
-      return;
-    }
-    const depositAmountNum = Number(confirmDepositAmount);
-    if (confirmPaymentStatus !== "pending_deposit" && (!confirmDepositAmount.trim() || Number.isNaN(depositAmountNum))) {
-      setDetailError("請填寫實際收到的訂金金額");
-      return;
-    }
-    const extraBedTempQty = selectedQuote.request.extraBedTempQty ?? 0;
-    if (extraBedTempQty > 0 && selectedExtraBedRoomIds.length === 0) {
-      setDetailError("這張報價有加臨時床，請先勾選要放在哪個房號");
-      return;
-    }
-
-    setIsConfirming(true);
-    setDetailError(null);
-
-    try {
-      const extraBedTempRoomCodes = selectedExtraBedRoomIds
-        .map((id) => extraBedRoomOptions.find((opt) => opt.id === id)?.code)
-        .filter((code): code is string => Boolean(code));
-
-      const result = await confirmReservationFromQuoteAction(selectedId, {
-        guestName: confirmGuestName.trim(),
-        bookingSource: confirmBookingSource,
-        paymentStatus: confirmPaymentStatus,
-        depositAmount: confirmPaymentStatus === "pending_deposit" ? 0 : depositAmountNum,
-        invoiceTitle: selectedQuote.request.invoice?.required ? confirmInvoiceTitle.trim() : undefined,
-        invoiceTaxId: selectedQuote.request.invoice?.required ? confirmInvoiceTaxId.trim() : undefined,
-        extraBedTempRoomCodes: extraBedTempRoomCodes.length > 0 ? extraBedTempRoomCodes : undefined,
-      });
-      if (!result.success) {
-        setDetailError(result.message);
-        return;
-      }
-      setConfirmedReservationNo(result.reservationNo);
-      setConfirmedReservationId(result.reservationId);
-      setSelectedStatus("accepted");
-      // 順便把完整訂單詳情查出來，複製確認內容/轉圖片要用到（訂金
-      // 收款日期、地址等資料在 PackageQuote 裡沒有，要另外查）
-      const detailResult = await getReservationDetailAction(result.reservationId);
-      if (detailResult) setConfirmedDetail(detailResult);
-      // 確認訂房後直接導去訂單管理的月曆，並且帶著這筆訂房入住日期
-      // 所在的年/月——不然要另外切到訂單管理、還要自己手動找月份
-      // 才看得到剛確認的這筆。要再複製確認內容/轉圖片的話，訂單
-      // 管理本身的訂單詳情頁面也有同樣的按鈕，從那邊點進這筆訂單
-      // 一樣找得到，不會因為導頁而少了這個功能。
-      if (detailResult) {
-        const [checkInYear, checkInMonth] = detailResult.checkIn.split("-");
-        router.push(`/reservations?year=${checkInYear}&month=${Number(checkInMonth)}`);
-      }
-    } catch (err) {
-      setDetailError(err instanceof Error ? err.message : "確認訂房失敗，請稍後再試");
-    } finally {
-      setIsConfirming(false);
-    }
-  }
-
-  /** 開始編輯報價內容——用目前已存的報價當初的輸入條件當表單初始值 */
+  /** 「編輯報價內容」按鈕用——用目前 state 中的 selectedQuote 當表單
+   * 初始值。房型數量帶「目前實際的房型配置」（selectedQuote.roomAllocation），
+   * 不是只帶 request.roomOverride——大多數報價都是系統自動分配、從來
+   * 沒填過 roomOverride，只帶那個的話編輯表單一打開房型數量會全部
+   * 變成 0，跟這張報價單實際用到的房型對不起來。 */
   function startEditQuote() {
     if (!selectedQuote) return;
-    // 房型數量要帶「目前實際的房型配置」（selectedQuote.roomAllocation，
-    // 不管當初是系統依人數自動分配、還是報價時手動指定），不能只帶
-    // request.roomOverride——大多數報價都是系統自動分配、從來沒填過
-    // roomOverride，那個欄位平常就是 undefined，如果只帶這個，編輯
-    // 表單一打開房型數量全部都會變成 0，跟這張報價單實際用到的房型
-    // 完全對不起來。
     const allocation = selectedQuote.roomAllocation;
     setEditRequest({
       ...selectedQuote.request,
@@ -1419,7 +1153,6 @@ export function QuotesSearch() {
         return;
       }
       setSelectedQuote(newQuote);
-      setConfirmDepositAmount(String(newQuote.deposit));
       setIsEditingQuote(false);
       setEditRequest(null);
     } catch (err) {
@@ -1648,9 +1381,15 @@ export function QuotesSearch() {
         {results && results.length > 0 && !selectedId && (
           <div className="mt-6 flex flex-col gap-3">
             {results.map((row) => (
-              <div key={row.id} className="border text-xs" style={{ borderColor: colors.line, color: colors.ink }}>
-                <button type="button" onClick={() => handleSelect(row)} className="w-full p-3 text-left">
-                  <div className="flex items-baseline justify-between">
+              <button
+                key={row.id}
+                type="button"
+                onClick={() => handleSelect(row)}
+                className="w-full border p-3 text-left text-xs"
+                style={{ borderColor: colors.line, color: colors.ink }}
+              >
+                <>
+                  <div className="flex flex-wrap items-baseline gap-x-2">
                     <span className="font-semibold">{row.propertyName}</span>
                     <span style={{ color: colors.muted }}>{STATUS_LABEL[row.status] ?? row.status}</span>
                   </div>
@@ -1710,152 +1449,9 @@ export function QuotesSearch() {
                       <span className="text-base font-semibold">NT$ {row.totalAmount.toLocaleString()}</span>
                     </div>
                   )}
-                </button>
-
-                {/* 直接在列表這裡就能複製內容/轉圖片/刪除，不用先點進
-                    詳細內容——複製/轉圖片跟刪除一樣，用回傳值表達失敗，
-                    不用 throw（見 deleteQuoteAction 的說明） */}
-                <div className="flex gap-3 border-t px-3 py-2" style={{ borderColor: colors.line }}>
-                  <button
-                    type="button"
-                    onClick={() => handleCopyForRow(row)}
-                    disabled={copyingRowId === row.id}
-                    className="text-[11px] disabled:opacity-50"
-                    style={{ color: colors.blue }}
-                  >
-                    {copyingRowId === row.id
-                      ? "複製中…"
-                      : copiedRowId === row.id
-                        ? "已複製 ✓"
-                        : row.status === "accepted"
-                          ? "📋 複製訂單內容"
-                          : "📋 複製報價單內容"}
-                  </button>
-                  {row.status === "accepted" ? (
-                    <button
-                      type="button"
-                      onClick={() => handleImageForRow(row)}
-                      disabled={imagingRowId === row.id}
-                      className="text-[11px] disabled:opacity-50"
-                      style={{ color: colors.blue }}
-                    >
-                      {imagingRowId === row.id ? "圖片產生中…" : "🖼️ 儲存訂單圖片"}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleQuoteImageForRow(row)}
-                      disabled={imagingQuoteRowId === row.id}
-                      className="text-[11px] disabled:opacity-50"
-                      style={{ color: colors.blue }}
-                    >
-                      {imagingQuoteRowId === row.id ? "圖片產生中…" : "🖼️ 儲存報價單圖片"}
-                    </button>
-                  )}
-                </div>
-                {rowCopyError && rowCopyErrorId === row.id && (
-                  <p role="alert" className="px-3 pb-2 text-[11px]" style={{ color: colors.alert }}>
-                    {rowCopyError}
-                  </p>
-                )}
-                {(rowImageError || rowImageNote) && rowImageMessageId === row.id && (
-                  <p className="px-3 pb-2 text-[11px]" style={{ color: rowImageError ? colors.alert : colors.pine }}>
-                    {rowImageError || rowImageNote}
-                  </p>
-                )}
-                {(rowQuoteImageError || rowQuoteImageNote) && rowQuoteImageMessageId === row.id && (
-                  <p className="px-3 pb-2 text-[11px]" style={{ color: rowQuoteImageError ? colors.alert : colors.pine }}>
-                    {rowQuoteImageError || rowQuoteImageNote}
-                  </p>
-                )}
-
-                <div className="border-t px-3 py-2" style={{ borderColor: colors.line }}>
-                  {deletingRowId === row.id ? (
-                    <div>
-                      <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
-                        確定要刪除這張報價單嗎？無法復原。
-                        {row.status === "accepted" && (
-                          <>
-                            <br />
-                            這張報價已經確認轉為正式訂單——刪除報價單本身不會影響訂單，訂單記錄會繼續保留，只是之後沒辦法再從這裡查回當初的報價內容。
-                          </>
-                        )}
-                      </p>
-                      {deleteQuoteError && (
-                        <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
-                          {deleteQuoteError}
-                        </p>
-                      )}
-                      <div className="mt-2 flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDeletingRowId(null);
-                            setDeleteQuoteError(null);
-                          }}
-                          disabled={isDeletingQuote}
-                          className="border px-3 py-1 text-[11px] disabled:opacity-50"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          取消
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteQuote(row.id)}
-                          disabled={isDeletingQuote}
-                          className="px-3 py-1 text-[11px] disabled:opacity-50"
-                          style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
-                        >
-                          {isDeletingQuote ? "刪除中…" : "確定刪除"}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDeletingRowId(row.id);
-                        setDeleteQuoteError(null);
-                      }}
-                      className="text-[11px]"
-                      style={{ color: colors.alert }}
-                    >
-                      刪除這張報價單
-                    </button>
-                  )}
-                </div>
-              </div>
+                </>
+              </button>
             ))}
-          </div>
-        )}
-
-        {/* 隱藏的訂房確認單卡片，給搜尋結果列表的「圖片」按鈕用——
-            只有 rowImageDetail 有值（正在處理某一列的轉圖片）時才會
-            實際渲染內容，平常是空的。跟詳情頁面自己的
-            ConfirmationImageCard（用 confirmedDetail/confirmationCardRef）
-            是兩個獨立的實例，互不干擾。 */}
-        {rowImageDetail && (
-          <ConfirmationImageCard detail={rowImageDetail} quote={rowImageQuote} cardRef={rowImageCardRef} />
-        )}
-
-        {/* 隱藏的報價收據卡片，給搜尋結果列表的「報價圖片」按鈕用——
-            QuoteReceiptCard 本身沒有內建隱藏定位（它是從畫面上原本
-            就會顯示的「完整報價內容」抽出來的元件，那個用法本來就是
-            要讓使用者看到），這裡額外包一層跟 ConfirmationImageCard
-            一樣的隱藏定位處理，避免 iOS Safari 對 position:fixed 的
-            已知問題（見上面 quote-form.tsx 同款截圖卡片的說明）。 */}
-        {rowQuoteImageData && (
-          <div style={{ height: 0, overflow: "hidden" }}>
-            <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
-              <div className={body.className} style={{ width: "480px", backgroundColor: colors.canvas }}>
-                <QuoteReceiptCard
-                  quote={rowQuoteImageData.quote}
-                  createdAt={rowQuoteImageData.createdAt}
-                  isConfirmed={false}
-                  cardRef={rowQuoteImageCardRef}
-                />
-              </div>
-            </div>
           </div>
         )}
 
@@ -1887,82 +1483,113 @@ export function QuotesSearch() {
 
             {selectedQuote && selectedQuote.messageContext && selectedQuote.roomAllocation && (
               <>
-                {/* 精簡摘要卡片：只用來核對是不是這一筆，不是完整報價內容 */}
-                <div className="mt-4 border p-4 text-xs" style={{ borderColor: colors.line, color: colors.ink }}>
-                  <div className="flex items-baseline justify-between">
-                    <span className={`${display.className} text-xl italic`}>
-                      {selectedQuote.messageContext.propertyName}
-                    </span>
-                    <span style={{ color: colors.muted }}>
-                      {STATUS_LABEL[selectedStatus ?? ""] ?? selectedStatus}
-                    </span>
-                  </div>
-                  <p className="mt-2" style={{ color: colors.muted }}>
-                    {formatDateWithWeekday(selectedQuote.request.checkIn)} ～{" "}
-                    {formatDateWithWeekday(selectedQuote.request.checkOut)}（{daysNightsLabel(selectedQuote.nights)}）
-                  </p>
-                  <p className="mt-1">{guestSummary(selectedQuote)}</p>
-                  {(() => {
-                    const roomItems = roomAllocationSummaryItems(selectedQuote.roomAllocation);
-                    // 降規四人套房後面帶的「(提供1床，以雙人套房計費)」
-                    // 說明文字拆到下一行——跟搜尋結果列表同一套處理，
-                    // 避免這行文字太長跟旁邊金額擠在一起
-                    const splitSuffix = (text: string): { main: string; suffix: string | null } => {
-                      const idx = text.indexOf(" (");
-                      if (idx === -1) return { main: text, suffix: null };
-                      return { main: text.slice(0, idx), suffix: text.slice(idx + 1) };
-                    };
-                    return (
-                      <div className="mt-1 flex flex-col gap-0.5" style={{ color: colors.muted }}>
-                        {roomItems.map((item, i) => {
-                          const { main, suffix } = splitSuffix(item.text);
-                          if (i === roomItems.length - 1) {
-                            return (
-                              <div key={i} className="flex flex-col">
-                                <div className="flex items-baseline justify-between">
-                                  <span>{main}</span>
-                                  <span
-                                    className={`${display.className} text-2xl italic`}
-                                    style={{ color: colors.pine }}
-                                  >
-                                    NT$ {selectedQuote.packageTotal.toLocaleString()}
-                                  </span>
-                                </div>
-                                {suffix && <p className="text-[11px]">{suffix}</p>}
-                              </div>
-                            );
-                          }
-                          return (
-                            <div key={i}>
-                              <p>{main}</p>
-                              {suffix && <p className="text-[11px]">{suffix}</p>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
+                {/* 報價內容——用同一張報價收據卡片（QuoteReceiptCard），
+                    傳 preview：標題收成一行小字、內距收緊、不顯示「匯款
+                    帳號」「預訂須知」（那幾段是給客人看的，職員核對報價
+                    時不需要）。存成圖片傳給客人的那份不傳 preview，維持
+                    完整版面。所有針對這張報價的操作（編輯／刪除／複製／
+                    儲存圖片／轉為訂房記錄）都只在詳情這一個地方，列表列
+                    本身只是點擊入口。 */}
+                <p className="mt-3 text-[11px]" style={{ color: colors.muted }}>
+                  狀態：{STATUS_LABEL[selectedStatus ?? ""] ?? selectedStatus}
+                </p>
+                <div className="mx-auto mt-1 w-full" style={{ maxWidth: "480px" }}>
+                  <QuoteReceiptCard
+                    quote={selectedQuote}
+                    createdAt={selectedQuoteCreatedAt}
+                    isConfirmed={isConfirmed}
+                    preview
+                  />
                 </div>
 
                 {!isConfirmed && !isEditingQuote && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={startEditQuote}
-                      className="mt-2 text-xs"
-                      style={{ color: colors.blue }}
-                    >
-                      編輯報價內容（例如入住人數有變動）
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      className="mt-3 w-full py-2.5 text-xs tracking-wide transition-opacity"
-                      style={{ backgroundColor: colors.pine, color: colors.pineText }}
-                    >
-                      {copied ? "已複製 ✓" : "複製報價內容"}
-                    </button>
-                  </>
+                  <div className="mt-3 flex flex-col gap-2">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <button type="button" onClick={startEditQuote} className="text-xs" style={{ color: colors.blue }}>
+                        編輯報價內容（例如入住人數有變動）
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowDetailDeleteConfirm(true);
+                          setDeleteQuoteError(null);
+                        }}
+                        className="text-xs"
+                        style={{ color: colors.alert }}
+                      >
+                        刪除
+                      </button>
+                    </div>
+
+                    {showDetailDeleteConfirm && (
+                      <div className="border-l-2 pl-3" style={{ borderColor: colors.alert }}>
+                        <p className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                          確定要刪除這張報價單嗎？無法復原。
+                          {selectedStatus === "accepted" && (
+                            <>
+                              <br />
+                              這張報價已經確認轉為正式訂單——刪除報價單本身不會影響訂單，訂單記錄會繼續保留，只是之後沒辦法再從這裡查回當初的報價內容。
+                            </>
+                          )}
+                        </p>
+                        {deleteQuoteError && (
+                          <p role="alert" className="mt-1 text-[11px]" style={{ color: colors.alert }}>
+                            {deleteQuoteError}
+                          </p>
+                        )}
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowDetailDeleteConfirm(false)}
+                            disabled={isDeletingQuote}
+                            className="border px-3 py-1 text-[11px] disabled:opacity-50"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleDeleteQuote}
+                            disabled={isDeletingQuote}
+                            className="px-3 py-1 text-[11px] disabled:opacity-50"
+                            style={{ backgroundColor: colors.alert, color: "#FFFFFF" }}
+                          >
+                            {isDeletingQuote ? "刪除中…" : "確定刪除"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCopy}
+                        className="flex-1 py-2.5 text-xs tracking-wide transition-opacity"
+                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                      >
+                        {copied ? "已複製 ✓" : "📋 複製報價內容"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveQuoteImage}
+                        disabled={quoteImageWorking}
+                        className="flex-1 py-2.5 text-xs tracking-wide transition-opacity disabled:opacity-50"
+                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                      >
+                        {quoteImageWorking ? "圖片產生中…" : "🖼️ 儲存報價單圖片"}
+                      </button>
+                    </div>
+                    {quoteImageError && (
+                      <p className="text-[11px]" style={{ color: colors.alert }}>
+                        {quoteImageError}
+                      </p>
+                    )}
+                    {quoteImageNote && (
+                      <p className="text-[11px]" style={{ color: colors.pine }}>
+                        {quoteImageNote}
+                      </p>
+                    )}
+                  </div>
                 )}
 
                 {!isConfirmed && isEditingQuote && editRequest && (
@@ -2077,58 +1704,26 @@ export function QuotesSearch() {
                         額外服務
                       </p>
                       <div className="grid grid-cols-2 gap-3">
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            加固定床
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.extraBedFixedQty ?? 0}
-                            onChange={(e) => updateEditRequestField("extraBedFixedQty", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            加臨時床
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.extraBedTempQty ?? 0}
-                            onChange={(e) => updateEditRequestField("extraBedTempQty", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            加開房間
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.extraRoomQty ?? 0}
-                            onChange={(e) => updateEditRequestField("extraRoomQty", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px]">
-                            訪客人數
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={editRequest.visitorQty ?? 0}
-                            onChange={(e) => updateEditRequestField("visitorQty", Number(e.target.value))}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          />
-                        </label>
+                        <NumberField
+                          label="加固定床"
+                          value={editRequest.extraBedFixedQty ?? 0}
+                          onChange={(v) => updateEditRequestField("extraBedFixedQty", v)}
+                        />
+                        <NumberField
+                          label="加臨時床"
+                          value={editRequest.extraBedTempQty ?? 0}
+                          onChange={(v) => updateEditRequestField("extraBedTempQty", v)}
+                        />
+                        <NumberField
+                          label="加開房間"
+                          value={editRequest.extraRoomQty ?? 0}
+                          onChange={(v) => updateEditRequestField("extraRoomQty", v)}
+                        />
+                        <NumberField
+                          label="訪客人數"
+                          value={editRequest.visitorQty ?? 0}
+                          onChange={(v) => updateEditRequestField("visitorQty", v)}
+                        />
                       </div>
                       <div className="mt-2 flex flex-wrap gap-4">
                         <label className="flex items-center gap-2">
@@ -2164,19 +1759,11 @@ export function QuotesSearch() {
                       </div>
                     </div>
 
-                    <label className="flex flex-col gap-1">
-                      <span style={{ color: colors.muted }} className="text-[11px]">
-                        優惠折扣（金額，直接從總費用扣除）
-                      </span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={editRequest.discountAmount ?? 0}
-                        onChange={(e) => updateEditRequestField("discountAmount", Number(e.target.value))}
-                        className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                        style={{ borderColor: colors.line, color: colors.ink }}
-                      />
-                    </label>
+                    <NumberField
+                      label="優惠折扣（金額，直接從總費用扣除）"
+                      value={editRequest.discountAmount ?? 0}
+                      onChange={(v) => updateEditRequestField("discountAmount", v)}
+                    />
 
                     {/* 編輯時先看目前這張報價單的訂金/包棟總費用當
                         參考——這是還沒按「重新試算並更新」之前的
@@ -2232,167 +1819,26 @@ export function QuotesSearch() {
                   </div>
                 )}
 
-                {isConfirmed ? (
-                  confirmedReservationNo && (
-                    <p
-                      className="mt-4 border-l-2 pl-3 text-xs leading-relaxed"
-                      style={{ borderColor: colors.pine, color: colors.pine }}
-                    >
-                      ✓ 已確認訂房，訂房編號：{confirmedReservationNo}
-                    </p>
-                  )
-                ) : (
-                  <>
-                    {/* 確認訂房前才收集的資料：姓名/訂房來源/付款狀況/發票/
-                        加臨時床房號，直接接在摘要卡片下面，不用先滑過
-                        一整份完整報價內容才看得到。電話欄位拿掉了——
-                        實務上都是用 LINE 官方帳號聯絡客人，不特別留
-                        電話號碼。 */}
-                    <div className="mt-5 flex flex-col gap-4">
-                      <p className="text-xs font-bold" style={{ color: colors.blue }}>
-                        客人確認訂房後填寫
-                      </p>
+                {isConfirmed && confirmedReservationNo && (
+                  <p
+                    className="mt-4 border-l-2 pl-3 text-xs leading-relaxed"
+                    style={{ borderColor: colors.pine, color: colors.pine }}
+                  >
+                    ✓ 已確認訂房，訂房編號：{confirmedReservationNo}
+                  </p>
+                )}
 
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                          客人姓名
-                        </span>
-                        <input
-                          type="text"
-                          value={confirmGuestName}
-                          onChange={(e) => setConfirmGuestName(e.target.value)}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        />
-                      </label>
-
-                      <label className="flex flex-col gap-1">
-                        <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                          客戶來源
-                        </span>
-                        <select
-                          value={confirmBookingSource}
-                          onChange={(e) => setConfirmBookingSource(e.target.value as BookingSource)}
-                          className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                          style={{ borderColor: colors.line, color: colors.ink }}
-                        >
-                          {BOOKING_SOURCE_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <label className="flex flex-col gap-1">
-                          <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                            付款狀況
-                          </span>
-                          <select
-                            value={confirmPaymentStatus}
-                            onChange={(e) => setConfirmPaymentStatus(e.target.value)}
-                            className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                            style={{ borderColor: colors.line, color: colors.ink }}
-                          >
-                            {Object.entries(CONFIRM_PAYMENT_STATUS_LABEL).map(([value, label]) => (
-                              <option key={value} value={value}>
-                                {label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        {confirmPaymentStatus !== "pending_deposit" && (
-                          <label className="flex flex-col gap-1">
-                            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                              實收訂金金額
-                            </span>
-                            <input
-                              type="number"
-                              min={0}
-                              value={confirmDepositAmount}
-                              onChange={(e) => setConfirmDepositAmount(e.target.value)}
-                              className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                              style={{ borderColor: colors.line, color: colors.ink }}
-                            />
-                          </label>
-                        )}
-                      </div>
-
-                      {selectedQuote.request.invoice?.required && (
-                        <div className="grid grid-cols-2 gap-4">
-                          <label className="flex flex-col gap-1">
-                            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                              發票抬頭
-                            </span>
-                            <input
-                              type="text"
-                              value={confirmInvoiceTitle}
-                              onChange={(e) => setConfirmInvoiceTitle(e.target.value)}
-                              className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                              style={{ borderColor: colors.line, color: colors.ink }}
-                            />
-                          </label>
-                          <label className="flex flex-col gap-1">
-                            <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                              統一編號
-                            </span>
-                            <input
-                              type="text"
-                              value={confirmInvoiceTaxId}
-                              onChange={(e) => setConfirmInvoiceTaxId(e.target.value)}
-                              className="w-full border-b bg-transparent py-1 text-sm outline-none"
-                              style={{ borderColor: colors.line, color: colors.ink }}
-                            />
-                          </label>
-                        </div>
-                      )}
-
-                      {(selectedQuote.request.extraBedTempQty ?? 0) > 0 && (
-                        <div>
-                          <p style={{ color: colors.muted }} className="text-[11px] tracking-wide">
-                            加臨時床房號（請勾選 {selectedQuote.request.extraBedTempQty} 間）
-                          </p>
-                          {extraBedRoomOptions.length === 0 ? (
-                            <p className="mt-1 text-[11px]" style={{ color: colors.alert }}>
-                              這間民宿沒有設定可加床的房號，請直接跟房務確認
-                            </p>
-                          ) : (
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              {extraBedRoomOptions.map((room) => {
-                                const active = selectedExtraBedRoomIds.includes(room.id);
-                                return (
-                                  <button
-                                    key={room.id}
-                                    type="button"
-                                    onClick={() => toggleExtraBedRoom(room.id)}
-                                    className="rounded-full border px-3 py-1.5 text-xs transition-colors"
-                                    style={
-                                      active
-                                        ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
-                                        : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                                    }
-                                  >
-                                    {room.code}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <button
-                        type="button"
-                        onClick={handleConfirmReservation}
-                        disabled={isConfirming}
-                        className="w-full py-2.5 text-xs tracking-wide transition-opacity disabled:opacity-50"
-                        style={{ backgroundColor: colors.pine, color: colors.pineText }}
-                      >
-                        {isConfirming ? "確認中…" : "確認轉為訂房記錄"}
-                      </button>
-                    </div>
-                  </>
+                {/* 「轉成訂單」是獨立頁面——確認訂房要填的資料（姓名／
+                    來源／付款狀況／發票／加臨時床房號）都在那一頁收集，
+                    這裡只留一個明顯的入口連結。 */}
+                {!isConfirmed && !isEditingQuote && (
+                  <Link
+                    href={`/quotes/${selectedId}/convert`}
+                    className="mt-5 block w-full py-2.5 text-center text-xs tracking-wide transition-opacity"
+                    style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                  >
+                    轉為訂房記錄 →
+                  </Link>
                 )}
 
                 {/* 已確認訂房才會有這兩個按鈕：複製真正的訂房確認內容、
@@ -2444,6 +1890,26 @@ export function QuotesSearch() {
                         使用者也看不到，同時避開 fixed 定位在 iOS 上的
                         已知問題。 */}
                     <ConfirmationImageCard detail={confirmedDetail} quote={selectedQuote} cardRef={confirmationCardRef} />
+                  </div>
+                )}
+
+                {/* 隱藏的報價收據卡片——詳情頁「儲存報價單圖片」按鈕
+                    截圖用（只有還沒轉單、非編輯狀態才需要）。包一層高度
+                    0 / overflow hidden + position:absolute（不用 fixed，
+                    iOS Safari 對螢幕外 fixed 元素有已知渲染問題），量測
+                    尺寸準確、又不影響畫面。 */}
+                {!isConfirmed && !isEditingQuote && (
+                  <div style={{ height: 0, overflow: "hidden" }}>
+                    <div style={{ position: "absolute", left: "-9999px", top: 0 }}>
+                      <div className={body.className} style={{ width: "480px", backgroundColor: colors.canvas }}>
+                        <QuoteReceiptCard
+                          quote={selectedQuote}
+                          createdAt={selectedQuoteCreatedAt}
+                          isConfirmed={false}
+                          cardRef={quoteImageCardRef}
+                        />
+                      </div>
+                    </div>
                   </div>
                 )}
               </>

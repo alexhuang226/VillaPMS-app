@@ -213,10 +213,24 @@ export async function saveNewQuoteSnapshot(
   }
 }
 
-export async function calculateAndSaveQuoteAction(request: StayRequest): Promise<SaveQuoteResult> {
-  const quote = await calculateQuoteAction(request);
+/**
+ * @param allowBelowMinimumGuests 報價試算的進階選項「跳過基本人數確認」
+ *   勾選時傳 true——這時人數不足包棟基本人數不再擋下報價/存檔，
+ *   minimumGuestsWarning 只會當提醒字串回傳，金額照實際人數正常算。
+ *   床位數不夠(capacityWarning)、房型設定超出實際房間數(roomConfigWarning)
+ *   這兩個檢查不受影響，一律照擋。
+ */
+export async function calculateAndSaveQuoteAction(
+  request: StayRequest,
+  allowBelowMinimumGuests = false
+): Promise<SaveQuoteResult> {
+  const quote = await calculateQuoteAction(request, allowBelowMinimumGuests);
 
-  if (quote.minimumGuestsWarning || quote.roomConfigWarning || quote.capacityWarning) {
+  const blocked =
+    quote.roomConfigWarning ||
+    quote.capacityWarning ||
+    (!allowBelowMinimumGuests && quote.minimumGuestsWarning);
+  if (blocked) {
     return { quote, quoteId: null, quoteNo: null };
   }
 
@@ -463,7 +477,11 @@ export async function confirmReservationFromQuoteAction(
   const request = saved.request as unknown as StayRequest;
   const { propertyId } = saved;
 
-  if (quote.minimumGuestsWarning || quote.roomConfigWarning || quote.capacityWarning) {
+  // 只擋「金額真的沒算出來」的報價：床位不夠、房型設定超出實際房間數，
+  // 以及被強制歸零、roomAllocation 為 null 的情況。minimumGuestsWarning
+  // 單獨存在（人數不足但報價時勾了「跳過基本人數確認」，或在報價記錄
+  // 查詢裡編輯時放行）時，金額是照實際人數正常算出來的，可以確認訂房。
+  if (quote.roomConfigWarning || quote.capacityWarning || !quote.roomAllocation || quote.packageTotal <= 0) {
     return { success: false, message: "這張報價單當初就沒有算出有效金額，無法確認訂房，請重新報價" };
   }
 

@@ -145,6 +145,10 @@ interface FormState {
   foodTruck: boolean;
   earlyCheckin: boolean;
   needsInvoice: boolean;
+  /** 進階選項「跳過基本人數確認」——入住人數低於包棟基本人數時，
+   * 一般不允許出價，勾選後改用實際人數正常計算金額、照樣產生報價
+   * （床位數、房型設定的檢查不受影響）。 */
+  skipMinimumGuests: boolean;
   useRoomOverride: boolean;
   overrideFourPersonSuiteCount: number;
   overrideFourPersonDowngradeCount: number;
@@ -172,6 +176,7 @@ const initialState: FormState = {
   foodTruck: false,
   earlyCheckin: false,
   needsInvoice: false,
+  skipMinimumGuests: false,
   useRoomOverride: false,
   overrideFourPersonSuiteCount: 0,
   overrideFourPersonDowngradeCount: 0,
@@ -440,6 +445,9 @@ export function QuoteForm() {
     doublePlainCount: number;
   } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  /** 非阻擋式提醒：勾了「跳過基本人數確認」、且人數確實低於基本人數
+   * 時，報價照樣顯示，只在上方提醒一下 */
+  const [belowMinNote, setBelowMinNote] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [imageWorking, setImageWorking] = useState(false);
@@ -552,6 +560,7 @@ export function QuoteForm() {
     e.preventDefault();
     setIsLoading(true);
     setWarning(null);
+    setBelowMinNote(null);
     setQuote(null);
     setCopied(false);
     setImageNote(null);
@@ -560,9 +569,14 @@ export function QuoteForm() {
     try {
       // 這裡不收客人姓名/電話——報價階段還不確定客人一定會訂，姓名/
       // 電話等到 /quotes 那邊「確認訂房」時才收集並補回這筆快照。
-      const { quote: result, quoteNo } = await calculateAndSaveQuoteAction(buildStayRequest(form));
+      const allowBelowMinimumGuests = form.skipMinimumGuests;
+      const { quote: result, quoteNo } = await calculateAndSaveQuoteAction(
+        buildStayRequest(form),
+        allowBelowMinimumGuests
+      );
 
-      if (result.minimumGuestsWarning) {
+      // 沒勾「跳過基本人數確認」時，人數不足照舊擋下報價
+      if (!allowBelowMinimumGuests && result.minimumGuestsWarning) {
         setWarning(result.minimumGuestsWarning);
         return;
       }
@@ -575,6 +589,10 @@ export function QuoteForm() {
         return;
       }
       setQuote(result);
+      // 勾了跳過、且人數確實低於基本人數：報價照樣顯示，只提醒一下
+      if (allowBelowMinimumGuests && result.minimumGuestsWarning) {
+        setBelowMinNote(`${result.minimumGuestsWarning}（已依「跳過基本人數確認」照實際人數計算）`);
+      }
       if (quoteNo) {
         setSavedQuoteNo(quoteNo);
       } else {
@@ -903,7 +921,7 @@ export function QuoteForm() {
               className="cursor-pointer list-none text-xs font-bold tracking-wide"
             >
               <span className="inline-flex items-center gap-1">
-                進階選項 — 訪客・加床加房・折扣・發票・房型調整
+                進階選項 — 訪客・加床加房・折扣・發票・基本人數・房型調整
                 <span className="transition-transform group-open:rotate-180">⌄</span>
               </span>
             </summary>
@@ -951,6 +969,26 @@ export function QuoteForm() {
                   <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
                     發票抬頭跟統一編號等客人確認訂房時再填寫，這裡先確認
                     「要不要開發票」就好（會影響 8% 稅金是否計入報價）。
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 text-xs" style={{ color: colors.ink }}>
+                  <input
+                    type="checkbox"
+                    checked={form.skipMinimumGuests}
+                    onChange={(e) => update("skipMinimumGuests", e.target.checked)}
+                    className="h-3.5 w-3.5"
+                    style={{ accentColor: colors.pine }}
+                  />
+                  跳過基本人數確認
+                </label>
+                {form.skipMinimumGuests && (
+                  <p className="mt-1 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                    入住人數低於包棟基本人數時一般不允許出價。勾選後改用實際
+                    人數正常計算金額、照樣產生報價；床位數、房型設定的檢查
+                    不受影響。
                   </p>
                 )}
               </div>
@@ -1027,6 +1065,12 @@ export function QuoteForm() {
             style={{ borderColor: colors.alert, color: colors.alert }}
           >
             {warning}
+          </p>
+        )}
+
+        {belowMinNote && !warning && (
+          <p className="mt-6 border-l-2 pl-3 text-xs leading-relaxed" style={{ borderColor: colors.alert, color: colors.ink }}>
+            ⚠️ {belowMinNote}
           </p>
         )}
 
