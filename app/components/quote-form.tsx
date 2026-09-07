@@ -1255,18 +1255,10 @@ export function QuoteForm() {
                 </div>
 
                 {/* 總金額：淡綠色底色的區塊，是整張收據視覺上的焦點。
-                    標籤/金額改成同一列（原本是標籤一行、大字金額另外
-                    一行），省一點垂直空間 */}
+                    訂金／尾款放在「包棟總費用」上方（先看到分期金額、
+                    再看到總額），標籤/金額同一列省垂直空間 */}
                 <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
                   <div className="flex items-baseline justify-between">
-                    <span className="text-sm tracking-wide" style={{ color: colors.muted }}>
-                      包棟總費用
-                    </span>
-                    <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
-                      NT$ {quote.packageTotal.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
                     <span style={{ color: colors.muted }} className="text-sm tracking-wide">
                       訂金
                     </span>
@@ -1280,6 +1272,14 @@ export function QuoteForm() {
                     </span>
                     <span style={{ color: colors.ink }} className="text-sm font-semibold">
                       NT$ {quote.balanceDue.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                    <span className="text-sm tracking-wide" style={{ color: colors.muted }}>
+                      包棟總費用
+                    </span>
+                    <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
+                      NT$ {quote.packageTotal.toLocaleString()}
                     </span>
                   </div>
                 </div>

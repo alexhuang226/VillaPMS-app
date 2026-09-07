@@ -85,7 +85,7 @@ function compactGuestSummary(detail: ReservationDetail): string {
  * 不一致——如果之後想統一成同一種格式，要跟兩邊格式的原始需求
  * 重新確認一次要用哪一種。
  */
-function confirmationRoomAllocationLines(allocation: ReservationDetail["roomAllocation"]): string[] {
+export function confirmationRoomAllocationLines(allocation: ReservationDetail["roomAllocation"]): string[] {
   const lines: string[] = [];
   if (allocation.doubleSuiteCount > 0) lines.push(`${allocation.doubleSuiteCount} 間雙人套房`);
   if (allocation.doublePlainCount > 0) lines.push(`${allocation.doublePlainCount} 間雙人雅房`);
@@ -122,6 +122,7 @@ export function buildReservationConfirmationMessage(detail: ReservationDetail): 
   lines.push(` 【${detail.propertyName}訂房確認單】`);
   lines.push(SEPARATOR);
   lines.push(" 預訂資訊");
+  if (detail.guestName) lines.push(`• 客人姓名：${detail.guestName}`);
   lines.push(`• 入住日期：${formatDateWithWeekday(detail.checkIn)}`);
   lines.push(`• 退房日期：${formatDateWithWeekday(detail.checkOut)}`);
   lines.push(`• 預訂天數：${daysNightsLabel(nights)}`);

@@ -170,10 +170,24 @@ function NumberField({
         value={raw}
         onChange={handleChange}
         onBlur={handleBlur}
-        className="w-full border-b bg-transparent py-1 text-sm outline-none"
+        className="w-full border-b bg-transparent py-1 text-center text-sm outline-none"
         style={{ borderColor: colors.line, color: colors.ink }}
       />
     </label>
+  );
+}
+
+/** 新增訂單表單的區塊標題——比照報價試算（quote-form.tsx 的
+ * SectionMark）／訂單編輯表單的樣式：淺色小標＋一條往右延伸的
+ * 分隔線。 */
+function CreateSectionHeading({ title }: { title: string }) {
+  return (
+    <div className="mb-3 flex items-baseline gap-2">
+      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+        {title}
+      </span>
+      <span className="h-px flex-1" style={{ backgroundColor: colors.line }} />
+    </div>
   );
 }
 
@@ -440,16 +454,27 @@ export function ReservationCreateForm() {
             <NumberField label="訪客" value={createFields.visitors} onChange={(v) => updateCreateField("visitors", v)} />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <NumberField label="大人" value={createFields.adults} onChange={(v) => updateCreateField("adults", v)} />
-            <NumberField label="小孩" value={createFields.children} onChange={(v) => updateCreateField("children", v)} />
-            <NumberField label="嬰幼兒" value={createFields.infants} onChange={(v) => updateCreateField("infants", v)} />
-            <NumberField label="寵物" value={createFields.pets} onChange={(v) => updateCreateField("pets", v)} />
+          {/* 入住人數／房型配置比照報價試算（quote-form.tsx 的
+              「Ⅱ 入住人數」）與訂單編輯表單：加分隔線小標、大人/小孩
+              一列、嬰幼兒/寵物 一列、欄位置中（見 NumberField）。 */}
+          <div>
+            <CreateSectionHeading title="入住人數" />
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-4">
+                <NumberField label="大人" value={createFields.adults} onChange={(v) => updateCreateField("adults", v)} />
+                <NumberField label="小孩" value={createFields.children} onChange={(v) => updateCreateField("children", v)} />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <NumberField label="嬰幼兒" value={createFields.infants} onChange={(v) => updateCreateField("infants", v)} />
+                <NumberField label="寵物" value={createFields.pets} onChange={(v) => updateCreateField("pets", v)} />
+              </div>
+            </div>
           </div>
 
           <div>
-            <p style={{ color: colors.muted }} className="mb-1 text-[11px] tracking-wide">
-              房型配置（跟著民宿／人數自動建議，可以手動調整）
+            <CreateSectionHeading title="房型配置" />
+            <p className="mb-2 text-[11px]" style={{ color: colors.muted }}>
+              跟著民宿／人數自動建議，可以手動調整
             </p>
             <div className="grid grid-cols-2 gap-4">
               <NumberField

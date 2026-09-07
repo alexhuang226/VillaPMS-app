@@ -395,25 +395,16 @@ function ConfirmationImageCard({
             ) : (
               <p className="mt-1">• 住宿總額：${detail.finalTotal.toLocaleString()}元</p>
             )}
-            {/* 包棟總費用——標籤/金額改成同一列（原本是標籤一行、大字
-                金額另外一行），跟報價單最新的版本一致，省一點垂直
-                空間。背景換成淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面
-                標題的深咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，
-                取代原本文字版的訂金/尾款條列 */}
+            {/* 帳務強調框——背景是淺焦糖／拿鐵色（CONFIRM_LIGHT），跟
+                上面標題的深咖啡色（CONFIRM_DARK）同一個色系。訂金已付／
+                剩餘尾款放在「包棟總費用」上方，尾款後面加「(入住前 1 週
+                匯款)」，都是比照包棟報價單的排列。 */}
             <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
-              <div className="flex items-baseline justify-between">
-                <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
-                  包棟總費用
-                </span>
-                <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
-                  NT$ {detail.finalTotal.toLocaleString()}
-                </span>
-              </div>
               {(() => {
                 const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
                 const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
                 return (
-                  <div className="mt-2 flex flex-col gap-1 border-t pt-2" style={{ borderColor: CONFIRM_ACCENT }}>
+                  <div className="flex flex-col gap-1">
                     <div className="flex items-baseline justify-between">
                       <span style={{ color: CONFIRM_ACCENT }}>
                         訂金已付
@@ -425,7 +416,9 @@ function ConfirmationImageCard({
                     </div>
                     {balancePayment && (
                       <div className="flex items-baseline justify-between">
-                        <span style={{ color: CONFIRM_ACCENT }}>剩餘尾款</span>
+                        <span style={{ color: CONFIRM_ACCENT }}>
+                          剩餘尾款<span style={{ color: colors.alert }}>(入住前 1 週匯款)</span>
+                        </span>
                         <span className="font-bold" style={{ color: CONFIRM_DARK }}>
                           ${balancePayment.amount.toLocaleString()}
                         </span>
@@ -434,13 +427,15 @@ function ConfirmationImageCard({
                   </div>
                 );
               })()}
+              <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: CONFIRM_ACCENT }}>
+                <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                  包棟總費用
+                </span>
+                <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                  NT$ {detail.finalTotal.toLocaleString()}
+                </span>
+              </div>
             </div>
-            {(() => {
-              const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
-              return balancePayment ? (
-                <p className="mt-2">⚠️ 尾款請於入住前一星期匯款。</p>
-              ) : null;
-            })()}
             <p className="mt-2" style={{ color: colors.muted }}>
               ━━━━━━━━━━━━━━
             </p>
@@ -654,14 +649,6 @@ export function QuoteReceiptCard({
 
                         <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: colors.pineSoft }}>
                           <div className="flex items-baseline justify-between">
-                            <span className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
-                              包棟總費用
-                            </span>
-                            <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
-                              NT$ {quote.packageTotal.toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
                             <span style={{ color: colors.muted }} className="text-xs tracking-wide">
                               訂金
                             </span>
@@ -675,6 +662,14 @@ export function QuoteReceiptCard({
                             </span>
                             <span style={{ color: colors.ink }} className="text-sm font-semibold">
                               NT$ {quote.balanceDue.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex items-baseline justify-between border-t pt-2" style={{ borderColor: colors.line }}>
+                            <span className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
+                              包棟總費用
+                            </span>
+                            <span className={`${display.className} text-2xl italic`} style={{ color: colors.pine }}>
+                              NT$ {quote.packageTotal.toLocaleString()}
                             </span>
                           </div>
                         </div>

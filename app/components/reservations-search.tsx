@@ -29,6 +29,7 @@ import { calculateQuoteAction } from "@/app/actions/quote";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
 import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 import { addOnFeeBreakdown, consolidatedAccommodationGroups, extraBedTempLineItem } from "@/lib/pricing/quote-message";
+import { confirmationRoomAllocationLines } from "@/lib/pricing/reservation-message";
 import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
@@ -341,27 +342,31 @@ function NumberField({
         value={raw}
         onChange={handleChange}
         onBlur={handleBlur}
-        className="w-full border-b bg-transparent py-1 text-sm outline-none"
+        className="w-full border-b bg-transparent py-1 text-center text-sm outline-none"
         style={{ borderColor: colors.line, color: colors.ink }}
       />
     </label>
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }) {
+/** 編輯訂單表單的區塊標題——比照報價試算（quote-form.tsx 的
+ * SectionMark）的樣式：淺色小標＋一條往右延伸的分隔線。編輯表單
+ * 不是照順序編號的填寫流程，所以不帶報價試算那個羅馬數字。 */
+function EditSectionHeading({ title }: { title: string }) {
   return (
-    <div className="flex items-baseline gap-3">
-      <span className="shrink-0" style={{ width: "4.5em", color: colors.muted }}>
-        {label}
+    <div className="mb-3 flex items-baseline gap-2">
+      <span style={{ color: colors.muted }} className="text-xs tracking-wide">
+        {title}
       </span>
-      <span style={{ color: colors.ink }}>{value}</span>
+      <span className="h-px flex-1" style={{ backgroundColor: colors.line }} />
     </div>
   );
 }
 
-/** 訂房確認單的入住/退房日期、預訂天數/入住人數並排用——跟報價單
- * quote-form.tsx / quotes-search.tsx 的 PairedInfoRow 是同一種寫法，
- * 這個檔案原本沒有這個元件，這次補上讓確認單格式能跟報價單一致 */
+/** 一列兩欄的資訊列——訂單詳情面板的「預訂資訊」跟訂房確認單截圖
+ * 卡片的入住/退房日期、預訂天數/入住人數都用這個，跟報價單
+ * quote-form.tsx / quotes-search.tsx 的 PairedInfoRow 是同一種寫法。
+ * 傳 1 個 item 時會佔滿整列（flex-1 唯一子元素）。 */
 function PairedInfoRow({ items }: { items: { label: string; value: string }[] }) {
   return (
     <div className="flex gap-4">
@@ -371,6 +376,72 @@ function PairedInfoRow({ items }: { items: { label: string; value: string }[] })
             {item.label}
           </p>
           <p style={{ color: colors.ink }}>{item.value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 用重新計算出來的 quote 有沒有可逐項呈現的住宿明細——訂單詳情
+ * 面板跟訂房確認單截圖卡片都用這個判斷要不要顯示 <FeeBreakdown>，
+ * 還是退回顯示最基本的「住宿總額」。 */
+function hasItemizedFees(quote: PackageQuote | null): quote is PackageQuote {
+  return quote !== null && consolidatedAccommodationGroups(quote).length > 0;
+}
+
+/**
+ * 費用明細逐項呈現（單價×數量×晚數＝小計）——訂單詳情面板的「費用
+ * 明細」段落，跟訂房確認單截圖卡片的「💰 費用明細」共用同一套呈現，
+ * 格式跟報價單「轉成圖片」一致。傳進來的 quote 是用訂單目前的民宿/
+ * 日期/房型配置重新算出來的 recalculatedQuote（見元件內 useEffect
+ * 的說明），不是讀回原始報價——訂單後來手動調過金額的話，逐項總和
+ * 可能跟 finalTotal 對不上，所以「總金額」本身還是各處自己顯示
+ * detail.finalTotal，這裡只負責明細那幾行。
+ */
+function FeeBreakdown({ quote }: { quote: PackageQuote }) {
+  const groups = consolidatedAccommodationGroups(quote);
+  const extraBedTemp = extraBedTempLineItem(quote);
+  const addOnFees = addOnFeeBreakdown(quote);
+  return (
+    <div className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5 text-xs" style={{ color: colors.muted }}>
+      {groups.map((group, gi) => (
+        <div key={`day-${gi}`} className="contents">
+          {group.dateRangeLabel && (
+            <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
+              {group.dateRangeLabel}
+            </p>
+          )}
+          {group.items.map((item, i) => (
+            <div key={i} className="contents">
+              <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
+              <span className="text-right tabular-nums">
+                NT${item.unitPrice.toLocaleString()}×{item.qty}
+                {group.nights > 1 ? `×${group.nights}晚` : ""}
+              </span>
+              <span>=</span>
+              <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
+              {item.subLabel && (
+                <p className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}>{item.subLabel}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+      {extraBedTemp && (
+        <div className="contents">
+          <span>{extraBedTemp.roomLabel}</span>
+          <span className="text-right tabular-nums">
+            NT${extraBedTemp.unitPrice.toLocaleString()}×{extraBedTemp.qty}
+            {extraBedTemp.nights > 1 ? `×${extraBedTemp.nights}晚` : ""}
+          </span>
+          <span>=</span>
+          <span className="text-right tabular-nums">NT${extraBedTemp.lineTotal.toLocaleString()}</span>
+        </div>
+      )}
+      {addOnFees.map((item, i) => (
+        <div key={`fee-${i}`} className="contents">
+          <span className="col-span-3">{item.label}</span>
+          <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
         </div>
       ))}
     </div>
@@ -1434,11 +1505,27 @@ export function ReservationsSearch({
                       </label>
                     </div>
 
+                    {/* 入住人數移到房型配置上方，並比照報價試算
+                        （quote-form.tsx 的「Ⅱ 入住人數」）的版面：加上
+                        「入住人數」標題、大人/小孩 一列、嬰幼兒/寵物 一列，
+                        欄位間距 gap-4、數字置中（見 NumberField）。 */}
                     <div>
-                      <p style={{ color: colors.muted }} className="text-[11px]">
-                        房型配置
-                      </p>
-                      <div className="mt-1 grid grid-cols-2 gap-3">
+                      <EditSectionHeading title="入住人數" />
+                      <div className="flex flex-col gap-3">
+                        <div className="grid grid-cols-2 gap-4">
+                          <NumberField label="大人" value={editFields.adults} onChange={(v) => updateEditField("adults", v)} />
+                          <NumberField label="小孩" value={editFields.children} onChange={(v) => updateEditField("children", v)} />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <NumberField label="嬰幼兒" value={editFields.infants} onChange={(v) => updateEditField("infants", v)} />
+                          <NumberField label="寵物" value={editFields.pets} onChange={(v) => updateEditField("pets", v)} />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <EditSectionHeading title="房型配置" />
+                      <div className="grid grid-cols-2 gap-4">
                         <NumberField
                           label="四人套房"
                           value={editFields.fourPersonSuiteCount}
@@ -1460,13 +1547,6 @@ export function ReservationsSearch({
                           onChange={(v) => updateEditField("doublePlainCount", v)}
                         />
                       </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <NumberField label="大人" value={editFields.adults} onChange={(v) => updateEditField("adults", v)} />
-                      <NumberField label="小孩" value={editFields.children} onChange={(v) => updateEditField("children", v)} />
-                      <NumberField label="嬰幼兒" value={editFields.infants} onChange={(v) => updateEditField("infants", v)} />
-                      <NumberField label="寵物" value={editFields.pets} onChange={(v) => updateEditField("pets", v)} />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -1737,66 +1817,118 @@ export function ReservationsSearch({
                     )}
 
                     <div className="mt-3 border-t pt-3" style={{ borderColor: colors.line }} />
-                    <InfoRow label="訂單編號" value={detail.reservationNo} />
-                    <InfoRow label="預訂日期" value={formatSlashDate(detail.createdAt.slice(0, 10))} />
-                    <InfoRow label="狀態" value={STATUS_LABEL[detail.status] ?? detail.status} />
-                    <InfoRow label="入住日期" value={detail.checkIn} />
-                    <InfoRow label="退房日期" value={detail.checkOut} />
-                    <InfoRow
-                      label="入住人數"
-                      value={`${detail.adults}大 ${detail.children}小${detail.infants ? ` ${detail.infants}幼` : ""}${detail.pets ? ` ${detail.pets}寵` : ""}`}
-                    />
-                    <InfoRow label="客人姓名" value={detail.guestName || "（未填）"} />
-                    <InfoRow label="客人電話" value={detail.guestPhone || "（未填）"} />
-                    <InfoRow label="客戶來源" value={BOOKING_SOURCE_LABEL[detail.bookingSource] ?? detail.bookingSource} />
-                    {detail.visitors > 0 && <InfoRow label="訪客人數" value={String(detail.visitors)} />}
-                    {detail.needsInvoice && (
-                      <>
-                        <InfoRow label="發票抬頭" value={detail.invoiceTitle || "（未填）"} />
-                        <InfoRow label="統一編號" value={detail.invoiceTaxId || "（未填）"} />
-                      </>
-                    )}
+                    {/* 預訂資訊排版跟訂房確認單截圖卡片一致：一列兩欄
+                        （PairedInfoRow）。日期帶星期幾、預訂天數用
+                        「X天X夜」、入住人數隱藏數量為 0 的欄位（只顯示大人
+                        時就只有「N大」），跟 lib/pricing/reservation-message.ts
+                        的 compactGuestSummary 一致。欄位先組成一個陣列再
+                        每兩個切一組，遇到訪客人數／發票這種條件欄位也能
+                        自動接續補位，不會空一欄。 */}
+                    {(() => {
+                      const infoEntries: { label: string; value: string }[] = [
+                        { label: "訂單編號", value: detail.reservationNo },
+                        { label: "預訂日期", value: formatSlashDate(detail.createdAt.slice(0, 10)) },
+                        { label: "入住日期", value: formatDateWithWeekdayLocal(detail.checkIn) },
+                        { label: "退房日期", value: formatDateWithWeekdayLocal(detail.checkOut) },
+                        { label: "預訂天數", value: nightsLabel(detail.checkIn, detail.checkOut) },
+                        {
+                          label: "入住人數",
+                          value: `${detail.adults}大${detail.children ? ` ${detail.children}小` : ""}${
+                            detail.infants ? ` ${detail.infants}幼` : ""
+                          }${detail.pets ? ` ${detail.pets}寵` : ""}`,
+                        },
+                        { label: "客人姓名", value: detail.guestName || "（未填）" },
+                        { label: "客戶來源", value: BOOKING_SOURCE_LABEL[detail.bookingSource] ?? detail.bookingSource },
+                        ...(detail.visitors > 0
+                          ? [{ label: "訪客人數", value: String(detail.visitors) }]
+                          : []),
+                        ...(detail.needsInvoice
+                          ? [
+                              { label: "發票抬頭", value: detail.invoiceTitle || "（未填）" },
+                              { label: "統一編號", value: detail.invoiceTaxId || "（未填）" },
+                            ]
+                          : []),
+                      ];
+                      return Array.from({ length: Math.ceil(infoEntries.length / 2) }, (_, i) => (
+                        <PairedInfoRow key={i} items={infoEntries.slice(i * 2, i * 2 + 2)} />
+                      ));
+                    })()}
                   </div>
                 )}
 
                 {!isEditing && (
                   <>
-                    {detail.roomLines.length > 0 && (
-                      <>
-                        <p className="mt-4 border-t pt-3 text-xs font-bold" style={{ borderColor: colors.line, color: colors.ink }}>
-                          房型配置
-                        </p>
-                        <div className="mt-1 flex flex-col gap-1 text-xs" style={{ color: colors.muted }}>
-                          {detail.roomLines.map((line, i) => (
-                            <p key={i}>
-                              {line.quantity} 間{line.notes ? `　${line.notes}` : ""}
-                            </p>
-                          ))}
-                        </div>
-                      </>
-                    )}
+                    {/* 房型配置的文字格式跟訂房確認單對齊：用結構化的
+                        roomAllocation 產生「X 間雙人套房」這種描述（見
+                        lib/pricing/reservation-message.ts 的
+                        confirmationRoomAllocationLines），roomAllocation
+                        全為 0 的舊訂單才退回用 reservation_room_lines 的
+                        原始文字。 */}
+                    {(() => {
+                      const allocLines = confirmationRoomAllocationLines(detail.roomAllocation);
+                      const lines =
+                        allocLines.length > 0
+                          ? allocLines
+                          : detail.roomLines.map((l) => `${l.quantity} 間${l.notes ? `　${l.notes}` : ""}`);
+                      if (lines.length === 0) return null;
+                      return (
+                        <>
+                          <p
+                            className="mt-4 border-t pt-3 text-xs font-bold"
+                            style={{ borderColor: colors.line, color: colors.ink }}
+                          >
+                            房型配置
+                          </p>
+                          <div className="mt-1 flex flex-col gap-1 text-xs" style={{ color: colors.muted }}>
+                            {lines.map((line, i) => (
+                              <p key={i}>{line}</p>
+                            ))}
+                          </div>
+                        </>
+                      );
+                    })()}
 
-                    {detail.items.length > 0 && (
+                    {/* 費用明細改成跟訂房確認單截圖卡片同一套逐項呈現
+                        （單價×數量×晚數＝小計），用 recalculatedQuote
+                        （見上面 useEffect：拿訂單目前的民宿/日期/房型
+                        配置/加購項目重新算一次）。算不出來的話退回顯示
+                        原本存下來的加購項目清單，再不行就只顯示住宿
+                        總額。管家看不到金額，整段隱藏。 */}
+                    {!isHousekeepingManager && (
                       <>
-                        <p className="mt-4 border-t pt-3 text-xs font-bold" style={{ borderColor: colors.line, color: colors.ink }}>
-                          加購項目
+                        <p
+                          className="mt-4 border-t pt-3 text-xs font-bold"
+                          style={{ borderColor: colors.line, color: colors.ink }}
+                        >
+                          費用明細
                         </p>
-                        <div className="mt-1 flex flex-col gap-1 text-xs">
-                          {detail.items.map((item, i) => (
-                            <div key={i} className="flex items-baseline justify-between" style={{ color: colors.muted }}>
-                              <span>
-                                {item.description}
-                                {item.notes ? `（${item.notes}）` : ""}
-                              </span>
-                              <span className="tabular-nums">NT$ {item.amount.toLocaleString()}</span>
-                            </div>
-                          ))}
-                        </div>
+                        {hasItemizedFees(recalculatedQuote) ? (
+                          <FeeBreakdown quote={recalculatedQuote} />
+                        ) : detail.items.length > 0 ? (
+                          <div className="mt-1 flex flex-col gap-1 text-xs">
+                            {detail.items.map((item, i) => (
+                              <div key={i} className="flex items-baseline justify-between" style={{ color: colors.muted }}>
+                                <span>
+                                  {item.description}
+                                  {item.notes ? `（${item.notes}）` : ""}
+                                </span>
+                                <span className="tabular-nums">NT$ {item.amount.toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-xs" style={{ color: colors.muted }}>
+                            住宿總額：NT$ {detail.finalTotal.toLocaleString()}
+                          </p>
+                        )}
                       </>
                     )}
 
                     {!isHousekeepingManager && (
-                      <div className="mt-4 rounded-sm px-4 py-4" style={{ backgroundColor: colors.pineSoft }}>
+                      <div
+                        className="mt-4 flex items-baseline justify-between rounded-sm px-4 py-4"
+                        style={{ backgroundColor: colors.pineSoft }}
+                      >
                         <p className="text-[11px] tracking-wide" style={{ color: colors.muted }}>
                           訂單總金額
                         </p>
@@ -1897,6 +2029,14 @@ export function ReservationsSearch({
                               <div className="px-6 pb-5 pt-1 text-xs leading-relaxed" style={{ color: colors.ink }}>
                                 <p className="mt-1 font-bold">📅 預訂資訊</p>
                                 <div className="mt-1 flex flex-col gap-1.5">
+                                  {detail.guestName && (
+                                    <div>
+                                      <p className="text-[10px]" style={{ color: colors.muted }}>
+                                        客人姓名
+                                      </p>
+                                      <p style={{ color: colors.ink }}>{detail.guestName}</p>
+                                    </div>
+                                  )}
                                   <PairedInfoRow
                                     items={[
                                       { label: "入住日期", value: formatDateWithWeekdayLocal(detail.checkIn) },
@@ -1923,78 +2063,24 @@ export function ReservationsSearch({
                                     退回顯示最基本的「住宿總額」，不會整段
                                     空白看不到任何金額資訊。 */}
                                 <p className="mt-2 font-bold">💰 費用明細</p>
-                                {recalculatedQuote && consolidatedAccommodationGroups(recalculatedQuote).length > 0 ? (
-                                  <div className="mt-1 grid grid-cols-[1fr_auto_auto_auto] gap-x-2 gap-y-1.5" style={{ color: colors.muted }}>
-                                    {consolidatedAccommodationGroups(recalculatedQuote).map((group, gi) => (
-                                      <div key={`day-${gi}`} className="contents">
-                                        {group.dateRangeLabel && (
-                                          <p className="col-span-4 mt-1 first:mt-0" style={{ color: colors.ink }}>
-                                            {group.dateRangeLabel}
-                                          </p>
-                                        )}
-                                        {group.items.map((item, i) => (
-                                          <div key={i} className="contents">
-                                            <span className={group.dateRangeLabel ? "pl-3" : undefined}>{item.roomLabel}</span>
-                                            <span className="text-right tabular-nums">
-                                              NT${item.unitPrice.toLocaleString()}×{item.qty}
-                                              {group.nights > 1 ? `×${group.nights}晚` : ""}
-                                            </span>
-                                            <span>=</span>
-                                            <span className="text-right tabular-nums">NT${item.lineTotal.toLocaleString()}</span>
-                                            {item.subLabel && (
-                                              <p className={`col-span-4 -mt-0.5 text-[10px] ${group.dateRangeLabel ? "pl-3" : ""}`}>
-                                                {item.subLabel}
-                                              </p>
-                                            )}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ))}
-                                    {(() => {
-                                      const extraBedTemp = extraBedTempLineItem(recalculatedQuote);
-                                      if (!extraBedTemp) return null;
-                                      return (
-                                        <div className="contents">
-                                          <span>{extraBedTemp.roomLabel}</span>
-                                          <span className="text-right tabular-nums">
-                                            NT${extraBedTemp.unitPrice.toLocaleString()}×{extraBedTemp.qty}
-                                            {extraBedTemp.nights > 1 ? `×${extraBedTemp.nights}晚` : ""}
-                                          </span>
-                                          <span>=</span>
-                                          <span className="text-right tabular-nums">NT${extraBedTemp.lineTotal.toLocaleString()}</span>
-                                        </div>
-                                      );
-                                    })()}
-                                    {addOnFeeBreakdown(recalculatedQuote).map((item, i) => (
-                                      <div key={`fee-${i}`} className="contents">
-                                        <span className="col-span-3">{item.label}</span>
-                                        <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
-                                      </div>
-                                    ))}
-                                  </div>
+                                {hasItemizedFees(recalculatedQuote) ? (
+                                  <FeeBreakdown quote={recalculatedQuote} />
                                 ) : (
                                   <p className="mt-1" style={{ color: colors.muted }}>
                                     住宿總額：NT${detail.finalTotal.toLocaleString()}
                                   </p>
                                 )}
-                                {/* 包棟總費用——改成跟報價單一樣的強調框，背景換成
-                                    淺焦糖／拿鐵色（CONFIRM_LIGHT），跟上面標題的深
-                                    咖啡色（CONFIRM_DARK）同一個色系、深淺搭配，取代
-                                    原本文字版的訂金/尾款條列 */}
+                                {/* 帳務強調框——跟報價單一樣的強調框，背景是淺焦糖／
+                                    拿鐵色（CONFIRM_LIGHT），跟上面標題的深咖啡色
+                                    （CONFIRM_DARK）同一個色系。訂金已付／剩餘尾款放在
+                                    「包棟總費用」上方，跟包棟報價單的排列一致；尾款
+                                    後面加上「(入住前 1 週匯款)」也是比照報價單。 */}
                                 <div className="mt-3 rounded-sm px-4 py-3" style={{ backgroundColor: CONFIRM_LIGHT }}>
-                                  <div className="flex items-baseline justify-between">
-                                    <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
-                                      包棟總費用
-                                    </span>
-                                    <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
-                                      NT$ {detail.finalTotal.toLocaleString()}
-                                    </span>
-                                  </div>
                                   {(() => {
                                     const depositPayment = detail.payments.find((p) => p.paymentKind === "deposit");
                                     const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
                                     return (
-                                      <div className="mt-2 flex flex-col gap-1 border-t pt-2" style={{ borderColor: CONFIRM_ACCENT }}>
+                                      <div className="flex flex-col gap-1">
                                         <div className="flex items-baseline justify-between">
                                           <span style={{ color: CONFIRM_ACCENT }}>
                                             訂金已付
@@ -2008,7 +2094,9 @@ export function ReservationsSearch({
                                         </div>
                                         {balancePayment && (
                                           <div className="flex items-baseline justify-between">
-                                            <span style={{ color: CONFIRM_ACCENT }}>剩餘尾款</span>
+                                            <span style={{ color: CONFIRM_ACCENT }}>
+                                              剩餘尾款<span style={{ color: colors.alert }}>(入住前 1 週匯款)</span>
+                                            </span>
                                             <span className="font-bold" style={{ color: CONFIRM_DARK }}>
                                               ${balancePayment.amount.toLocaleString()}
                                             </span>
@@ -2017,11 +2105,18 @@ export function ReservationsSearch({
                                       </div>
                                     );
                                   })()}
+                                  <div
+                                    className="mt-2 flex items-baseline justify-between border-t pt-2"
+                                    style={{ borderColor: CONFIRM_ACCENT }}
+                                  >
+                                    <span className="text-[11px] tracking-wide" style={{ color: CONFIRM_ACCENT }}>
+                                      包棟總費用
+                                    </span>
+                                    <span className={`${display.className} text-2xl italic`} style={{ color: CONFIRM_DARK }}>
+                                      NT$ {detail.finalTotal.toLocaleString()}
+                                    </span>
+                                  </div>
                                 </div>
-                                {(() => {
-                                  const balancePayment = detail.payments.find((p) => p.paymentKind === "balance");
-                                  return balancePayment ? <p className="mt-2">⚠️ 尾款請於入住前一星期匯款。</p> : null;
-                                })()}
                                 <p className="mt-2" style={{ color: colors.muted }}>
                                   ━━━━━━━━━━━━━━
                                 </p>
