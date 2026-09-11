@@ -20,8 +20,10 @@ import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
 import { confirmReservationFromQuoteAction, getExtraBedRoomOptionsAction } from "@/app/actions/quote";
 import type { BookingSource } from "@/app/actions/quote";
+import { createStaffAssignmentAction, listActiveEmployeesAction } from "@/app/actions/schedule";
 import { QuoteReceiptCard } from "@/app/components/quotes-search";
 import type { ExtraBedRoomOption } from "@/lib/pricing/queries";
+import type { Employee } from "@/lib/schedule/queries";
 import type { PackageQuote, PropertyCode, StayRequest } from "@/lib/pricing/types";
 
 const display = Fraunces({
@@ -55,6 +57,16 @@ const PROPERTY_LABEL: Record<PropertyCode, string> = {
   shuijing: "水景璞堤",
 };
 
+/** 民宿代碼對應 properties.id——跟 monthly-schedule.tsx 的
+ * PROPERTY_OPTIONS 是同一組固定 ID（見 CLAUDE.md「核心 ID」），排班
+ * 表單（staff_assignments.property_id）要用這個，不是報價/訂房用的
+ * PropertyCode 字串。 */
+const PROPERTY_ID_BY_CODE: Record<PropertyCode, string> = {
+  zhici: "0a16233a-9846-421e-b6d6-ccced85792b4",
+  moyin: "c4fe9189-051f-4a3f-aa43-9f04b0043723",
+  shuijing: "146fe8ae-84b5-4170-8747-dd15afc4e722",
+};
+
 /** 確認訂房時的付款狀況選項——預設「已收訂金」，實務上職員按這個
  * 按鈕的當下，客人通常都已經付了訂金（不然不會走到這一步確認）*/
 const CONFIRM_PAYMENT_STATUS_LABEL: Record<string, string> = {
@@ -65,6 +77,7 @@ const CONFIRM_PAYMENT_STATUS_LABEL: Record<string, string> = {
 
 const BOOKING_SOURCE_OPTIONS: { value: BookingSource; label: string }[] = [
   { value: "line_official", label: "LINE官方" },
+  { value: "facebook", label: "Facebook" },
   { value: "airbnb", label: "Airbnb" },
   { value: "walk_in", label: "現場" },
   { value: "phone", label: "電話" },
@@ -121,6 +134,49 @@ function NumberField({
   );
 }
 
+/** 房務人員多選（複選）——跟房務班表（monthly-schedule.tsx）同一種
+ * 圓角藥丸按鈕多選樣式，各檔案各自一份區域定義（見上面 NumberField
+ * 的說明，同樣是無法共用 import 的區域函式）。 */
+function EmployeeMultiSelect({
+  employees,
+  selectedIds,
+  onToggle,
+}: {
+  employees: Employee[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+}) {
+  if (employees.length === 0) {
+    return (
+      <p className="text-[11px]" style={{ color: colors.alert }}>
+        查不到職稱是「管家」或「房務員」的在職員工，請先到員工管理頁面確認
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {employees.map((emp) => {
+        const active = selectedIds.includes(emp.id);
+        return (
+          <button
+            key={emp.id}
+            type="button"
+            onClick={() => onToggle(emp.id)}
+            className="rounded-full border px-3 py-1.5 text-xs transition-colors"
+            style={
+              active
+                ? { borderColor: colors.pine, backgroundColor: colors.pine, color: colors.pineText }
+                : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
+            }
+          >
+            {emp.shortName}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function QuoteConvertForm({
   quoteId,
   quote,
@@ -144,6 +200,12 @@ export function QuoteConvertForm({
   const [extraBedRoomOptions, setExtraBedRoomOptions] = useState<ExtraBedRoomOption[]>([]);
   const [selectedExtraBedRoomIds, setSelectedExtraBedRoomIds] = useState<string[]>([]);
 
+  // 退房打掃班表——確認訂房的同時可以順手排好退房日（request.checkOut）
+  // 的房務人員，不用轉單後再另外跑一趟房務班表頁面
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [scheduleEmployeeIds, setScheduleEmployeeIds] = useState<string[]>([]);
+  const [scheduleNotes, setScheduleNotes] = useState("");
+
   const [isConfirming, setIsConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -166,6 +228,25 @@ export function QuoteConvertForm({
       cancelled = true;
     };
   }, [extraBedTempQty, request.propertyCode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listActiveEmployeesAction()
+      .then((list) => {
+        if (!cancelled) setEmployees(list);
+      })
+      .catch(() => {
+        // 查詢失敗不擋轉單，只是排班人員選單會是空的——職員仍然可以
+        // 之後到房務班表手動安排
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function toggleScheduleEmployee(id: string) {
+    setScheduleEmployeeIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
 
   function toggleExtraBedRoom(roomId: string) {
     setSelectedExtraBedRoomIds((prev) =>
@@ -208,6 +289,30 @@ export function QuoteConvertForm({
       if (!result.success) {
         setError(result.message);
         return;
+      }
+
+      if (scheduleEmployeeIds.length > 0) {
+        try {
+          const propertyId = PROPERTY_ID_BY_CODE[request.propertyCode];
+          await Promise.all(
+            scheduleEmployeeIds.map((employeeId) =>
+              createStaffAssignmentAction({
+                employeeId,
+                propertyId,
+                workDate: request.checkOut,
+                notes: scheduleNotes.trim() || null,
+              })
+            )
+          );
+        } catch (err) {
+          // 訂房本身已經成功建立，不要因為排班失敗就讓職員誤以為整筆
+          // 都沒存到——停在這頁顯示錯誤，讓職員知道要改去房務班表
+          // 頁面手動補上，而不是直接導頁把這個錯誤訊息蓋掉
+          setError(
+            `訂房已建立成功，但排班安排失敗：${err instanceof Error ? err.message : "請稍後再試"}——請到房務班表手動補上退房日（${request.checkOut}）的人員`
+          );
+          return;
+        }
       }
 
       // 確認訂房後導去訂單管理的月曆，帶著這筆訂房入住日期所在的
@@ -372,6 +477,32 @@ export function QuoteConvertForm({
               )}
             </div>
           )}
+
+          <div className="border-t pt-4" style={{ borderColor: colors.line }}>
+            <p className="text-xs font-bold" style={{ color: colors.blue }}>
+              安排退房打掃班表（選填）
+            </p>
+            <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
+              退房日 {request.checkOut}——不指定人員也可以之後再到房務班表安排
+            </p>
+            <div className="mt-2">
+              <EmployeeMultiSelect employees={employees} selectedIds={scheduleEmployeeIds} onToggle={toggleScheduleEmployee} />
+            </div>
+            {scheduleEmployeeIds.length > 0 && (
+              <label className="mt-3 flex flex-col gap-1">
+                <span style={{ color: colors.muted }} className="text-[11px] tracking-wide">
+                  備註（選填）
+                </span>
+                <input
+                  type="text"
+                  value={scheduleNotes}
+                  onChange={(e) => setScheduleNotes(e.target.value)}
+                  className="w-full border-b bg-transparent py-1 text-sm outline-none"
+                  style={{ borderColor: colors.line, color: colors.ink }}
+                />
+              </label>
+            )}
+          </div>
 
           {error && (
             <p role="alert" className="border-l-2 pl-3 text-xs leading-relaxed" style={{ borderColor: colors.alert, color: colors.alert }}>

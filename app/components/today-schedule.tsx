@@ -52,6 +52,7 @@ const colors = {
 
 const BOOKING_SOURCE_LABEL: Record<string, string> = {
   line_official: "LINE官方",
+  facebook: "Facebook",
   airbnb: "Airbnb",
   walk_in: "現場",
   phone: "電話",

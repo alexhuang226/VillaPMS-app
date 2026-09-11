@@ -24,10 +24,10 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { buildReservationConfirmationMessageAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReservationAction, updateReservationPaymentStatusAction, updateReservationStatusAction } from "@/app/actions/reservation";
+import { buildReservationConfirmationMessageAction, deleteReservationAction, getCalendarReservationsForRangeAction, getExtraBedRoomOptionsForCreateAction, getReceivableReminderSettingsAction, getReservationDetailAction, listReceivablesAction, markPaymentPaidAction, updateReceivableReminderSettingsAction, updateReservationAction, updateReservationPaymentStatusAction, updateReservationStatusAction } from "@/app/actions/reservation";
 import { calculateQuoteAction } from "@/app/actions/quote";
 import { deleteStaffAssignmentsForPropertyDateAction } from "@/app/actions/schedule";
-import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
+import type { CalendarReservation, CreateReservationFields, ExtraBedRoomOption, ReceivableReminderSettings, ReceivableSummary, ReservationDetail, ReservationUpdateFields } from "@/lib/pricing/queries";
 import { addOnFeeBreakdown, consolidatedAccommodationGroups, extraBedTempLineItem } from "@/lib/pricing/quote-message";
 import { confirmationRoomAllocationLines } from "@/lib/pricing/reservation-message";
 import type { PackageQuote, StayRequest } from "@/lib/pricing/types";
@@ -101,6 +101,7 @@ const RESERVATION_PAYMENT_STATUS_LABEL: Record<string, string> = {
 };
 const BOOKING_SOURCE_LABEL: Record<string, string> = {
   line_official: "LINE官方",
+  facebook: "Facebook",
   airbnb: "Airbnb",
   walk_in: "現場",
   phone: "電話",
@@ -121,12 +122,14 @@ const PAYMENT_STATUS_LABEL: Record<string, string> = {
   refunded: "已退款",
 };
 
-/** 應收帳款清單用——只顯示「入住日期在未來 10 天內」的應收款（含
+/** 應收帳款清單用——只顯示「入住日期在未來 N 天內」的應收款（含
  * 已經入住但還沒收到尾款的，也就是入住日期已經過去的），詳細規則
  * 說明見原本 receivables-list.tsx 的檔案開頭註解，這裡整合進訂單
- * 管理頁面後沿用同一套邏輯。 */
-const RECEIVABLES_SHOW_WITHIN_DAYS = 10;
-const RECEIVABLES_OVERDUE_WITHIN_DAYS = 7; // 尾款提醒規則：入住前一週
+ * 管理頁面後沿用同一套邏輯。這兩個天數現在是職員可以自己在畫面上
+ * 調整的設定（見 reminderSettings state、getReceivableReminderSettingsAction/
+ * updateReceivableReminderSettingsAction），這裡只留一份「設定還沒讀到
+ * 之前」的預設值，不是固定常數。 */
+const DEFAULT_RECEIVABLE_REMINDER_SETTINGS: ReceivableReminderSettings = { showWithinDays: 8, overdueWithinDays: 8 };
 
 /** 今天算起，距離某個日期還剩幾天；已經過去回傳負數 */
 function daysUntil(dateStr: string): number {
@@ -444,6 +447,12 @@ function FeeBreakdown({ quote }: { quote: PackageQuote }) {
           <span className="text-right tabular-nums">NT${item.amount.toLocaleString()}</span>
         </div>
       ))}
+      {quote.discountAmount > 0 && (
+        <div className="contents">
+          <span className="col-span-3">優惠折扣</span>
+          <span className="text-right tabular-nums">－NT${quote.discountAmount.toLocaleString()}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -476,25 +485,47 @@ export function ReservationsSearch({
   const [receivableError, setReceivableError] = useState<string | null>(null);
   const [markingPaymentId, setMarkingPaymentId] = useState<string | null>(null);
 
+  // 應收帳款的「顯示天數」「逾期天數」提醒設定——見上面
+  // DEFAULT_RECEIVABLE_REMINDER_SETTINGS 的說明，null 代表還沒讀到，
+  // 畫面上先用預設值頂著顯示，設定讀回來之後才是真正生效的天數。
+  const [reminderSettings, setReminderSettings] = useState<ReceivableReminderSettings | null>(null);
+  const [isEditingReminderSettings, setIsEditingReminderSettings] = useState(false);
+  const [reminderSettingsDraft, setReminderSettingsDraft] = useState<ReceivableReminderSettings>(
+    DEFAULT_RECEIVABLE_REMINDER_SETTINGS
+  );
+  const [isSavingReminderSettings, setIsSavingReminderSettings] = useState(false);
+  const [reminderSettingsError, setReminderSettingsError] = useState<string | null>(null);
+
+  const effectiveReminderSettings = reminderSettings ?? DEFAULT_RECEIVABLE_REMINDER_SETTINGS;
+
   useEffect(() => {
     if (viewMode !== "receivables" || receivableRows !== null) return;
     let cancelled = false;
-    setIsLoadingReceivables(true);
-    setReceivableError(null);
-    listReceivablesAction()
-      .then((rows) => {
+
+    async function load() {
+      setIsLoadingReceivables(true);
+      setReceivableError(null);
+      try {
+        // 「顯示天數」要先確定下來才能查應收款（伺服器端 due_date 的
+        // 寬鬆前置篩選要用這個天數，見 lib/pricing/queries.ts
+        // listReceivables() 的說明），還沒讀過設定的話先讀一次。
+        const settings = reminderSettings ?? (await getReceivableReminderSettingsAction());
+        if (cancelled) return;
+        setReminderSettings(settings);
+        const rows = await listReceivablesAction(settings.showWithinDays);
         if (!cancelled) setReceivableRows(rows);
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!cancelled) setReceivableError(err instanceof Error ? err.message : "查詢失敗，請稍後再試");
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setIsLoadingReceivables(false);
-      });
+      }
+    }
+    load();
+
     return () => {
       cancelled = true;
     };
-  }, [viewMode, receivableRows]);
+  }, [viewMode, receivableRows, reminderSettings]);
 
   async function handleMarkReceivablePaid(paymentId: string) {
     setMarkingPaymentId(paymentId);
@@ -506,6 +537,38 @@ export function ReservationsSearch({
       setReceivableError(err instanceof Error ? err.message : "標記失敗，請稍後再試");
     } finally {
       setMarkingPaymentId(null);
+    }
+  }
+
+  function startEditReminderSettings() {
+    setReminderSettingsDraft(effectiveReminderSettings);
+    setReminderSettingsError(null);
+    setIsEditingReminderSettings(true);
+  }
+
+  function cancelEditReminderSettings() {
+    setIsEditingReminderSettings(false);
+    setReminderSettingsError(null);
+  }
+
+  /** 儲存後重新查一次應收款清單（顯示天數可能變了，伺服器端前置
+   * 篩選的邊界要跟著換），不用整頁重新整理 */
+  async function handleSaveReminderSettings() {
+    if (reminderSettingsDraft.showWithinDays < 1 || reminderSettingsDraft.overdueWithinDays < 1) {
+      setReminderSettingsError("天數至少要是 1");
+      return;
+    }
+    setIsSavingReminderSettings(true);
+    setReminderSettingsError(null);
+    try {
+      await updateReceivableReminderSettingsAction(reminderSettingsDraft);
+      setReminderSettings(reminderSettingsDraft);
+      setReceivableRows(null); // 觸發上面的 effect 用新天數重新查一次
+      setIsEditingReminderSettings(false);
+    } catch (err) {
+      setReminderSettingsError(err instanceof Error ? err.message : "儲存失敗，請稍後再試");
+    } finally {
+      setIsSavingReminderSettings(false);
     }
   }
 
@@ -607,6 +670,11 @@ export function ReservationsSearch({
         doubleSuiteCount: detail.roomAllocation.doubleSuiteCount,
         doublePlainCount: detail.roomAllocation.doublePlainCount,
       },
+      // 訂單存的優惠折扣金額一起帶進去，不然算出來的 recalculatedQuote
+      // 永遠是沒有折扣的版本，費用明細（FeeBreakdown）逐項加總會比
+      // finalTotal 多出這筆折扣的金額，見 ReservationDetail.discountAmount
+      // 的說明
+      discountAmount: detail.discountAmount,
     };
     calculateQuoteAction(request, true)
       .then((quote) => {
@@ -820,6 +888,7 @@ export function ReservationsSearch({
       bookingSource: detail.bookingSource,
       status: detail.status,
       finalTotal: detail.finalTotal,
+      discountAmount: detail.discountAmount,
       depositAmount: currentDepositPayment?.amount ?? 0,
       needsInvoice: detail.needsInvoice,
       invoiceTitle: detail.invoiceTitle,
@@ -1152,9 +1221,64 @@ export function ReservationsSearch({
 
         {viewMode === "receivables" && (
           <div>
-            <p className="mb-4 text-[11px]" style={{ color: colors.muted }}>
-              只顯示入住日期在未來 {RECEIVABLES_SHOW_WITHIN_DAYS} 天內（含已逾期）的應收款
-            </p>
+            <div className="mb-4 border p-3" style={{ borderColor: colors.line }}>
+              {isEditingReminderSettings ? (
+                <div className="flex flex-col gap-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <NumberField
+                      label="顯示天數（入住日在未來幾天內顯示）"
+                      value={reminderSettingsDraft.showWithinDays}
+                      onChange={(v) => setReminderSettingsDraft((prev) => ({ ...prev, showWithinDays: v }))}
+                    />
+                    <NumberField
+                      label="逾期天數（離入住不到幾天算逾期）"
+                      value={reminderSettingsDraft.overdueWithinDays}
+                      onChange={(v) => setReminderSettingsDraft((prev) => ({ ...prev, overdueWithinDays: v }))}
+                    />
+                  </div>
+                  {reminderSettingsError && (
+                    <p role="alert" className="text-[11px] leading-relaxed" style={{ color: colors.alert }}>
+                      {reminderSettingsError}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelEditReminderSettings}
+                      disabled={isSavingReminderSettings}
+                      className="flex-1 border py-1.5 text-xs tracking-wide disabled:opacity-50"
+                      style={{ borderColor: colors.line, color: colors.ink }}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveReminderSettings}
+                      disabled={isSavingReminderSettings}
+                      className="flex-1 py-1.5 text-xs tracking-wide disabled:opacity-50"
+                      style={{ backgroundColor: colors.pine, color: colors.pineText }}
+                    >
+                      {isSavingReminderSettings ? "儲存中…" : "儲存"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] leading-relaxed" style={{ color: colors.muted }}>
+                    只顯示入住日期在未來 {effectiveReminderSettings.showWithinDays} 天內（含已逾期）的應收款・離入住不到{" "}
+                    {effectiveReminderSettings.overdueWithinDays} 天標記逾期
+                  </p>
+                  <button
+                    type="button"
+                    onClick={startEditReminderSettings}
+                    className="shrink-0 text-xs"
+                    style={{ color: colors.blue }}
+                  >
+                    調整天數
+                  </button>
+                </div>
+              )}
+            </div>
 
             {isLoadingReceivables && (
               <p className="text-xs" style={{ color: colors.muted }}>
@@ -1172,14 +1296,14 @@ export function ReservationsSearch({
               receivableRows &&
               (() => {
                 const visibleRows = receivableRows
-                  .filter((r) => daysUntil(r.checkIn) <= RECEIVABLES_SHOW_WITHIN_DAYS)
+                  .filter((r) => daysUntil(r.checkIn) <= effectiveReminderSettings.showWithinDays)
                   .sort((a, b) => daysUntil(a.checkIn) - daysUntil(b.checkIn));
                 const totalOutstanding = visibleRows.reduce((sum, r) => sum + r.amount, 0);
 
                 if (visibleRows.length === 0) {
                   return (
                     <p className="text-xs" style={{ color: colors.muted }}>
-                      未來 {RECEIVABLES_SHOW_WITHIN_DAYS} 天內沒有應收款項。
+                      未來 {effectiveReminderSettings.showWithinDays} 天內沒有應收款項。
                     </p>
                   );
                 }
@@ -1197,7 +1321,7 @@ export function ReservationsSearch({
 
                     <div className="mt-4 flex flex-col gap-3">
                       {visibleRows.map((row) => {
-                        const overdue = daysUntil(row.checkIn) < RECEIVABLES_OVERDUE_WITHIN_DAYS;
+                        const overdue = daysUntil(row.checkIn) < effectiveReminderSettings.overdueWithinDays;
                         return (
                           <div key={row.paymentId} className="border p-3 text-xs" style={{ borderColor: overdue ? colors.alert : colors.line }}>
                             <div className="flex items-baseline justify-between">
@@ -1687,6 +1811,20 @@ export function ReservationsSearch({
                       </p>
                       <div className="mt-2">
                         <NumberField label="總金額" value={editFields.finalTotal} onChange={(v) => updateEditField("finalTotal", v)} />
+                      </div>
+
+                      {/* 優惠折扣金額——不會自動從「總金額」反推或影響
+                          「總金額」，純粹是讓「費用明細」逐項呈現（訂單
+                          詳情面板／訂房確認單截圖卡片，見上面 FeeBreakdown
+                          的說明）能正確扣掉這筆折扣，逐項加總才會等於
+                          「總金額」。從報價單轉單的訂單會自動帶入報價單
+                          當初的優惠金額，這裡可以視實際狀況再調整。 */}
+                      <div className="mt-2">
+                        <NumberField
+                          label="優惠折扣金額（僅影響費用明細顯示，不影響總金額）"
+                          value={editFields.discountAmount}
+                          onChange={(v) => updateEditField("discountAmount", v)}
+                        />
                       </div>
 
                       {/* 訂金金額——預設帶入目前已經記錄的金額（見

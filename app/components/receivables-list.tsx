@@ -3,16 +3,15 @@
 /**
  * 查詢應收頁面
  *
- * 只顯示「入住日期在未來 10 天內」的應收款（含已經入住但還沒收到
+ * 只顯示「入住日期在未來 8 天內」的應收款（含已經入住但還沒收到
  * 尾款的，也就是入住日期已經過去的）——民宿的匯尾款提醒是訂在入住
- * 前一週，10 天的視窗剛好包含「快到提醒時間點」跟「已經逾期」這兩種
+ * 前一週，8 天的視窗剛好包含「快到提醒時間點」跟「已經逾期」這兩種
  * 都需要優先處理的狀況，太遠的不用先看到，減少雜訊。
  *
  * 「逾期」的定義刻意不是看 payments.due_date 有沒有過——訂金的
  * due_date 是「訂房當天」，不是照入住日期算的，用 due_date 判斷逾期
- * 對訂金來說沒有意義。逾期一律看「離入住日期不到 7 天」（民宿的
- * 尾款提醒規則本來就是入住前一週），不管這筆是訂金還是尾款，統一
- * 用同一個入住日期為準的規則判斷，比較站得住腳。
+ * 對訂金來說沒有意義。逾期一律看「離入住日期不到 8 天」，不管這筆是
+ * 訂金還是尾款，統一用同一個入住日期為準的規則判斷，比較站得住腳。
  *
  * 每一筆可以直接標記「已收款」，標記後會從列表移除（不用重新整理
  * 頁面）。
@@ -21,8 +20,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
-import { listReceivablesAction, markPaymentPaidAction } from "@/app/actions/reservation";
-import type { ReceivableSummary } from "@/lib/pricing/queries";
+import { getReceivableReminderSettingsAction, listReceivablesAction, markPaymentPaidAction } from "@/app/actions/reservation";
+import type { ReceivableReminderSettings, ReceivableSummary } from "@/lib/pricing/queries";
 
 const display = Fraunces({
   subsets: ["latin"],
@@ -56,8 +55,12 @@ const PAYMENT_KIND_LABEL: Record<string, string> = {
   refund: "退款",
 };
 
-const SHOW_WITHIN_DAYS = 10;
-const OVERDUE_WITHIN_DAYS = 7; // 尾款提醒規則：入住前一週
+/** 還沒讀到 reservations-search.tsx 那邊職員自訂的提醒設定
+ * （getReceivableReminderSettingsAction）之前，先用這組預設值頂著；
+ * 這個頁面目前沒有掛在導覽選單上（已被訂單管理整合的「應收帳款」
+ * 取代），這裡只維持讀取一致，不提供調整天數的介面，要調整天數請
+ * 到訂單管理的應收帳款畫面。 */
+const DEFAULT_RECEIVABLE_REMINDER_SETTINGS: ReceivableReminderSettings = { showWithinDays: 8, overdueWithinDays: 8 };
 
 /** 今天算起，距離某個日期還剩幾天；已經過去回傳負數 */
 function daysUntil(dateStr: string): number {
@@ -69,6 +72,7 @@ function daysUntil(dateStr: string): number {
 
 export function ReceivablesList() {
   const [rows, setRows] = useState<ReceivableSummary[] | null>(null);
+  const [reminderSettings, setReminderSettings] = useState<ReceivableReminderSettings>(DEFAULT_RECEIVABLE_REMINDER_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [markingId, setMarkingId] = useState<string | null>(null);
@@ -77,7 +81,9 @@ export function ReceivablesList() {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await listReceivablesAction();
+      const settings = await getReceivableReminderSettingsAction();
+      setReminderSettings(settings);
+      const data = await listReceivablesAction(settings.showWithinDays);
       setRows(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "查詢失敗，請稍後再試");
@@ -103,10 +109,10 @@ export function ReceivablesList() {
     }
   }
 
-  // 只留下「入住日期在未來 10 天內」的（含已經入住、還沒收尾款的
+  // 只留下「入住日期在未來 N 天內」的（含已經入住、還沒收尾款的
   // 過期狀況），依入住日期由近到遠排序——最急迫的排最前面。
   const visibleRows = (rows ?? [])
-    .filter((r) => daysUntil(r.checkIn) <= SHOW_WITHIN_DAYS)
+    .filter((r) => daysUntil(r.checkIn) <= reminderSettings.showWithinDays)
     .sort((a, b) => daysUntil(a.checkIn) - daysUntil(b.checkIn));
 
   const totalOutstanding = visibleRows.reduce((sum, r) => sum + r.amount, 0);
@@ -125,7 +131,7 @@ export function ReceivablesList() {
             應收查詢
           </h1>
           <p className="mt-1 text-[11px]" style={{ color: colors.muted }}>
-            只顯示入住日期在未來 {SHOW_WITHIN_DAYS} 天內（含已逾期）的應收款
+            只顯示入住日期在未來 {reminderSettings.showWithinDays} 天內（含已逾期）的應收款
           </p>
         </header>
 
@@ -143,7 +149,7 @@ export function ReceivablesList() {
 
         {!isLoading && visibleRows.length === 0 && (
           <p className="text-xs" style={{ color: colors.muted }}>
-            未來 {SHOW_WITHIN_DAYS} 天內沒有應收款項。
+            未來 {reminderSettings.showWithinDays} 天內沒有應收款項。
           </p>
         )}
 
@@ -160,7 +166,7 @@ export function ReceivablesList() {
 
             <div className="mt-4 flex flex-col gap-3">
               {visibleRows.map((row) => {
-                const overdue = daysUntil(row.checkIn) < OVERDUE_WITHIN_DAYS;
+                const overdue = daysUntil(row.checkIn) < reminderSettings.overdueWithinDays;
                 return (
                   <div key={row.paymentId} className="border p-3 text-xs" style={{ borderColor: overdue ? colors.alert : colors.line }}>
                     <div className="flex items-baseline justify-between">

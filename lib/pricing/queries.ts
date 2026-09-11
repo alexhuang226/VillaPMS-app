@@ -681,6 +681,16 @@ export interface ReservationDetail {
   pets: number;
   visitors: number;
   finalTotal: number;
+  /** 優惠折扣金額——訂單本身不存逐項計價資料（見上面 ReservationDetail
+   * 開頭型別檢查的說明），這個欄位只用來讓「訂單詳情/訂房確認單」
+   * 重新算出的費用明細（lib/pricing/queries.ts 之外，見
+   * reservations-search.tsx 的 recalculatedQuote）能正確扣掉優惠、
+   * 逐項總和才會等於 finalTotal；不會回頭影響 finalTotal 本身，
+   * finalTotal 一律是 authoritative 的實收金額，兩者要保持一致要
+   * 靠職員自己填對這個欄位。從報價單轉單時會自動帶入報價單當初的
+   * discountAmount（見 app/actions/quote.ts confirmReservationFromQuoteAction），
+   * 直接建立的訂單（Airbnb 等 OTA）預設 0，不開放在新增訂單表單填。 */
+  discountAmount: number;
   status: string;
   paymentStatus: string;
   bookingSource: string;
@@ -711,7 +721,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
   const { data: rowData, error } = await supabase
     .from("reservations")
     .select(
-      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, status, payment_status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, created_at, guests(name, phone), properties(code, name, property_settings(address, parking_info, map_url))"
+      "id, reservation_no, property_id, check_in, check_out, adults, children, infants, pets, visitors, final_total, discount_amount, status, payment_status, booking_source, needs_invoice, invoice_title, invoice_tax_id, four_person_suite_count, four_person_downgrade_count, double_suite_count, double_plain_count, created_at, guests(name, phone), properties(code, name, property_settings(address, parking_info, map_url))"
     )
     .eq("id", reservationId)
     .maybeSingle();
@@ -767,6 +777,7 @@ export async function getReservationDetail(reservationId: string): Promise<Reser
     pets: Number(row.pets ?? 0),
     visitors: Number(row.visitors ?? 0),
     finalTotal: Number(row.final_total),
+    discountAmount: Number(row.discount_amount ?? 0),
     status: row.status as string,
     paymentStatus: (row.payment_status as string) ?? "pending_deposit",
     bookingSource: row.booking_source as string,
@@ -813,21 +824,76 @@ export interface ReceivableSummary {
 }
 
 /**
- * 查詢還沒收到的款項（payments.status = 'pending'，方向是應收）。
- * 依到期日由近到遠排序，最急迫的排最前面。
+ * 應收帳款清單的兩個提醒天數設定——存在 organizations 表（目前系統
+ * 只有單一組織，直接當成全域設定），讓職員自己在「應收帳款」畫面
+ * 上調整，不用每次都要改程式碼常數再重新部署。
+ *
+ * - showWithinDays：只顯示「入住日期在未來 N 天內」的應收款（含已
+ *   逾期的），對應 reservations-search.tsx／receivables-list.tsx 的
+ *   RECEIVABLES_SHOW_WITHIN_DAYS／SHOW_WITHIN_DAYS。
+ * - overdueWithinDays：「離入住不到 N 天」還沒收款就標紅色警示，
+ *   對應同兩個檔案的 RECEIVABLES_OVERDUE_WITHIN_DAYS／OVERDUE_WITHIN_DAYS。
  */
+export interface ReceivableReminderSettings {
+  showWithinDays: number;
+  overdueWithinDays: number;
+}
+
+const DEFAULT_RECEIVABLE_REMINDER_SETTINGS: ReceivableReminderSettings = {
+  showWithinDays: 8,
+  overdueWithinDays: 8,
+};
+
+export async function getReceivableReminderSettings(): Promise<ReceivableReminderSettings> {
+  const supabase = createServiceRoleClient();
+  const { data, error } = await supabase
+    .from("organizations")
+    .select("receivable_show_within_days, receivable_overdue_within_days")
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`查詢應收帳款提醒天數設定失敗：${error.message}`);
+  }
+  const row = data as any;
+  return {
+    showWithinDays: Number(row?.receivable_show_within_days ?? DEFAULT_RECEIVABLE_REMINDER_SETTINGS.showWithinDays),
+    overdueWithinDays: Number(row?.receivable_overdue_within_days ?? DEFAULT_RECEIVABLE_REMINDER_SETTINGS.overdueWithinDays),
+  };
+}
+
+export async function updateReceivableReminderSettings(fields: ReceivableReminderSettings): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const organizationId = await getSingleOrganizationId();
+  const { error } = await (supabase.from("organizations") as any)
+    .update({
+      receivable_show_within_days: fields.showWithinDays,
+      receivable_overdue_within_days: fields.overdueWithinDays,
+    })
+    .eq("id", organizationId);
+  if (error) {
+    throw new Error(`更新應收帳款提醒天數設定失敗：${error.message}`);
+  }
+}
+
 /**
  * 查詢還沒收到的款項（payments.status = 'pending'，方向是應收），
- * 只列出「到期日在未來 10 天內」的（含已經逾期的——逾期的更急迫，
- * 不該被這個篩選條件擋掉，只有還很久以後才到期、目前不急的才濾
- * 掉）。依到期日由近到遠排序，最急迫的排最前面。
+ * 只列出「到期日在未來 showWithinDays 天內」的（含已經逾期的——逾期
+ * 的更急迫，不該被這個篩選條件擋掉，只有還很久以後才到期、目前不
+ * 急的才濾掉）。依到期日由近到遠排序，最急迫的排最前面。
+ *
+ * showWithinDays 由呼叫端傳入（來自上面 getReceivableReminderSettings
+ * 讀到的、職員可自行調整的設定值），不是寫死的常數——這裡用的是
+ * due_date 不是 check_in（due_date 通常等於或早於入住日期，用一樣的
+ * 天數當這裡的寬鬆前置篩選不會漏掉「入住日期在這個天數內」該顯示的
+ * 資料），呼叫端（reservations-search.tsx／receivables-list.tsx）用
+ * 入住日期篩選時要用同一個天數，兩邊才會一致。
  */
-export async function listReceivables(): Promise<ReceivableSummary[]> {
+export async function listReceivables(showWithinDays: number): Promise<ReceivableSummary[]> {
   const supabase = createServiceRoleClient();
 
   const cutoff = new Date();
   cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() + 10);
+  cutoff.setDate(cutoff.getDate() + showWithinDays);
   const cutoffDateStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(
     cutoff.getDate()
   ).padStart(2, "0")}`;
@@ -839,11 +905,11 @@ export async function listReceivables(): Promise<ReceivableSummary[]> {
     )
     .eq("status", "pending")
     .eq("direction", "receivable")
-    // due_date 在 10 天內「或者根本沒填」都算——沒填不代表不急，
-    // 用 .lte() 單獨篩選的話，SQL 對 NULL 的比較一律是 false，
-    // due_date 是 NULL 的付款記錄會被整個排除、永遠不會出現在應收
-    // 清單裡，不管它實際上有多急。歷史資料匯入那批（訂房記錄表
-    // 匯入時透過 SQL 直接寫入，沒有經過這裡的確認訂房流程）就是
+    // due_date 在 showWithinDays 天內「或者根本沒填」都算——沒填不
+    // 代表不急，用 .lte() 單獨篩選的話，SQL 對 NULL 的比較一律是
+    // false，due_date 是 NULL 的付款記錄會被整個排除、永遠不會出現
+    // 在應收清單裡，不管它實際上有多急。歷史資料匯入那批（訂房記錄
+    // 表匯入時透過 SQL 直接寫入，沒有經過這裡的確認訂房流程）就是
     // due_date 全部是 NULL 的例子，之前就是因為這樣才會查不到。
     .or(`due_date.lte.${cutoffDateStr},due_date.is.null`)
     .order("due_date", { ascending: true, nullsFirst: true });
@@ -1060,6 +1126,9 @@ export interface ReservationUpdateFields extends ReservationAddOnFields {
   bookingSource: string;
   status: string;
   finalTotal: number;
+  /** 優惠折扣金額——見 ReservationDetail.discountAmount 的說明，只
+   * 影響「費用明細」逐項呈現扣掉的那一行，不會自動重算 finalTotal */
+  discountAmount: number;
   /** 訂金金額——可以直接改，尾款會用「總金額－這個新的訂金金額」
    * 重算，不是讀資料庫裡原本記錄的舊訂金金額 */
   depositAmount: number;
@@ -1091,6 +1160,7 @@ export async function updateReservation(reservationId: string, fields: Reservati
       booking_source: fields.bookingSource,
       status: fields.status,
       final_total: fields.finalTotal,
+      discount_amount: fields.discountAmount,
       needs_invoice: fields.needsInvoice,
       invoice_title: fields.needsInvoice ? fields.invoiceTitle : null,
       invoice_tax_id: fields.needsInvoice ? fields.invoiceTaxId : null,

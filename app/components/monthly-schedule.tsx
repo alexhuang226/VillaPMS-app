@@ -88,6 +88,7 @@ function formatYMD(year: number, month: number, day: number): string {
  * 這裡改成房務班表自己維護一份，不再依賴那個檔案 */
 const BOOKING_SOURCE_LABEL: Record<string, string> = {
   line_official: "LINE官方",
+  facebook: "Facebook",
   airbnb: "Airbnb",
   walk_in: "現場",
   phone: "電話",

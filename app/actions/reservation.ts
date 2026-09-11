@@ -14,11 +14,13 @@ import {
   getExtraBedEligibleRooms,
   getPropertyId,
   getPropertyRoomCounts,
+  getReceivableReminderSettings,
   getReservationDetail,
   getReservationsForMonthCalendar,
   listReceivables,
   listReservations,
   markPaymentPaid,
+  updateReceivableReminderSettings,
   updateReservation,
   updateReservationPaymentStatus,
   updateReservationStatus,
@@ -27,6 +29,7 @@ import type {
   CalendarReservation,
   CreateReservationFields,
   ExtraBedRoomOption,
+  ReceivableReminderSettings,
   ReceivableSummary,
   ReservationDetail,
   ReservationSummary,
@@ -47,12 +50,27 @@ export async function getReservationDetailAction(reservationId: string): Promise
   return getReservationDetail(reservationId);
 }
 
-export async function listReceivablesAction(): Promise<ReceivableSummary[]> {
-  return listReceivables();
+/** showWithinDays 傳入呼叫端目前的「顯示天數」設定（見
+ * getReceivableReminderSettingsAction），用來當伺服器端 due_date
+ * 前置篩選的寬鬆邊界——見 lib/pricing/queries.ts listReceivables() 的
+ * 說明。 */
+export async function listReceivablesAction(showWithinDays: number): Promise<ReceivableSummary[]> {
+  return listReceivables(showWithinDays);
 }
 
 export async function markPaymentPaidAction(paymentId: string): Promise<void> {
   return markPaymentPaid(paymentId);
+}
+
+/** 應收帳款畫面上「顯示天數」／「逾期天數」這兩個提醒設定——職員可以
+ * 自己調整，不用改程式碼，見 lib/pricing/queries.ts
+ * getReceivableReminderSettings() 的說明。 */
+export async function getReceivableReminderSettingsAction(): Promise<ReceivableReminderSettings> {
+  return getReceivableReminderSettings();
+}
+
+export async function updateReceivableReminderSettingsAction(fields: ReceivableReminderSettings): Promise<void> {
+  return updateReceivableReminderSettings(fields);
 }
 
 /**

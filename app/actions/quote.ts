@@ -398,7 +398,7 @@ const ITEM_TYPE_BY_LABEL: Record<string, string> = {
   提前入住: "early_checkin",
 };
 
-export type BookingSource = "line_official" | "airbnb" | "walk_in" | "phone" | "other_ota" | "other";
+export type BookingSource = "line_official" | "facebook" | "airbnb" | "walk_in" | "phone" | "other_ota" | "other";
 
 export interface ConfirmReservationDetails {
   guestName: string;
@@ -518,6 +518,12 @@ export async function confirmReservationFromQuoteAction(
         visitors: request.visitorQty ?? 0,
         quoted_total: quote.packageTotal,
         final_total: quote.packageTotal,
+        // 報價單當初算出的優惠折扣金額——訂單本身不會重算金額（見
+        // 上面 reservationId 之後房型明細的說明），但要記下這個數字，
+        // 不然訂單詳情頁面重新算逐項費用明細時（見
+        // reservations-search.tsx 的 recalculatedQuote）會漏算優惠，
+        // 逐項總和會跟 final_total 對不上
+        discount_amount: quote.discountAmount,
         currency: "TWD",
         needs_invoice: request.invoice?.required ?? false,
         invoice_title: request.invoice?.required ? details.invoiceTitle ?? null : null,
