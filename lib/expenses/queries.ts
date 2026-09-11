@@ -13,7 +13,7 @@ import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { getSingleOrganizationId } from "@/lib/pricing/queries";
 
 /** 固定的費用類別選單，避免手動輸入出現各式各樣不一致的名稱 */
-export const EXPENSE_CATEGORIES = ["房租", "薪資", "水電瓦斯", "清潔用品", "備品", "維修保養", "其他"];
+export const EXPENSE_CATEGORIES = ["房租", "薪資", "水電瓦斯", "電視網路", "清潔用品", "備品", "維修保養", "其他"];
 
 export interface ExpenseDetail {
   id: string;
