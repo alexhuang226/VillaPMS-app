@@ -8,6 +8,7 @@
  * 改成組織自訂清單——目前系統只有一個組織，沒有這個需求。
  */
 
+import { updateTag } from "next/cache";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
 export type HolidayDayType = "holiday" | "festival" | "lunar_new_year" | "new_year_eve";
@@ -69,6 +70,7 @@ export async function createHoliday(date: string, name: string, dayType: Holiday
       .update({ name, day_type: dayType })
       .eq("id", (existing as any).id);
     if (error) throw new Error(`更新節日失敗：${error.message}`);
+    updateTag("holidays");
     return;
   }
 
@@ -81,6 +83,7 @@ export async function createHoliday(date: string, name: string, dayType: Holiday
   if (error) {
     throw new Error(`新增節日失敗：${error.message}`);
   }
+  updateTag("holidays");
 }
 
 export async function updateHoliday(id: string, name: string, dayType: HolidayDayType): Promise<void> {
@@ -89,6 +92,7 @@ export async function updateHoliday(id: string, name: string, dayType: HolidayDa
   if (error) {
     throw new Error(`更新節日失敗：${error.message}`);
   }
+  updateTag("holidays");
 }
 
 export async function deleteHoliday(id: string): Promise<void> {
@@ -97,6 +101,7 @@ export async function deleteHoliday(id: string): Promise<void> {
   if (error) {
     throw new Error(`刪除節日失敗：${error.message}`);
   }
+  updateTag("holidays");
 }
 
 export interface BulkHolidayEntry {
@@ -147,5 +152,6 @@ export async function bulkImportHolidays(entries: BulkHolidayEntry[]): Promise<{
     if (error) throw new Error(`批次更新節日失敗（${e.date}）：${error.message}`);
   }
 
+  updateTag("holidays");
   return { imported: entries.length };
 }

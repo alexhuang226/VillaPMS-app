@@ -8,6 +8,7 @@
  * action（伺服器端）被呼叫，不會暴露給瀏覽器。
  */
 
+import { unstable_cache, updateTag } from "next/cache";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { roomAllocationSummaryItems } from "./quote-message";
 import type {
@@ -21,8 +22,35 @@ import type {
 } from "./types";
 import type { HolidayCategory, HolidayMap } from "./day-type";
 
-/** 依 property code 取得 property_id（可自行加上快取層） */
-export async function getPropertyId(propertyCode: PropertyCode): Promise<string> {
+/**
+ * 底下這幾個函式（getPropertyId／getNightlyRateTable／
+ * getFlatServicePrices／getPropertyRoomCounts／getBaseGuestsByDayType／
+ * getHolidayMap／getPropertyDisplayInfo）查的都是「民宿固定設定」
+ * （房價表、加購服務定價、房間數量、包棟基本人數、節日清單、民宿
+ * 名稱/匯款帳戶），不是「這筆訂單/報價專屬」的資料——同一間民宿在
+ * 短時間內查好幾次，結果基本上不會變。但 calculateQuoteAction()
+ * 每次被呼叫（例如訂單管理每點開一筆訂單，就會重新算一次報價明細
+ * 用來顯示逐項費用）都會把這些全部重新查一次，變成訂單管理「每次
+ * 點擊都要等」的主因之一。
+ *
+ * 用 unstable_cache 包起來，同一組參數在 revalidate 秒數內重複呼叫
+ * 直接從快取回傳，不用再連一次 Supabase。300 秒（5 分鐘）這個上限是
+ * 保險用的——真正即時生效的，是各自的管理頁面存檔時呼叫
+ * updateTag()（見 rate-editor.ts／holidays.ts／
+ * updatePropertySettings() 底下的呼叫；用 updateTag 不是
+ * revalidateTag——這兩個都能清快取，但 updateTag 是 Next.js 16 給
+ * Server Action 用的「立刻生效」版本，呼叫完當下這次 request 就能讀到
+ * 新資料，revalidateTag 預設是 stale-while-revalidate，當下這次還是
+ * 可能讀到剛剛存檔前的舊值），改完價格/節日/民宿資料立刻生效，不用等
+ * 5 分鐘。5 分鐘上限只是防呆，避免有人直接在 Supabase Dashboard 手動
+ * 改資料庫（沒有經過這裡的 updateTag）時，快取卡住太久沒更新。
+ *
+ * ⚠️ services（加購服務定價）／rooms（房間數量）這兩張表目前系統
+ * 裡沒有對應的編輯頁面/action，只能直接在 Supabase Dashboard 改，
+ * 沒有 updateTag 可以掛——這兩張表的快取完全只靠 5 分鐘 TTL 過期，
+ * 直接在 Dashboard 改完要等到 5 分鐘後才會反映到報價結果。
+ */
+async function getPropertyIdUncached(propertyCode: PropertyCode): Promise<string> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("properties")
@@ -35,6 +63,10 @@ export async function getPropertyId(propertyCode: PropertyCode): Promise<string>
   }
   return data.id as string;
 }
+export const getPropertyId = unstable_cache(getPropertyIdUncached, ["property-id"], {
+  tags: ["properties"],
+  revalidate: 300,
+});
 
 /**
  * 取得某民宿在指定價格分類（regular/holiday/festival/lunar_new_year/
@@ -43,7 +75,7 @@ export async function getPropertyId(propertyCode: PropertyCode): Promise<string>
  * regular 對應資料庫的 weekday 或 peak day_type（兩者價格必然相同，
  * 取其中一筆即可，這裡固定查 weekday）。
  */
-export async function getNightlyRateTable(
+async function getNightlyRateTableUncached(
   propertyId: string,
   priceCategory: PriceCategory
 ): Promise<NightlyRateTable> {
@@ -110,9 +142,13 @@ export async function getNightlyRateTable(
 
   return table;
 }
+export const getNightlyRateTable = unstable_cache(getNightlyRateTableUncached, ["nightly-rate-table"], {
+  tags: ["rates"],
+  revalidate: 300,
+});
 
 /** 取得某民宿的固定加購服務價格（加床／加房／寵物清潔／烤肉／餐車／提前入住／訪客） */
-export async function getFlatServicePrices(propertyId: string): Promise<FlatServicePrices> {
+async function getFlatServicePricesUncached(propertyId: string): Promise<FlatServicePrices> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("services")
@@ -152,6 +188,10 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
 
   return result;
 }
+export const getFlatServicePrices = unstable_cache(getFlatServicePricesUncached, ["flat-service-prices"], {
+  tags: ["services"],
+  revalidate: 300,
+});
 
 /**
  * 取得該民宿的固定房型數量（獨立雙人套房／雙人雅房實際房間數，
@@ -159,7 +199,7 @@ export async function getFlatServicePrices(propertyId: string): Promise<FlatServ
  * 直接使用（allocateFourPersonRooms 已經內建各民宿的房間總數），
  * 但仍一併回傳方便前端顯示或做人數上限校驗。
  */
-export async function getPropertyRoomCounts(propertyId: string): Promise<PropertyRoomCounts> {
+async function getPropertyRoomCountsUncached(propertyId: string): Promise<PropertyRoomCounts> {
   const supabase = createServiceRoleClient();
 
   const [{ data: roomRows, error: roomError }, { data: propRow, error: propError }] =
@@ -196,6 +236,10 @@ export async function getPropertyRoomCounts(propertyId: string): Promise<Propert
     freePetAllowance: Number(propRow.free_pet_allowance),
   };
 }
+export const getPropertyRoomCounts = unstable_cache(getPropertyRoomCountsUncached, ["property-room-counts"], {
+  tags: ["rooms"],
+  revalidate: 300,
+});
 
 /**
  * 取得該民宿各 day_type 的「包棟基本人數」（rate_rules.base_guests）。
@@ -203,7 +247,7 @@ export async function getPropertyRoomCounts(propertyId: string): Promise<Propert
  * 春節/跨年 4 個分類在匯入時共用同一個「節假日基本人數」值。
  * 用於報價前檢查：入住人數不足基本人數時不允許產生報價。
  */
-export async function getBaseGuestsByDayType(
+async function getBaseGuestsByDayTypeUncached(
   propertyId: string
 ): Promise<Record<DayType, number>> {
   const supabase = createServiceRoleClient();
@@ -231,12 +275,22 @@ export async function getBaseGuestsByDayType(
 
   return result;
 }
+export const getBaseGuestsByDayType = unstable_cache(getBaseGuestsByDayTypeUncached, ["base-guests-by-day-type"], {
+  tags: ["rates"],
+  revalidate: 300,
+});
 
 /**
  * 取得節日清單對照表（holidays 表），組織自訂清單優先於全平台共用清單。
  * @param organizationId 若為 null，只取全平台共用清單（organization_id is null）
+ *
+ * ⚠️ 這裡不能直接把 unstable_cache 包在回傳 Map 的函式外面——
+ * unstable_cache 會把回傳值序列化存起來，Map 不是純 JSON 資料結構，
+ * 序列化/反序列化一輪之後會壞掉（變成空物件）。改成快取的部分只回傳
+ * 純陣列（[日期, 分類] tuple 的清單，JSON-safe），最外層 getHolidayMap
+ * 再把這個陣列組成 Map——保持對外的回傳型別不變，呼叫端完全不用改。
  */
-export async function getHolidayMap(organizationId: string | null): Promise<HolidayMap> {
+async function getHolidayEntriesUncached(organizationId: string | null): Promise<[string, HolidayCategory][]> {
   const supabase = createServiceRoleClient();
   let query = supabase.from("holidays").select("holiday_date, day_type");
 
@@ -247,14 +301,23 @@ export async function getHolidayMap(organizationId: string | null): Promise<Holi
   const { data, error } = await query;
   if (error) throw new Error(`查詢節日清單失敗：${error.message}`);
 
-  const map: HolidayMap = new Map();
+  const entries: [string, HolidayCategory][] = [];
   for (const row of data ?? []) {
     const dt = row.day_type as string;
     if (dt === "holiday" || dt === "festival" || dt === "lunar_new_year" || dt === "new_year_eve") {
-      map.set(row.holiday_date as string, dt as HolidayCategory);
+      entries.push([row.holiday_date as string, dt as HolidayCategory]);
     }
   }
-  return map;
+  return entries;
+}
+const getHolidayEntriesCached = unstable_cache(getHolidayEntriesUncached, ["holiday-entries"], {
+  tags: ["holidays"],
+  revalidate: 300,
+});
+
+export async function getHolidayMap(organizationId: string | null): Promise<HolidayMap> {
+  const entries = await getHolidayEntriesCached(organizationId);
+  return new Map(entries);
 }
 
 /**
@@ -266,7 +329,7 @@ export async function getHolidayMap(organizationId: string | null): Promise<Holi
  * bank_account_masked（遮罩版本）並在畫面上加註提醒，避免直接
  * 把不完整的帳號拿去給客人匯款。
  */
-export async function getPropertyDisplayInfo(
+async function getPropertyDisplayInfoUncached(
   propertyId: string
 ): Promise<{ name: string; bank: BankInfo | null }> {
   const supabase = createServiceRoleClient();
@@ -307,6 +370,10 @@ export async function getPropertyDisplayInfo(
 
   return { name: propRow.name as string, bank };
 }
+export const getPropertyDisplayInfo = unstable_cache(getPropertyDisplayInfoUncached, ["property-display-info"], {
+  tags: ["property-display"],
+  revalidate: 300,
+});
 
 /**
  * 這個系統目前只有單一組織，直接抓第一筆 organizations 記錄當作
@@ -1654,4 +1721,9 @@ export async function updatePropertySettings(propertyId: string, fields: Propert
     })
     .eq("property_id", propertyId);
   if (settingsError) throw new Error(`更新民宿設定失敗：${settingsError.message}`);
+
+  // 改了民宿名稱/匯款帳戶，getPropertyDisplayInfo() 的快取要立刻失效，
+  // 不然報價/訂單頁面在 5 分鐘 TTL 過期前還是會顯示改之前的舊資料
+  updateTag("property-display");
+  updateTag("properties");
 }

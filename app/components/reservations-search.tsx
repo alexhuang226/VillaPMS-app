@@ -635,8 +635,16 @@ export function ReservationsSearch({
   // 人數低於基本人數（訂單本來就允許這種情況存在，見編輯報價單那邊
   // 同樣的處理），算出來的 quote 金額會被引擎強制歸零，逐項明細也
   // 會不完整。
+  //
+  // ⚠️ 管家（isHousekeepingManager）完全不顯示金額——兩個用到
+  // recalculatedQuote 的地方（費用明細區塊、隱藏的訂房確認單截圖卡片）
+  // 都用 !isHousekeepingManager 包住，管家永遠看不到這個計算結果。
+  // 但沒有這個 isHousekeepingManager 判斷的話，管家每點開一筆訂單，
+  // 一樣會觸發這整串報價引擎查詢（見 lib/pricing/queries.ts 開頭的
+  // 說明），白白浪費一輪 Supabase 查詢——訂單管理「每次點擊都要等」
+  // 的其中一個成因。
   useEffect(() => {
-    if (!detail) {
+    if (!detail || isHousekeepingManager) {
       setRecalculatedQuote(null);
       return;
     }
@@ -688,7 +696,7 @@ export function ReservationsSearch({
     return () => {
       cancelled = true;
     };
-  }, [detail]);
+  }, [detail, isHousekeepingManager]);
 
   // 年/月留到 mount 後才設定成「今天」，避免 SSR 跟 client 算出的
   // 「今天」不一樣造成 hydration 不一致的警告/閃爍（跟 quote-form.tsx

@@ -18,6 +18,7 @@
  * 改一次這個編輯功能。
  */
 
+import { updateTag } from "next/cache";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 
 export interface RoomConfigPricing {
@@ -148,4 +149,14 @@ export async function updateRoomConfigPricing(update: RoomConfigPriceUpdate): Pr
       throw new Error(`更新房價失敗：${error.message}`);
     }
   }
+
+  // 改了房價，lib/pricing/queries.ts 的 getNightlyRateTable() 快取
+  // （tag "rates"）要立刻失效，不然報價/訂單頁面在 5 分鐘 TTL 過期前
+  // 還是會算出改之前的舊價格。用 updateTag 不是 revalidateTag——見
+  // queries.ts 檔案開頭快取策略的說明，updateTag 才能保證這次
+  // Server Action 當下就讀到新價格。這裡沒有單一 propertyId 可以
+  // 精準指定（updates 是用 tier id 定位，不是用 property），乾脆整個
+  // "rates" tag 一起清掉——房價編輯本來就是低頻操作，多清幾間民宿的
+  // 快取成本可以忽略。
+  updateTag("rates");
 }
