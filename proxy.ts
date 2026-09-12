@@ -142,10 +142,21 @@ export async function proxy(request: NextRequest) {
       // 建立一個新的 NextResponse.next() 卻沒有把這些 cookie 複製過
       // 去，會把剛刷新好的 session cookie 弄丟，導致使用者的登入
       // session 沒辦法正常延續。
+      // ⚠️ HTTP header 的值規格上只能是 ByteString（0–255），Node.js
+      // runtime 的 Headers.set() 對這點抓得很嚴格——職稱／簡稱是中文
+      // （例如「房務員」「淑華」），字元碼位遠超過 255，直接 set 會
+      // 直接 throw TypeError（"Cannot convert argument to a ByteString
+      // ..."），整個 try block 被下面的 catch 吃掉，等於角色限制/
+      // 導去房務班表這段完全沒執行、卻也沒有任何錯誤訊息，非常難查。
+      // Next.js 16 把 proxy 預設 runtime 從 Edge 改成 Node.js 之後才
+      // 暴露出這個問題（Edge 的 Headers 實作比較寬鬆）。用
+      // encodeURIComponent() 轉成純 ASCII 再塞進 header，讀取端
+      // （lib/auth/current-employee.ts）要記得對應 decodeURIComponent()
+      // 解回來。
       const requestHeaders = new Headers(request.headers);
       requestHeaders.set("x-employee-id", employeeId);
-      requestHeaders.set("x-employee-position", position);
-      requestHeaders.set("x-employee-short-name", shortName);
+      requestHeaders.set("x-employee-position", encodeURIComponent(position));
+      requestHeaders.set("x-employee-short-name", encodeURIComponent(shortName));
       requestHeaders.set("x-employee-allowed-property-ids", allowedPropertyIds.join(","));
       const responseWithHeaders = NextResponse.next({ request: { headers: requestHeaders } });
       supabaseResponse.cookies.getAll().forEach((cookie) => {

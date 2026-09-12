@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Fraunces, Work_Sans } from "next/font/google";
+import { logoutAction } from "@/app/actions/auth";
 import {
   createStaffAssignmentAction,
   deleteStaffAssignmentAction,
@@ -189,6 +190,7 @@ function EmployeeMultiSelect({
 export function MonthlySchedule({
   isHousekeepingStaff = false,
   currentEmployeeId = null,
+  currentEmployeeShortName = null,
   isPropertyRestricted = false,
   allowedPropertyIds = [],
   initialAssignments = null,
@@ -199,6 +201,11 @@ export function MonthlySchedule({
 }: {
   isHousekeepingStaff?: boolean;
   currentEmployeeId?: string | null;
+  /** 目前登入者的簡稱，顯示在標題下面——房務員／清潔員／洗衣公司
+   * 登入後會被 proxy.ts 直接導來這頁、看不到首頁（見 proxy.ts 的
+   * shouldRedirectRootToMonthly），首頁原本「目前登入：xxx」那行
+   * 資訊沒地方顯示，這裡補上同一種呈現方式 */
+  currentEmployeeShortName?: string | null;
   /** 只負責部分民宿的職稱（清潔員/洗衣公司）——這個角色看到的月曆
    * 大幅簡化，每天只顯示 allowedPropertyIds 裡的民宿有沒有退房，
    * 不顯示客人資料、房務人員指派狀況、本月出勤統計等其他內容 */
@@ -231,7 +238,14 @@ export function MonthlySchedule({
   // 一個月才會出現班表」這個問題的成因）。
   const [isLoading, setIsLoading] = useState(initialAssignments === null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  // 預設直接選中「今天」，一進頁面月曆跟本月出勤統計之間就能看到本日
+  // 班表內容，不用先點月曆才看得到——伺服器端 initialYear/initialMonth
+  // 本來就是抓現在的年月（見 page.tsx），下面那個載入月份資料的
+  // useEffect 在這個情境會跳過第一次查詢（skippedInitialLoadRef），
+  // 不會把這裡的預設值蓋回 null。
+  const [selectedDate, setSelectedDate] = useState<string | null>(
+    formatYMD(now.getFullYear(), now.getMonth() + 1, now.getDate())
+  );
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // 只看某一間民宿／某一位房務人員的排班狀況——null 代表不篩選
@@ -287,17 +301,43 @@ export function MonthlySchedule({
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  const skippedInitialLoadRef = useRef(false);
+  // 記錄「上一次這個 effect 真正處理過的年/月」——用來擋開發模式下
+  // React Strict Mode 對 effect 的重複呼叫（mount 後會故意執行兩次）。
+  // 原本用一個布林值 ref（只記「是不是第一次執行」）在 Strict Mode
+  // 下會失效：第一次執行時判斷「有初始資料」成立、標記完就 return
+  // 跳過；但 Strict Mode 緊接著馬上重複執行同一次 effect，這時布林
+  // 值已經是 true，會直接落到下面呼叫 loadMonth()——而 loadMonth()
+  // 一定會 setSelectedDate(null)，等於初始畫面剛掛載完就馬上把預設
+  // 選中「今天」的 selectedDate 洗掉，使用者完全看不到（必須自己點
+  // 一次月曆才會重新出現）。改成記錄「年-月」這個 key，只有 key 真的
+  // 改變（使用者實際換月份）才會再跑一次，兩次呼叫的 key 相同時第二
+  // 次直接略過，不會重複打 API，也不會誤觸 loadMonth 洗掉 selectedDate。
+  const lastHandledMonthKeyRef = useRef<string | null>(null);
+  // 「使用者是不是已經離開過一開始顯示的那個月份」——只有還沒離開過
+  // 的時候，才能重用伺服器預查好的 initialAssignments。沒有這個旗標
+  // 的話，換到別的月份再切回原本那個月份時，年/月會跟 initialYear/
+  // initialMonth 剛好又對上，會被誤判成「又是第一次載入」而再次跳過
+  // loadMonth()——但這時候 assignments/coverage state 早就在切到別的
+  // 月份時被換成那個月份的資料了，切回來卻沒有真的重新查詢，畫面上
+  // 顯示的其實是上一個月份殘留的舊資料（症狀：原本這個月有好幾天有
+  // 排班，切走再切回來後只剩下剛好落在前後補的跨月格子裡那幾天）。
+  const hasNavigatedAwayFromInitialMonthRef = useRef(false);
 
   useEffect(() => {
     if (year === null || month === null) return;
+    const key = `${year}-${month}`;
+    if (lastHandledMonthKeyRef.current === key) return;
+    lastHandledMonthKeyRef.current = key;
+
     // Server component 已經先查好符合目前年/月的初始資料的話，第一次
-    // 執行時跳過，理由跟 reservations-search.tsx 的同一種優化一致
-    if (!skippedInitialLoadRef.current) {
-      skippedInitialLoadRef.current = true;
-      if (initialAssignments !== null && initialYear === year && initialMonth === month) {
-        return;
-      }
+    // 執行時跳過，理由跟 reservations-search.tsx 的同一種優化一致——
+    // 但只有「還沒離開過初始月份」時才適用，見上面旗標的說明
+    const isInitialMonth = initialAssignments !== null && initialYear === year && initialMonth === month;
+    if (isInitialMonth && !hasNavigatedAwayFromInitialMonthRef.current) {
+      return;
+    }
+    if (!isInitialMonth) {
+      hasNavigatedAwayFromInitialMonthRef.current = true;
     }
     loadMonth(year, month);
   }, [year, month]);
@@ -707,9 +747,9 @@ export function MonthlySchedule({
     return (
       <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
         <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
-          <Link href="/" className="text-xs" style={{ color: colors.blue }}>
-            ← 返回首頁
-          </Link>
+          {/* 這個角色（清潔員/洗衣公司）登入後被 proxy.ts 導來這頁就
+              出不去首頁了（見 shouldRedirectRootToMonthly），「返回
+              首頁」點了也只會被導回這頁，不放這個連結 */}
           <header className="mb-6 text-center">
             <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
               宜蘭・包棟民宿
@@ -717,6 +757,11 @@ export function MonthlySchedule({
             <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
               房務班表
             </h1>
+            {currentEmployeeShortName && (
+              <p className="mt-1 text-xs" style={{ color: colors.muted }}>
+                目前登入：{currentEmployeeShortName}
+              </p>
+            )}
           </header>
 
           <div className="mb-2 flex items-center justify-between">
@@ -775,6 +820,21 @@ export function MonthlySchedule({
           <p className="mt-4 text-[11px] leading-relaxed" style={{ color: colors.muted }}>
             日期是退房日（打掃整理是客人離開後才進行，準備給下一組客人）。有顯示民宿名稱的日期，代表當天有退房，請前往處理。
           </p>
+
+          {/* 這個角色進不了首頁（見上面的說明），變更密碼／登出原本
+              只在首頁放，這裡要補一份，不然完全沒地方可以按 */}
+          <Link
+            href="/change-password"
+            className="mt-4 block w-full border py-2.5 text-center text-xs tracking-wide"
+            style={{ borderColor: colors.line, color: colors.muted }}
+          >
+            變更密碼
+          </Link>
+          <form action={logoutAction} className="mt-2">
+            <button type="submit" className="w-full border py-2.5 text-xs tracking-wide" style={{ borderColor: colors.line, color: colors.muted }}>
+              登出
+            </button>
+          </form>
         </div>
       </div>
     );
@@ -783,59 +843,37 @@ export function MonthlySchedule({
   return (
     <div className={`${body.className} flex min-h-screen w-full justify-center px-5 py-8`} style={{ backgroundColor: colors.canvas }}>
       <div className="w-full" style={{ maxWidth: "24rem", color: colors.ink }}>
-        <Link href="/" className="text-xs" style={{ color: colors.blue }}>
-          ← 返回首頁
-        </Link>
-        <header className="mb-6 text-center">
+        {/* 房務員登入後被 proxy.ts 導來這頁就出不去首頁了（見
+            shouldRedirectRootToMonthly），「返回首頁」點了也只會被
+            導回這頁，不放這個連結——管家/管理員的首頁還是正常可以
+            進去，維持顯示 */}
+        {!isHousekeepingStaff && (
+          <Link href="/" className="text-xs" style={{ color: colors.blue }}>
+            ← 返回首頁
+          </Link>
+        )}
+        <header className="relative mb-6 text-center">
           <p style={{ color: colors.muted }} className="text-[11px] tracking-[0.2em]">
             宜蘭・包棟民宿
           </p>
           <h1 className={`${display.className} text-4xl italic`} style={{ color: colors.ink }}>
             房務班表
           </h1>
-        </header>
-
-        {!isHousekeepingStaff && (
-          <div className="mb-2 flex flex-wrap justify-center gap-2">
-            <button
-              type="button"
-              onClick={() => setPropertyScheduleFilter(null)}
-              className="rounded-full border px-3 py-1.5 text-xs transition-colors"
-              style={
-                propertyScheduleFilter === null
-                  ? { borderColor: colors.ink, backgroundColor: colors.ink, color: "#FFFFFF" }
-                  : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-              }
-            >
-              全部民宿
-            </button>
-            {PROPERTY_OPTIONS.map((opt) => {
-              const active = propertyScheduleFilter === opt.value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setPropertyScheduleFilter(active ? null : opt.value)}
-                  className="rounded-full border px-3 py-1.5 text-xs transition-colors"
-                  style={
-                    active
-                      ? { borderColor: opt.color, backgroundColor: opt.color, color: colors.pineText }
-                      : { borderColor: colors.line, backgroundColor: "transparent", color: colors.ink }
-                  }
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {!isHousekeepingStaff && (
-          <div className="mb-4 flex justify-center">
+          {currentEmployeeShortName && (
+            <p className="mt-1 text-xs" style={{ color: colors.muted }}>
+              目前登入：{currentEmployeeShortName}
+            </p>
+          )}
+          {/* 房務人員／民宿篩選改放標題左右兩邊——用 absolute 定位疊在
+              標題那一行的左右側，跟訂單管理（reservations-search.tsx）
+              民宿篩選下拉選單疊在標題角落是同一種技巧，不是各自獨立
+              一份。民宿篩選放右邊，跟訂單管理民宿選單的位置對應；房務
+              人員篩選訂單管理沒有對應的東西，放左邊。 */}
+          {!isHousekeepingStaff && (
             <select
               value={staffScheduleFilter ?? ""}
               onChange={(e) => setStaffScheduleFilter(e.target.value || null)}
-              className="border-b bg-transparent px-2 py-1.5 text-xs outline-none"
+              className="absolute bottom-1 left-0 border bg-transparent px-2 py-1 text-xs outline-none"
               style={{ borderColor: colors.line, color: colors.ink }}
             >
               <option value="">全部人員</option>
@@ -845,8 +883,23 @@ export function MonthlySchedule({
                 </option>
               ))}
             </select>
-          </div>
-        )}
+          )}
+          {!isHousekeepingStaff && (
+            <select
+              value={propertyScheduleFilter ?? ""}
+              onChange={(e) => setPropertyScheduleFilter(e.target.value || null)}
+              className="absolute bottom-1 right-0 border bg-transparent px-2 py-1 text-xs outline-none"
+              style={{ borderColor: colors.line, color: colors.ink }}
+            >
+              <option value="">全部民宿</option>
+              {PROPERTY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          )}
+        </header>
 
         {year !== null && month !== null && (
           <div className="mb-4 flex items-center justify-between">
@@ -1273,6 +1326,28 @@ export function MonthlySchedule({
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* 房務員進不了首頁（見上面「返回首頁」的說明），變更密碼／
+            登出原本只在首頁放，這裡要補一份，不然完全沒地方可以按。
+            管家/管理員首頁還是正常可以進去，不用在這裡重複放一次。
+            放在 {!isLoading && ...} 區塊外面，避免月曆還在讀取時這兩
+            個按鈕也跟著消失。 */}
+        {isHousekeepingStaff && (
+          <div className="mt-6 border-t pt-3">
+            <Link
+              href="/change-password"
+              className="block w-full border py-2.5 text-center text-xs tracking-wide"
+              style={{ borderColor: colors.line, color: colors.muted }}
+            >
+              變更密碼
+            </Link>
+            <form action={logoutAction} className="mt-2">
+              <button type="submit" className="w-full border py-2.5 text-xs tracking-wide" style={{ borderColor: colors.line, color: colors.muted }}>
+                登出
+              </button>
+            </form>
           </div>
         )}
       </div>

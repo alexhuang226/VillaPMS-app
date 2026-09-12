@@ -28,7 +28,9 @@ export async function getCurrentEmployeePosition(): Promise<string | null> {
   const headerStore = await headers();
   const headerPosition = headerStore.get("x-employee-position");
   if (headerPosition !== null) {
-    return headerPosition || null;
+    // proxy.ts 那邊用 encodeURIComponent() 編碼過職稱（中文不能直接放
+    // 進 header 值，見 proxy.ts 的說明），這裡要解回來
+    return headerPosition ? decodeURIComponent(headerPosition) : null;
   }
 
   return getCurrentEmployeePositionUncached();
@@ -92,10 +94,12 @@ export async function getCurrentEmployeeInfo(): Promise<CurrentEmployeeInfo> {
   const headerId = headerStore.get("x-employee-id");
   const headerAllowedPropertyIds = headerStore.get("x-employee-allowed-property-ids");
   if (headerPosition !== null) {
+    // 同上——proxy.ts 用 encodeURIComponent() 編碼過職稱/簡稱，這裡要
+    // 解回來
     return {
       id: headerId || null,
-      position: headerPosition || null,
-      shortName: headerShortName || null,
+      position: headerPosition ? decodeURIComponent(headerPosition) : null,
+      shortName: headerShortName ? decodeURIComponent(headerShortName) : null,
       allowedPropertyIds: headerAllowedPropertyIds ? headerAllowedPropertyIds.split(",").filter(Boolean) : [],
     };
   }
