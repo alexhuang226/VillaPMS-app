@@ -6,6 +6,7 @@
  * 接 Supabase Auth 登入流程。
  */
 
+import { unstable_cache, updateTag } from "next/cache";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
 import { getSingleOrganizationId } from "@/lib/pricing/queries";
 import { roomAllocationSummaryItems } from "@/lib/pricing/quote-message";
@@ -39,8 +40,17 @@ export async function getEmployeeAllowedPropertyIds(employeeId: string): Promise
   return ((data ?? []) as any[]).map((row) => row.property_id as string);
 }
 
-/** 員工列表，給排班表單的下拉選單用，只顯示在職、職稱是管家或房務員的員工 */
-export async function listActiveEmployees(): Promise<Employee[]> {
+/**
+ * 員工列表，給排班表單的下拉選單用，只顯示在職、職稱是管家或房務員的
+ * 員工——這份名單短時間內幾乎不會變動（只有員工管理頁面新增/編輯
+ * 員工時才可能改），但房務班表每次切換月份、每次新增/修改/刪除排班
+ * 後都會重新查一次 loadMonth()，等於同一份名單被重複查詢，是月曆
+ * 操作「每次都要等」的原因之一（跟 lib/pricing/queries.ts 開頭說明的
+ * 訂單管理快取是同一種思路）。用 unstable_cache 包起來，5 分鐘 TTL
+ * 保險，真正即時生效靠 createEmployee／updateEmployee 存檔時呼叫
+ * updateTag("employees")。
+ */
+async function listActiveEmployeesUncached(): Promise<Employee[]> {
   const supabase = createServiceRoleClient();
   const { data, error } = await supabase
     .from("employees")
@@ -57,6 +67,10 @@ export async function listActiveEmployees(): Promise<Employee[]> {
     shortName: (row.short_name as string) || (row.name as string),
   }));
 }
+export const listActiveEmployees = unstable_cache(listActiveEmployeesUncached, ["active-employees"], {
+  tags: ["employees"],
+  revalidate: 300,
+});
 
 /** 員工完整資料，給員工管理頁面（建立/編輯）用 */
 export interface EmployeeDetail {
@@ -169,6 +183,7 @@ export async function createEmployee(fields: EmployeeFields): Promise<string> {
     throw new Error(`新增員工失敗：${error.message}`);
   }
   await replaceEmployeePropertyAccess(supabase, data.id as string, fields.allowedPropertyIds);
+  updateTag("employees");
   return data.id as string;
 }
 
@@ -191,6 +206,7 @@ export async function updateEmployee(id: string, fields: EmployeeFields): Promis
     throw new Error(`更新員工資料失敗：${error.message}`);
   }
   await replaceEmployeePropertyAccess(supabase, id, fields.allowedPropertyIds);
+  updateTag("employees");
 }
 
 export interface StaffAssignment {
